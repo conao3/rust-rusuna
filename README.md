@@ -79,21 +79,42 @@ the root field in the `data` of the response. `tests/differential.rs` does this 
 
 ## What is proved
 
-The Lean definitions and theorems are in `src/compiler.rs`.
+The Lean definitions and theorems are in `src/compiler.rs`. Each theorem holds for every
+schema and every query.
+
+Properties:
 
 | Theorem | Statement |
 |---|---|
 | `run_params`, `compile_params`, `resolve_values` | The parameters of a compiled query are the values of the query, in document order. |
-| `compile_erase` | The SQL text does not change when the values of the query change. |
+| `compile_erase` | The SQL text is the same for two queries that differ only in their values. |
 | `placeholders_numbered`, `slots_numbered` | The placeholders are `$1` … `$n`, in the order of the parameters. |
-| `unquote_quote`, `unquote_quoteChars` | Reading a quoted identifier back gives the name, and reading stops at its closing quote. |
-| `resolve_declared` | Every table a compiled query reads is a table of the schema. |
-| `selectionValid_iff`, `distinct_iff`, `aliasValid_iff` | An accepted selection is not empty, has at most 1000 fields, and its aliases are distinct, not empty and at most 63 bytes long. |
-| `relationValid_iff` | An accepted relationship has as many columns as references, and at least one. |
-| `lateralScan_object`, `lateralScan_array` | An object relationship reads at most one row and keeps its conditions. |
+| `unquote_quote`, `unquote_quoteChars` | `unquoteChars`, a reader of a double-quoted identifier written after PostgreSQL's lexical rules, reads a quoted name back as the name and stops at its closing quote. |
+| `resolve_declared` | Every table in the plan of a compiled query is a table of the schema. |
+| `distinct_iff` | The check for repeated aliases accepts exactly the lists without duplicates. |
 
-[lean-assay](https://github.com/conao3/lean-assay) checks that the theorems rule out
+Conditions written a second time, as an equivalence next to the definition:
+
+| Theorem | Statement |
+|---|---|
+| `aliasValid_iff`, `selectionValid_iff` | An accepted selection is not empty, has at most 1000 fields, and its aliases are distinct, not empty, not `%` and at most 63 bytes long. |
+| `relationValid_iff` | An accepted relationship has as many columns as references, and at least one. |
+| `lateralScan_object`, `lateralScan_array` | The scan of an object relationship has the limit 1 and the conditions of the relationship; the scan of an array relationship is unchanged. |
+
+[leanassay](https://github.com/conao3/lean-leanassay) checks which theorems rule out
 broken implementations. AGENTS.md lists the functions it covers and the ones it does not.
+
+Outside the proofs:
+
+- What a statement returns. The theorems are about the text and the parameters of a
+  statement, not about its result in PostgreSQL. The differential test compares the
+  results with those of the statements Hasura generates.
+- The acceptance rules of `resolve`, apart from the conditions above. Tests cover them by
+  example.
+- leanfran, which translates the Lean definitions to the Rust that runs. The tests run
+  the generated Rust.
+- `src/lib.rs`, which converts the public Rust types to the Lean types and back.
+- `unquoteChars` as a description of PostgreSQL's reader.
 
 ## Results and speed
 
@@ -124,7 +145,7 @@ nix build
 `make check` runs the format check, Clippy, the Lean proofs (`lake -d lean build --wfail`),
 the theorem audit (`lake -d audit build --wfail`), the check that the generated files match
 the source, and the tests against a throwaway PostgreSQL 17 cluster. `make bench` runs the
-measurement above, `make survey` prints the lean-assay tables of the functions outside the
+measurement above, `make survey` prints the leanassay tables of the functions outside the
 audit. Enable the optional pre-commit hook with `git config core.hooksPath .githooks`.
 
 ## License

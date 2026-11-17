@@ -17,7 +17,7 @@ commit the workflow and `actions.lock` together.
 - `src/lib.rs`: the public Rust types and their conversion to and from `model`.
 - `lean/` and `.leanfran/cache/`: the extracted Lean and the generated Rust. A build in
   the dev shell rewrites them when the block changes; commit them with the source.
-- `audit/Audit/`: the lean-assay audit `make check` runs. `audit/Survey/`: the tables of
+- `audit/Audit/`: the leanassay audit `make check` runs. `audit/Survey/`: the tables of
   the functions outside the audit (`make survey`).
 - `tests/fixtures/`: the schema, a small data set, the GraphQL queries, the statements
   Hasura v2.51.6 generates for them (`hasura/`, from `POST /v1/graphql/explain`) and the
@@ -68,21 +68,29 @@ two numbers and a unit test compares them.
 ## Theorems and the audit
 
 A theorem counts when it rules out a broken implementation. `audit/Audit/Compiler.lean`
-runs lean-assay: `#assay` breaks each function in small ways and runs the theorems on the
+runs [leanassay](https://github.com/conao3/lean-leanassay): `#assay` breaks each function in small ways and runs the theorems on the
 broken versions. `lake -d audit build --wfail` fails when no broken version of a function
 is refuted, when a broken version satisfies every theorem but changes the output (a
 hole), or when no input satisfies a theorem's hypotheses.
 
-The audit covers `quoteChars` (`unquote_quote`, `unquote_quoteChars`), `assignStep`,
-`assign` and `tokValue` (`slots_numbered`), `lateralScan` (`lateralScan_object`,
-`lateralScan_array`), and `distinct`, `aliasValid`, `selectionValid` and `relationValid`
-(`distinct_iff`, `aliasValid_iff`, `selectionValid_iff`, `relationValid_iff`): 62 broken
-versions, 54 refuted, 4 with the same output on every input tried, 4 that do not
-typecheck, no hole. A function added to the block gets a theorem and an `#assay` line in
-the same change, or an entry below.
+The audit covers nine functions: 62 broken versions, 54 refuted, 4 with the same output on
+every input tried, 4 that do not typecheck, no hole.
+
+- Properties: `quoteChars` (`unquote_quote`, `unquote_quoteChars`: reading a quoted name
+  back gives the name), `assignStep`, `assign` and `tokValue` (`slots_numbered`: the
+  placeholders are 1 to n in order) and `distinct` (`distinct_iff`: it accepts exactly
+  the lists `List.Nodup` accepts).
+- Conditions restated as an equivalence next to the definition: `aliasValid`,
+  `selectionValid` and `relationValid` (`aliasValid_iff`, `selectionValid_iff`,
+  `relationValid_iff`) and `lateralScan` (`lateralScan_object`, `lateralScan_array`).
+  They stop an edit of one side only; they do not connect the definition to anything
+  written independently.
+
+A function added to the block gets a theorem and an `#assay` line in the same change, or
+an entry below. `maxDepth`, `maxFields` and `rowAlias` are constants and are not audited.
 
 Two groups stay outside the audit. `make survey` prints their tables with hand-written
-generators, since the generators lean-assay derives for `Node` and `Selection` do not
+generators, since the generators leanassay derives for `Node` and `Selection` do not
 terminate.
 
 - `condToks`, `scanToks`, `joinToks`, `joinsToks`, `emit` and `compile` build the SQL
@@ -97,7 +105,7 @@ terminate.
   error. `invalid_queries_are_rejected` in `tests/compile.rs` pins the rules by example.
   33 versions do not typecheck and 9 give the same output on every input tried.
 
-lean-assay compares outputs only for types with `DecidableEq`. `Node`, `Query` and
+leanassay compares outputs only for types with `DecidableEq`. `Node`, `Query` and
 `Selection` have none (the deriving handler does not apply to nested inductive types), so
 the survey compares the output of `run` and declares `DecidableEq` for `Except`.
 
