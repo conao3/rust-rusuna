@@ -195,6 +195,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
         for f in &o.fields {
             let field = f.node.name.node.to_string();
             if field.starts_with("__")
+                || (!root && ["_and", "_or", "_not"].contains(&field.as_str()))
                 || !fields.insert(field.clone())
                 || !f.node.arguments.is_empty()
             {

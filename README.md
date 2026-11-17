@@ -107,7 +107,8 @@ query values and aggregate operators. `tests/fixtures/schema.graphql` and
 Supported scalars are `Int` (signed 32-bit GraphQL input), `Float`, `String`, `Boolean`,
 `ID` and the declared string-valued `DateTime`. The database is responsible for validating
 DateTime syntax and SQL column compatibility. Table types need at least one scalar
-column. Interfaces, unions, enums, custom input definitions, extensions, custom scalar
+column. The row field names `_and`, `_or` and `_not` are reserved for filter operators.
+Interfaces, unions, enums, custom input definitions, extensions, custom scalar
 coercion and custom directives are outside this mapping format.
 
 Queries support variables and defaults, aliases, named and inline fragments,
