@@ -1,0 +1,1 @@
+query { author(offset: 1, limit: 4, order_by: {id: asc}) { id articles(offset: 1, order_by: {id: asc}) { id } page: articles(offset: 1, limit: 1, order_by: {id: desc}) { id } } }

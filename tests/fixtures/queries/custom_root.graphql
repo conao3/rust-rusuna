@@ -1,0 +1,1 @@
+query { people(order_by: {id: asc}) { id __typename } }

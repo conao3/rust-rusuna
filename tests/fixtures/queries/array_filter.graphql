@@ -1,0 +1,1 @@
+query { author(where: {articles: {comments: {body: {_ilike: "%quoted%"}}}}, order_by: {id: asc}) { id } }

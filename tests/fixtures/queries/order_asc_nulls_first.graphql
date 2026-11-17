@@ -1,0 +1,1 @@
+query { author(order_by: [{nickname: asc_nulls_first}, {id: asc}]) { id nickname } }

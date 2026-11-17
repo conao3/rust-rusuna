@@ -1,0 +1,1 @@
+query { article_aggregate(order_by: {id: asc}, limit: 3) { nodes { id author { name } } other: nodes { title comments { id } } } }

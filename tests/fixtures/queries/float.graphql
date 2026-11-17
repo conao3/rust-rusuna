@@ -1,0 +1,1 @@
+query { author(where: {rating: {_gte: 1.25}}, order_by: {id: asc}) { id rating } }

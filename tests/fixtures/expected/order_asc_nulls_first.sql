@@ -1,0 +1,1 @@
+WITH "r0" AS ( SELECT "s".* FROM "public"."author" AS "s" WHERE true AND ( ( true ) ) ORDER BY "s"."nickname" ASC NULLS FIRST , "s"."id" ASC NULLS LAST ) SELECT coalesce(json_agg( row_to_json((SELECT "%" FROM (SELECT "t0"."id" AS "id" , "t0"."nickname" AS "nickname" ) AS "%")) ORDER BY "t0"."nickname" ASC NULLS FIRST , "t0"."id" ASC NULLS LAST ), '[]') FROM "r0" AS "t0"

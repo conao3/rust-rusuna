@@ -1,9 +1,11 @@
-import Assay
-import LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model
+import Audit.Generators
 
 open model
 
 #assay quoteChars using unquote_quote unquote_quoteChars
+#assay quoteStringChars using unquote_quoteString unquote_quoteStringChars
 #assay assignStep assign tokValue using slots_numbered
-#assay lateralScan using lateralScan_object lateralScan_array
+#assay lateralScan using lateralScan_limit
 #assay distinct aliasValid selectionValid relationValid using distinct_iff aliasValid_iff selectionValid_iff relationValid_iff
+
+#assay scalarValid membershipValid using scalarValid_iff membershipValid_iff

@@ -1,0 +1,1 @@
+query { article(where: {author: {name: {_eq: "author 3"}}}, order_by: {id: asc}) { id author { name } } }

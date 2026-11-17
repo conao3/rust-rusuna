@@ -1,0 +1,1 @@
+query { author_aggregate(where: {id: {_gte: 2}}, order_by: {id: desc}, limit: 3, offset: 1) { aggregate { count sum { id } avg { id } min { id } max { id } } nodes { id name articles { id } } } }

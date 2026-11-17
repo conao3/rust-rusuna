@@ -1,0 +1,1 @@
+SELECT  json_build_object('aggregate', json_build_object('count', COUNT(*) ), 'nodes', coalesce(json_agg("root.f.nodes" ), '[]' ) ) AS "root" FROM  (SELECT  row_to_json((SELECT  "_e"  FROM  (SELECT  'author' AS "__typename"       ) AS "_e"      ) ) AS "root.f.nodes" FROM  (SELECT  *  FROM "public"."author"  WHERE ('true')     ) AS "_root.base"      ) AS "_root"

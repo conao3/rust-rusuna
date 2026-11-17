@@ -21,4 +21,5 @@ INSERT INTO comment VALUES
 INSERT INTO revision VALUES
   (1, 1, 'first'), (1, 1, 'second'), (1, 2, 'by another author'), (3, 3, 'typo'), (4, 3, 'title'),
   (4, 3, 'body'), (9, 3, 'draft'), (10, 5, 'draft'), (12, 2, 'by another author');
+UPDATE author SET nickname = CASE id WHEN 1 THEN 'Alpha' WHEN 2 THEN 'alpha' WHEN 3 THEN 'Beta' WHEN 5 THEN '' END, rating = CASE id WHEN 1 THEN 0.5 WHEN 2 THEN 1.25 WHEN 3 THEN 2.5 WHEN 5 THEN -1.5 END;
 ANALYZE;

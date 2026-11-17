@@ -43,27 +43,31 @@ and SDL, executing statements and the server integrations will be Rust as well.
 The block has three parts.
 
 - SQL tokens. A statement is a list of `Tok`: a `Lex` (raw text, an identifier, a
-  qualified column, a number) or a parameter. `render` prints the tokens and numbers the
+  qualified column, a number or a quoted string literal) or a parameter. `render` prints the tokens and numbers the
   parameters. Only a `Tok.param` carries a value of the query.
-- The plan. `Query` and `Node` hold one `Scan` per table reference (table, conditions,
-  order, limit). `emit` turns a plan into tokens. Functions that return `List Lex` cannot
-  emit a parameter; `scanToks` is the only place a condition becomes tokens.
+- The plan. `Query` and `Node` hold one `Scan` per table reference (table, recursive filter,
+  order, limit and offset). `emit` turns a plan into tokens. Functions that return `List Lex` cannot
+  emit a parameter; `expressionToks` emits filter values through `Tok.param`, including predicates in `EXISTS`.
 - Resolution. `resolve` checks a `Selection` against a `Schema` and builds the plan;
   `run` is `resolve` followed by `compile`.
 
 Names in a statement depend only on the nesting depth and the position of a field:
 `r<depth>` for the rows of a level read as a set, `t<depth>` for a row of a level,
 `c<index>` for the joined result of the field at `index`, `k<index>` for a key column and
-`%` for the row passed to `row_to_json`. A selection alias equal to `%` is rejected.
+`e<depth>` for an `EXISTS` row, and `%` for the row passed to `row_to_json`. A selection alias equal to `%` is rejected.
 
 A relationship is read as a set (`isSet`) when its parent is read as a set, it is an
-array relationship and it has no limit. The root is read as a set. Everything else is a
+array or aggregate relationship and it has neither a limit nor an offset. The root is read as a set. Everything else is a
 lateral subquery.
 
-`maxDepth` (32) and `maxFields` (1000) bound a query. The recursion over a plan is as
+`maxDepth` (32) and `maxFields` (1000) bound a query. Aggregate selection wrappers
+count toward nesting, with three extra wrapper levels. `maxFilterDepth` (32) bounds
+filter edges, `maxFields` bounds each boolean expression, and `maxInValues` (1000)
+bounds membership lists. The recursion over a plan is as
 deep as the query and as long as a selection; `tests/compile.rs` compiles the largest
-accepted query on a 2 MiB stack. `MAX_DEPTH` and `MAX_FIELDS` in `src/lib.rs` repeat the
-two numbers and a unit test compares them.
+accepted query on a 2 MiB stack. The public limit constants in `src/lib.rs` repeat these numbers and a unit test
+compares them. Rust also bounds filter conversion before descending recursively.
+A combined test places the maximum filter inside the deepest accepted relationship.
 
 ## Theorems and the audit
 
@@ -73,43 +77,67 @@ broken versions. `lake -d audit build --wfail` fails when no broken version of a
 is refuted, when a broken version satisfies every theorem but changes the output (a
 hole), or when no input satisfies a theorem's hypotheses.
 
-The audit covers nine functions: 62 broken versions, 54 refuted, 4 with the same output on
-every input tried, 4 that do not typecheck, no hole.
+The audit covers twelve functions: 97 broken versions, 74 refuted, 16 with the same output
+on every input tried, 7 that do not typecheck, no hole and no untested version.
 
-- Properties: `quoteChars` (`unquote_quote`, `unquote_quoteChars`: reading a quoted name
-  back gives the name), `assignStep`, `assign` and `tokValue` (`slots_numbered`: the
+- Properties: `quoteChars` and `quoteStringChars` (`unquote_quote`, `unquote_quoteChars`: reading a quoted name
+  back gives the name; `unquote_quoteString` and `unquote_quoteStringChars` do the
+  same for single-quoted literals), `assignStep`, `assign` and `tokValue` (`slots_numbered`: the
   placeholders are 1 to n in order) and `distinct` (`distinct_iff`: it accepts exactly
   the lists `List.Nodup` accepts).
 - Conditions restated as an equivalence next to the definition: `aliasValid`,
   `selectionValid` and `relationValid` (`aliasValid_iff`, `selectionValid_iff`,
-  `relationValid_iff`) and `lateralScan` (`lateralScan_object`, `lateralScan_array`).
+  `relationValid_iff`), `scalarValid` and `membershipValid` (`scalarValid_iff`,
+  `membershipValid_iff`), and `lateralScan` (`lateralScan_limit`). The full scan equalities
+  `lateralScan_object`, `lateralScan_array` and `lateralScan_aggregate` are proved too;
+  the audit uses the limit projection because recursive expressions lack `DecidableEq`.
   They stop an edit of one side only; they do not connect the definition to anything
   written independently.
 
 A function added to the block gets a theorem and an `#assay` line in the same change, or
-an entry below. `maxDepth`, `maxFields` and `rowAlias` are constants and are not audited.
+an entry below. `maxDepth`, `maxFields`, `maxFilterDepth`, `maxInValues` and `rowAlias` are constants
+and are not audited.
 
 Two groups stay outside the audit. `make survey` prints their tables with hand-written
-generators, since the generators leanassay derives for `Node` and `Selection` do not
-terminate.
+generators shared in `audit/Audit/Generators.lean`, since automatically derived generators
+for recursive expressions and selections do not terminate. The library builds eight
+independent survey modules so their automatically derived instances stay separate and
+completed groups can be reused independently.
 
-- `condToks`, `scanToks`, `joinToks`, `joinsToks`, `emit` and `compile` build the SQL
-  text. `compile_params` and `placeholders_numbered` refute 15 of 139 broken versions,
+- `paramToks`, `expressionToks`, `expressionsToks`, `scanToks`, `joinToks`, `joinsToks`,
+  `emit` and `compile` build the SQL
+  text. `compile_params` and `placeholders_numbered` refute 26 of 295 broken versions,
   those that lose or reorder a parameter; `compile_erase` refutes none of the versions
-  tried, and its proof fails for a `condToks` that writes a text value into the
-  statement. The 120 holes change the text around the parameters, which no theorem
-  describes. The differential test and `tests/fixtures/expected/` pin the text.
-- `resolveConds`, `resolveOrder`, `resolveScan`, `resolveNode`, `resolveNodes`, `resolve`
-  and `run` decide which selections are accepted. `resolve_values` and `run_params`
-  refute 5 of 85 broken versions; `resolve_declared` refutes none of the versions tried, and its proof
-  fails for a `resolveScan` that reads another schema.
-  The 38 holes accept or reject a different set of selections or return a different
+  tried. The 172 holes change the text around the parameters, which no theorem
+  describes. Four versions give the same output on the inputs tried and 93 do not
+  typecheck; none is untested or times out. The differential test and
+  `tests/fixtures/expected/` pin the text.
+- `resolveExpression`, `resolveExpressions`, `resolveFilter`, `resolveOrder`,
+  `resolveScan`, `resolveNode`, `resolveNodes`, `resolve` and `run` decide which selections are accepted. `resolve_values` and `run_params`
+  refute 4 of 303 broken versions; `resolve_declared` refutes none of the versions tried.
+  The 107 holes accept or reject a different set of selections or return a different
   error. `invalid_queries_are_rejected` in `tests/compile.rs` pins the rules by example.
-  33 versions do not typecheck and 9 give the same output on every input tried.
+  126 versions do not typecheck and 66 give the same output on every input tried.
+  None is untested or times out.
 
-leanassay compares outputs only for types with `DecidableEq`. `Node`, `Query` and
+leanassay compares outputs only for types with `DecidableEq`. `Expression`, `Scan`, `Node`, `Query` and
 `Selection` have none (the deriving handler does not apply to nested inductive types), so
 the survey compares the output of `run` and declares `DecidableEq` for `Except`.
+
+The lexical helpers `comparisonText`, `aggregateText`, `leafLex`, `offsetLex`,
+`emptyLeaf`, `emptyField`, `emptyFields`, `emptyRow` and `resultLex` return text or
+`List Lex`, so they cannot carry parameters. Their SQL semantics are covered by the
+Hasura fixtures and their uses are covered by the emission survey. `findField`,
+`relationMode`, `summaryOp`, `modeLeaf` and `childMode` implement field lookup and
+aggregate selection contexts; their uses are covered by the resolution survey and
+rejection tests. Value traversal, erasure and declared-reference helpers state and
+support the preservation theorems; they are not independent acceptance checks.
+
+The reported properties are seven independent properties, stated by twelve public
+boundary theorems; nine conditions restated next to the implementation; and zero
+variable-free checks. The helpers proving the same preservation at intermediate nodes
+are not counted as additional independent properties. Three of the nine restated
+conditions are the full scan equalities above, which the audit cannot execute.
 
 When a proof is written, check it in a file of its own before building: wrap the
 definitions in `namespace model` and run `lean` on the file. A build that fails in Lean
@@ -120,7 +148,7 @@ again.
 
 - `tests/differential.rs` runs each query of `tests/common/mod.rs` and the statement of
   Hasura for it on the data of `tests/fixtures/seed.sql` and compares the JSON. Lists
-  without `order_by` are compared as multisets. The seed has an author without articles,
+  without `order_by` are compared as multisets. The seed has nullable text and floating-point columns, an author without articles,
   articles without comments, and a table with a two-column relationship. A new query gets its GraphQL text, the statement from
   Hasura's Explain API and an entry in `cases`.
 - `tests/compile.rs` holds the expected statements, the parameters and their order, the

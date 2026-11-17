@@ -14,8 +14,8 @@ rusuna compiles queries today. The schema and the query are passed as Rust value
 
 | Feature | State |
 |---|---|
-| Lists of rows with nested object and array relationships, `limit`, `order_by`, equality conditions | available |
-| SDL with directives as the schema, the full `where` grammar, aggregates, a CLI | planned |
+| Lists, relationships, recursive filters, pagination, null ordering, aggregates and row `__typename` | available |
+| SDL with directives, GraphQL text parsing and a CLI | planned |
 | Row and column permissions per role, with proofs | planned |
 | Mutations in one transaction | planned |
 | Parts for an `async-graphql` schema and `axum` routes | planned |
@@ -24,7 +24,7 @@ rusuna compiles queries today. The schema and the query are passed as Rust value
 ## Usage
 
 ```rust
-use rusuna::{Direction, Kind, Relation, Schema, Selection, Table};
+use rusuna::{Direction, Kind, Relation, RootField, RootKind, Schema, Selection, Table};
 
 let schema = Schema::new(vec![
     Table::new("author", "public", "author").column("id", "id").column("name", "name"),
@@ -35,7 +35,7 @@ let schema = Schema::new(vec![
         .relation(Relation::new("author", Kind::Object, "author", ["author_id"], ["id"]))
         .relation(Relation::new("comments", Kind::Array, "comment", ["id"], ["article_id"])),
     Table::new("comment", "public", "comment").column("id", "id").column("body", "body"),
-]);
+], vec![RootField::new("article", "article", RootKind::List)]);
 
 // query { article(limit: 20, order_by: {published_at: desc}) {
 //   id title author { name } comments(limit: 5, order_by: {id: asc}) { body } } }
@@ -61,18 +61,95 @@ Run `compiled.sql` with any PostgreSQL client and put the returned JSON under th
 the root field in the `data` of the response. `tests/differential.rs` does this with the
 `postgres` crate.
 
+## Schema and selection values
+
+`Schema::new(tables: Vec<Table>, roots: Vec<RootField>)` declares root fields explicitly.
+`RootField::new(field, target, RootKind::List | RootKind::Aggregate)` targets a table's
+GraphQL type name. `Table::name` is the row's `__typename`; it is independent of the root
+field and SQL table names. Each `Relation` declares its field, target, column mapping and
+`Kind::Object`, `Kind::Array` or `Kind::Aggregate`. Declare an aggregate relationship as a
+separate field, for example `articles_aggregate`.
+
+A `Selection` has public `alias`, `name`, `filter: Option<Filter>`,
+`order_by: Vec<Order>`, `limit: Option<u64>`, `offset: Option<u64>` and
+`fields: Vec<Selection>`. Its builders are `alias`, `filter`, `order_by`, `limit`,
+`offset` and `field`. `filter` sets the entire expression; combine predicates explicitly:
+
+```rust
+use rusuna::{Comparison, Filter, Selection, Value};
+
+let query = Selection::new("article")
+    .filter(Filter::And(vec![
+        Filter::compare("id", Comparison::Gt, Value::Int(2)),
+        Filter::Relation {
+            field: "author".into(),
+            filter: Box::new(Filter::eq("name", Value::Text("Ada".into()))),
+        },
+    ]))
+    .field(Selection::new("id"));
+```
+
+The recursive filter variants, in document order, are:
+
+```rust
+pub enum Filter {
+    Compare { field: String, op: Comparison, value: Value },
+    In { field: String, negated: bool, values: Vec<Value> },
+    IsNull { field: String, value: bool },
+    And(Vec<Filter>),
+    Or(Vec<Filter>),
+    Not(Box<Filter>),
+    Relation { field: String, filter: Box<Filter> },
+}
+```
+
+`Comparison` is `Eq`, `Neq`, `Gt`, `Gte`, `Lt`, `Lte`, `Like`, `Nlike`, `Ilike` or
+`Nilike`. `Direction` is `Asc`, `AscNullsFirst`, `AscNullsLast`, `Desc`,
+`DescNullsFirst` or `DescNullsLast`; the defaults are nulls last for ascending and nulls
+first for descending.
+
+`Value` is `Int(i64)`, `Float(f64)`, `Text(String)`, `Bool(bool)` or `Null`. Lean stores
+float bits as `UInt64`, preserving decidable equality and finite values exactly.
+Comparisons reject null, including null membership elements, as in
+[Hasura v2](https://hasura.io/docs/2.0/queries/postgres/filters/index/).
+Nonfinite floats are rejected. Test nullness with `Filter::IsNull`. Column SQL types are
+not part of this schema: the parser or caller must supply values and aggregate operators
+compatible with the database column types.
+
+Aggregate roots and relationships use ordinary selections for
+`aggregate { count sum { column } avg { column } min { column } max { column } }` and
+`nodes { fields }`, including aliases and multiple selections of nodes. `count` takes no
+arguments. Aggregate containers take the same filter, ordering, limit and offset as
+lists; their `aggregate` and `nodes` children take no arguments.
+
+Selections have at most `MAX_FIELDS` (1000) fields. Relations are bounded by `MAX_DEPTH`
+(32); aggregate selection wrappers also count toward nesting, with three extra wrapper
+levels allowed. Filters have at most `MAX_FILTER_DEPTH` (32) edges from the root,
+1000 children per boolean expression and `MAX_IN_VALUES` (1000) membership elements.
+Rust bounds recursive conversion before entering Lean, and Lean checks the limits too.
+Tests exercise the accepted boundaries on a 2 MiB stack.
+
 ## The generated SQL
 
 - One statement per root field. PostgreSQL builds the JSON with `row_to_json` and
   `json_agg`.
-- An object relationship and an array relationship with a `limit` are read by a
+- An object relationship and an array relationship with a `limit` or `offset` are read by a
   `LEFT JOIN LATERAL` subquery per parent row.
-- An array relationship without a `limit` whose parents are read as a set is read once:
+- An array relationship without a `limit` or `offset` whose parents are read as a set is read once:
   its rows are restricted to the parent rows with `IN`, aggregated by the parent key, and
   joined to the parents.
-- Every value of a query is a statement parameter. `limit` is a non-negative integer
-  written into the statement, since PostgreSQL chooses the plan by it.
-- Every identifier is double-quoted, with the quotes inside it doubled.
+- Comparison values are statement parameters, including each element of `_in` and `_nin`.
+  `limit` and `offset` are non-negative integers written into the statement. `_is_null`
+  selects `IS NULL` or `IS NOT NULL`. Empty `_in` is false and empty `_nin` is true.
+- Every identifier is double-quoted, with the quotes inside it doubled. Row type names
+  are single-quoted literals with doubled quotes; use PostgreSQL
+  `standard_conforming_strings = on`.
+- Relationship predicates become correlated `EXISTS` subqueries, including all columns
+  of a composite relationship. Empty `_and` is true and empty `_or` is false.
+- Aggregates share the filtered, ordered and paginated row set with `nodes`. Only the
+  selected aggregate functions are emitted. Empty sets have count 0, null metrics and
+  empty nodes. Unlimited aggregate relationships use the same parent-set restriction
+  and grouping as list relationships.
 
 `tests/fixtures/expected/` holds the statements for the queries of
 `tests/fixtures/queries/`.
@@ -90,7 +167,8 @@ Properties:
 | `compile_erase` | The SQL text is the same for two queries that differ only in their values. |
 | `placeholders_numbered`, `slots_numbered` | The placeholders are `$1` … `$n`, in the order of the parameters. |
 | `unquote_quote`, `unquote_quoteChars` | `unquoteChars`, a reader of a double-quoted identifier written after PostgreSQL's lexical rules, reads a quoted name back as the name and stops at its closing quote. |
-| `resolve_declared` | Every table in the plan of a compiled query is a table of the schema. |
+| `unquote_quoteString`, `unquote_quoteStringChars` | Reading a quoted string literal returns the original string and stops at the closing quote. |
+| `resolve_declared` | Every table in the plan, including relationship predicates inside `EXISTS`, is declared in the schema. |
 | `distinct_iff` | The check for repeated aliases accepts exactly the lists without duplicates. |
 
 Conditions written a second time, as an equivalence next to the definition:
@@ -99,10 +177,25 @@ Conditions written a second time, as an equivalence next to the definition:
 |---|---|
 | `aliasValid_iff`, `selectionValid_iff` | An accepted selection is not empty, has at most 1000 fields, and its aliases are distinct, not empty, not `%` and at most 63 bytes long. |
 | `relationValid_iff` | An accepted relationship has as many columns as references, and at least one. |
-| `lateralScan_object`, `lateralScan_array` | The scan of an object relationship has the limit 1 and the conditions of the relationship; the scan of an array relationship is unchanged. |
+| `lateralScan_object`, `lateralScan_array`, `lateralScan_aggregate`, `lateralScan_limit` | The scan of an object relationship has the limit 1 and the conditions of the relationship; array and aggregate scans are unchanged. |
+| `scalarValid_iff`, `membershipValid_iff` | Comparison values are non-null and finite, and membership lists respect their size bound. |
 
 [leanassay](https://github.com/conao3/lean-leanassay) checks which theorems rule out
-broken implementations. AGENTS.md lists the functions it covers and the ones it does not.
+broken implementations: the audit covers twelve functions, with 97 mutations, 74 killed,
+16 equivalent on the sampled inputs, 7 ill-typed, zero holes and zero untested.
+There are seven independent properties (twelve principal theorem statements), nine
+restated conditions and zero variable-free checks. Three restated conditions are full
+scan equalities; the executable audit checks their limit projection. AGENTS.md lists the functions it covers and the ones it does not.
+
+`make survey` examines functions outside that audit with the boundary theorems:
+
+| Group | Mutations | Killed | Holes | Equivalent on sampled inputs | Ill-typed |
+|---|---|---|---|---|---|
+| SQL emission | 295 | 26 | 172 | 4 | 93 |
+| Selection resolution | 303 | 4 | 107 | 66 | 126 |
+
+Neither group has an untested or timed-out mutation. The holes change SQL text or
+acceptance rules outside the properties proved above; the tests cover these by example.
 
 Outside the proofs:
 
@@ -125,15 +218,19 @@ for the same query (`tests/fixtures/hasura/`).
 `make bench` loads 10,000 authors, 200,000 articles and 1,000,000 comments and runs, on
 one connection, the statement of rusuna, of [viat-gql](https://crates.io/crates/viat-gql)
 1.0.1, of Hasura v2.51.6 and a hand-written one in turn, 15 times each. Milliseconds on a
-6-core x86-64 Linux machine with PostgreSQL 17.12, median (minimum to maximum):
+6-core x86-64 Linux machine with PostgreSQL 17.12, median (minimum to maximum),
+with proof checking running concurrently:
 
 | Query | rusuna | viat-gql | Hasura | hand-written |
 |---|---|---|---|---|
-| A: 20 articles, their author and 5 comments each | 0.6 (0.5–2.6) | 0.9 (0.5–2.0) | 0.6 (0.5–1.5) | 0.6 (0.5–3.0) |
-| B: 50,000 articles and their author | 131.7 (121.7–192.2) | 200.7 (183.2–234.0) | 138.1 (124.3–180.7) | 180.5 (158.4–239.1) |
-| C: 2,000 authors, all their articles and all their comments | 679.0 (589.0–830.5) | 721.3 (630.1–767.3) | 714.9 (644.3–821.9) | 710.0 (635.0–810.5) |
+| A: 20 articles, their author and 5 comments each | 3.2 (0.6–7.2) | 1.1 (0.6–6.3) | 2.3 (0.6–7.3) | 2.0 (0.6–5.6) |
+| B: 50,000 articles and their author | 279.3 (135.4–474.3) | 362.8 (205.9–693.9) | 258.1 (130.8–450.7) | 240.7 (163.5–559.2) |
+| C: 2,000 authors, all their articles and all their comments | 1715.4 (799.2–2542.1) | 1774.1 (1009.7–3034.6) | 1924.6 (1355.9–3400.4) | 1565.0 (1041.8–3716.8) |
 
-Compiling one of these queries takes 50 to 92 µs.
+All three speed goals pass in this run. Compiling these queries takes 113 to 255 µs.
+All four implementations return equal results on the benchmark data. The differential
+test covers 43 queries, including empty results, nested aggregates, custom root names,
+nullable columns, composite relationship predicates and every supported comparison.
 
 ## Development
 

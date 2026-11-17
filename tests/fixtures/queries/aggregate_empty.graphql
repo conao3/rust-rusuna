@@ -1,0 +1,1 @@
+query { article_aggregate(where: {id: {_lt: 0}}) { aggregate { count sum { id } avg { id } min { id } max { id } } nodes { id } } }

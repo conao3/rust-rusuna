@@ -1,0 +1,1 @@
+query { author(order_by: {id: asc}) { id articles_aggregate { aggregate { count sum { id } avg { id } min { id } max { id } } nodes { id comments_aggregate { aggregate { count } } } } page: articles_aggregate(order_by: {id: desc}, limit: 2, offset: 1) { aggregate { count sum { id } avg { id } min { id } max { id } } nodes { id } } } }

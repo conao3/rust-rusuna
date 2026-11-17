@@ -1,0 +1,1 @@
+query { author(where: {_and: [{_or: [{id: {_eq: 1}}, {id: {_eq: 3}}]}, {_not: {name: {_eq: "absent"}}}]}, order_by: {id: asc}) { id } }

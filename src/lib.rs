@@ -2,7 +2,7 @@
 //! that returns the response as a single JSON value.
 //!
 //! ```
-//! use rusuna::{Column, Direction, Kind, Relation, Schema, Selection, Table};
+//! use rusuna::{RootField, RootKind, Column, Direction, Kind, Relation, Schema, Selection, Table};
 //!
 //! let schema = Schema::new(vec![
 //!     Table::new("author", "public", "author").column("id", "id").column("name", "name"),
@@ -10,7 +10,7 @@
 //!         .column("id", "id")
 //!         .column("title", "title")
 //!         .relation(Relation::new("author", Kind::Object, "author", ["author_id"], ["id"])),
-//! ]);
+//! ], vec![RootField::new("article", "article", RootKind::List)]);
 //! let query = Selection::new("article")
 //!     .order_by("id", Direction::Asc)
 //!     .limit(10)
@@ -28,11 +28,13 @@ use compiler::model;
 use std::fmt;
 
 /// A value of a query, sent to the database as a statement parameter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
     Text(String),
     Bool(bool),
+    Float(f64),
+    Null,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +43,10 @@ pub enum Direction {
     Asc,
     /// Descending, nulls first.
     Desc,
+    AscNullsFirst,
+    AscNullsLast,
+    DescNullsFirst,
+    DescNullsLast,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +55,7 @@ pub enum Kind {
     Object,
     /// Any number of related rows; the field is a list.
     Array,
+    Aggregate,
 }
 
 /// A field backed by a column.
@@ -96,7 +103,7 @@ impl Relation {
     }
 }
 
-/// A table exposed under `name`, both as a root field and as the target of relations.
+/// A table exposed under the GraphQL type `name` and targeted by roots and relations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
     pub name: String,
@@ -132,11 +139,57 @@ impl Table {
     }
 }
 
-/// `field = value` on the rows of a selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Condition {
-    pub field: String,
-    pub value: Value,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comparison {
+    Eq,
+    Neq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Like,
+    Nlike,
+    Ilike,
+    Nilike,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Filter {
+    Compare {
+        field: String,
+        op: Comparison,
+        value: Value,
+    },
+    In {
+        field: String,
+        negated: bool,
+        values: Vec<Value>,
+    },
+    IsNull {
+        field: String,
+        value: bool,
+    },
+    And(Vec<Filter>),
+    Or(Vec<Filter>),
+    Not(Box<Filter>),
+    Relation {
+        field: String,
+        filter: Box<Filter>,
+    },
+}
+
+impl Filter {
+    pub fn compare(field: impl Into<String>, op: Comparison, value: Value) -> Self {
+        Self::Compare {
+            field: field.into(),
+            op,
+            value,
+        }
+    }
+
+    pub fn eq(field: impl Into<String>, value: Value) -> Self {
+        Self::compare(field, Comparison::Eq, value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,13 +199,14 @@ pub struct Order {
 }
 
 /// A field of a query with its arguments and its own selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Selection {
     pub alias: String,
     pub name: String,
-    pub conditions: Vec<Condition>,
+    pub filter: Option<Filter>,
     pub order_by: Vec<Order>,
     pub limit: Option<u64>,
+    pub offset: Option<u64>,
     pub fields: Vec<Selection>,
 }
 
@@ -162,9 +216,10 @@ impl Selection {
         Self {
             alias: name.clone(),
             name,
-            conditions: Vec::new(),
+            filter: None,
             order_by: Vec::new(),
             limit: None,
+            offset: None,
             fields: Vec::new(),
         }
     }
@@ -174,11 +229,13 @@ impl Selection {
         self
     }
 
-    pub fn filter(mut self, field: impl Into<String>, value: Value) -> Self {
-        self.conditions.push(Condition {
-            field: field.into(),
-            value,
-        });
+    pub fn filter(mut self, filter: Filter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    pub fn offset(mut self, offset: u64) -> Self {
+        self.offset = Some(offset);
         self
     }
 
@@ -203,8 +260,8 @@ impl Selection {
 
 /// One SQL statement and its parameters, in the order of `$1`, `$2`, ….
 ///
-/// The statement returns one row with one `json` column: the list of the selected rows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The statement returns one row with one `json` column: a list or an aggregate object.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Compiled {
     pub sql: String,
     pub params: Vec<Value>,
@@ -213,25 +270,46 @@ pub struct Compiled {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// No table has this name.
-    UnknownType { name: String },
+    UnknownType {
+        name: String,
+    },
+    UnknownRoot {
+        name: String,
+    },
     /// The table has no column or relation with this field name.
-    UnknownField { table: String, field: String },
+    UnknownField {
+        table: String,
+        field: String,
+    },
     /// A column was given arguments or a selection.
-    ColumnArguments { table: String, field: String },
+    ColumnArguments {
+        table: String,
+        field: String,
+    },
     /// An object relation was given arguments.
-    ObjectArguments { table: String, field: String },
+    ObjectArguments {
+        table: String,
+        field: String,
+    },
     /// The relation has no columns, or `columns` and `references` differ in length.
-    InvalidRelation { table: String, field: String },
+    InvalidRelation {
+        table: String,
+        field: String,
+    },
     /// The selection on this table is empty or too large, or an alias is empty, longer than
     /// 63 bytes, repeated or reserved.
-    InvalidSelection { table: String },
-    /// The query nests relations deeper than [`MAX_DEPTH`].
+    InvalidSelection {
+        table: String,
+    },
+    /// The query or filter exceeds its nesting limit.
     TooDeep,
+    InvalidFilter,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnknownRoot { name } => write!(f, "no root field is named `{name}`"),
             Self::UnknownType { name } => write!(f, "no table is named `{name}`"),
             Self::UnknownField { table, field } => write!(f, "`{table}` has no field `{field}`"),
             Self::ColumnArguments { table, field } => {
@@ -256,9 +334,13 @@ impl fmt::Display for Error {
                 f,
                 "the selection on `{table}` needs 1 to {MAX_FIELDS} fields with distinct aliases of 1 to 63 bytes"
             ),
+            Self::InvalidFilter => write!(
+                f,
+                "the filter contains null, a nonfinite float, or too many entries"
+            ),
             Self::TooDeep => write!(
                 f,
-                "the query nests relations deeper than {MAX_DEPTH} levels"
+                "the query or filter exceeds its nesting limit ({MAX_DEPTH} relation levels, {MAX_FILTER_DEPTH} filter edges)"
             ),
         }
     }
@@ -271,6 +353,31 @@ pub const MAX_DEPTH: usize = 32;
 
 /// The largest number of fields one selection may have.
 pub const MAX_FIELDS: usize = 1000;
+pub const MAX_FILTER_DEPTH: usize = 32;
+pub const MAX_IN_VALUES: usize = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootKind {
+    List,
+    Aggregate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootField {
+    pub field: String,
+    pub target: String,
+    pub kind: RootKind,
+}
+
+impl RootField {
+    pub fn new(field: impl Into<String>, target: impl Into<String>, kind: RootKind) -> Self {
+        Self {
+            field: field.into(),
+            target: target.into(),
+            kind,
+        }
+    }
+}
 
 /// The tables and relations queries are compiled against.
 #[derive(Debug, Clone)]
@@ -279,10 +386,21 @@ pub struct Schema {
 }
 
 impl Schema {
-    pub fn new(tables: Vec<Table>) -> Self {
+    pub fn new(tables: Vec<Table>, roots: Vec<RootField>) -> Self {
         Self {
             model: model::Schema {
                 tables: tables.into_iter().map(table_model).collect(),
+                roots: roots
+                    .into_iter()
+                    .map(|root| model::RootField {
+                        field: root.field,
+                        target: root.target,
+                        kind: match root.kind {
+                            RootKind::List => model::RootKind::List,
+                            RootKind::Aggregate => model::RootKind::Aggregate,
+                        },
+                    })
+                    .collect(),
             },
         }
     }
@@ -321,6 +439,7 @@ fn table_model(table: Table) -> model::Table {
                 kind: match relation.kind {
                     Kind::Object => model::Kind::Object,
                     Kind::Array => model::Kind::Array,
+                    Kind::Aggregate => model::Kind::Aggregate,
                 },
                 target: relation.target,
                 parent: relation.columns,
@@ -331,20 +450,17 @@ fn table_model(table: Table) -> model::Table {
 }
 
 fn selection_model(selection: &Selection, depth: usize) -> Result<model::Selection, Error> {
-    if depth > MAX_DEPTH + 1 {
+    if depth > MAX_DEPTH + 4 {
         return Err(Error::TooDeep);
     }
     Ok(model::Selection {
         alias: selection.alias.clone(),
         name: selection.name.clone(),
         conds: selection
-            .conditions
-            .iter()
-            .map(|condition| model::Cond {
-                field: condition.field.clone(),
-                value: value_model(&condition.value),
-            })
-            .collect(),
+            .filter
+            .as_ref()
+            .map(|filter| filter_model(filter, 0))
+            .transpose()?,
         order: selection
             .order_by
             .iter()
@@ -353,10 +469,15 @@ fn selection_model(selection: &Selection, depth: usize) -> Result<model::Selecti
                 direction: match order.direction {
                     Direction::Asc => model::Direction::Asc,
                     Direction::Desc => model::Direction::Desc,
+                    Direction::DescNullsLast => model::Direction::DescNullsLast,
+                    Direction::DescNullsFirst => model::Direction::DescNullsFirst,
+                    Direction::AscNullsLast => model::Direction::AscNullsLast,
+                    Direction::AscNullsFirst => model::Direction::AscNullsFirst,
                 },
             })
             .collect(),
         limit: selection.limit.map(Into::into),
+        offset: selection.offset.map(Into::into),
         children: selection
             .fields
             .iter()
@@ -365,11 +486,69 @@ fn selection_model(selection: &Selection, depth: usize) -> Result<model::Selecti
     })
 }
 
+fn filter_model(filter: &Filter, depth: usize) -> Result<model::ExpressionString, Error> {
+    if depth > MAX_FILTER_DEPTH {
+        return Err(Error::TooDeep);
+    }
+    Ok(match filter {
+        Filter::Compare { field, op, value } => model::ExpressionString::Compare {
+            field: field.clone(),
+            op: match op {
+                Comparison::Eq => model::Comparison::Eq,
+                Comparison::Neq => model::Comparison::Neq,
+                Comparison::Gt => model::Comparison::Gt,
+                Comparison::Gte => model::Comparison::Gte,
+                Comparison::Lt => model::Comparison::Lt,
+                Comparison::Lte => model::Comparison::Lte,
+                Comparison::Like => model::Comparison::Like,
+                Comparison::Nlike => model::Comparison::Nlike,
+                Comparison::Ilike => model::Comparison::Ilike,
+                Comparison::Nilike => model::Comparison::Nilike,
+            },
+            value: value_model(value),
+        },
+        Filter::In {
+            field,
+            negated,
+            values,
+        } => model::ExpressionString::Member {
+            field: field.clone(),
+            negated: *negated,
+            values: values.iter().map(value_model).collect(),
+        },
+        Filter::IsNull { field, value } => model::ExpressionString::IsNull {
+            field: field.clone(),
+            value: *value,
+        },
+        Filter::And(filters) => model::ExpressionString::And {
+            children: filters
+                .iter()
+                .map(|f| filter_model(f, depth + 1))
+                .collect::<Result<_, _>>()?,
+        },
+        Filter::Or(filters) => model::ExpressionString::Or {
+            children: filters
+                .iter()
+                .map(|f| filter_model(f, depth + 1))
+                .collect::<Result<_, _>>()?,
+        },
+        Filter::Not(filter) => model::ExpressionString::Not {
+            child: Box::new(filter_model(filter, depth + 1)?),
+        },
+        Filter::Relation { field, filter } => model::ExpressionString::Relation {
+            reference: field.clone(),
+            child: Box::new(filter_model(filter, depth + 1)?),
+        },
+    })
+}
+
 fn value_model(value: &Value) -> model::Value {
     match value {
         Value::Int(v) => model::Value::Int { v: (*v).into() },
         Value::Text(v) => model::Value::Text { v: v.clone() },
         Value::Bool(v) => model::Value::Bool { v: *v },
+        Value::Float(v) => model::Value::Float { bits: v.to_bits() },
+        Value::Null => model::Value::Null,
     }
 }
 
@@ -380,11 +559,14 @@ fn value(value: model::Value) -> Value {
         }
         model::Value::Text { v } => Value::Text(v),
         model::Value::Bool { v } => Value::Bool(v),
+        model::Value::Float { bits } => Value::Float(f64::from_bits(bits)),
+        model::Value::Null => Value::Null,
     }
 }
 
 fn error_from_model(error: model::Error) -> Error {
     match error {
+        model::Error::UnknownRoot { name } => Error::UnknownRoot { name },
         model::Error::UnknownType { name } => Error::UnknownType { name },
         model::Error::UnknownField { r#type, field } => Error::UnknownField {
             table: r#type,
@@ -404,6 +586,7 @@ fn error_from_model(error: model::Error) -> Error {
         },
         model::Error::InvalidSelection { r#type } => Error::InvalidSelection { table: r#type },
         model::Error::TooDeep => Error::TooDeep,
+        model::Error::InvalidFilter => Error::InvalidFilter,
     }
 }
 
@@ -415,5 +598,29 @@ mod tests {
     fn limits_match_the_lean_definitions() {
         assert_eq!(model::max_depth(), (MAX_DEPTH as u64).into());
         assert_eq!(model::max_fields(), (MAX_FIELDS as u64).into());
+        assert_eq!(model::max_filter_depth(), (MAX_FILTER_DEPTH as u64).into());
+        assert_eq!(model::max_in_values(), (MAX_IN_VALUES as u64).into());
+    }
+
+    #[test]
+    fn lean_rejects_filters_beyond_the_depth_limit() {
+        let schema = model::Schema {
+            tables: vec![],
+            roots: vec![],
+        };
+        let table = table_model(Table::new("t", "public", "t").column("id", "id"));
+        let filter = (0..=MAX_FILTER_DEPTH).fold(
+            model::ExpressionString::IsNull {
+                field: "id".into(),
+                value: true,
+            },
+            |child, _| model::ExpressionString::Not {
+                child: Box::new(child),
+            },
+        );
+        assert!(matches!(
+            model::resolve_expression(schema, table, 0u64.into(), filter),
+            Err(model::Error::TooDeep)
+        ));
     }
 }

@@ -6,6 +6,8 @@ leanfran::lean! {
       | int (v : Int)
       | text (v : String)
       | bool (v : Bool)
+      | float (bits : UInt64)
+      | null
       deriving DecidableEq, Repr
 
     inductive Lex where
@@ -13,6 +15,7 @@ leanfran::lean! {
       | ident (name : String)
       | col (qualifier name : String)
       | nat (n : Nat)
+      | string (text : String)
       deriving DecidableEq, Repr
 
     inductive Tok where
@@ -45,11 +48,27 @@ leanfran::lean! {
 
     def quote (name : String) : String := String.ofList ('"' :: quoteChars name.toList)
 
+    def quoteStringChars : List Char → List Char
+      | [] => ['\'']
+      | c :: cs => if c = '\'' then '\'' :: '\'' :: quoteStringChars cs else c :: quoteStringChars cs
+
+    def unquoteStringChars : List Char → Option (List Char × List Char)
+      | [] => none
+      | [c] => if c = '\'' then some ([], []) else none
+      | c :: d :: cs =>
+        if c = '\'' then
+          if d = '\'' then (unquoteStringChars cs).map fun (name, rest) => ('\'' :: name, rest)
+          else some ([], d :: cs)
+        else (unquoteStringChars (d :: cs)).map fun (name, rest) => (c :: name, rest)
+
+    def quoteString (name : String) : String := String.ofList ('\'' :: quoteStringChars name.toList)
+
     def lexText : Lex → String
       | .raw text => text
       | .ident name => quote name
       | .col qualifier name => quote qualifier ++ "." ++ quote name
       | .nat n => toString n
+      | .string text => quoteString text
 
     def lift (lexes : List Lex) : List Tok := lexes.map .lex
 
@@ -99,6 +118,25 @@ leanfran::lean! {
     theorem unquote_quoteChars (name : List Char) : unquoteChars (quoteChars name) = some (name, []) := by
       simpa using unquote_quote name [] (by simp)
 
+    theorem unquote_quoteString (name rest : List Char) (h : rest.head? ≠ some '\'') :
+        unquoteStringChars (quoteStringChars name ++ rest) = some (name, rest) := by
+      induction name with
+      | nil =>
+        cases rest with
+        | nil => simp [quoteStringChars, unquoteStringChars]
+        | cons d rest =>
+          have : d ≠ '\'' := by simpa using h
+          simp [quoteStringChars, unquoteStringChars, this]
+      | cons c name ih =>
+        by_cases hc : c = '\''
+        · simp [quoteStringChars, unquoteStringChars, hc, ih]
+        · cases hq : quoteStringChars name ++ rest with
+          | nil => simp [hq, unquoteStringChars] at ih
+          | cons d tail => simp [quoteStringChars, unquoteStringChars, hc, hq, ← ih]
+
+    theorem unquote_quoteStringChars (name : List Char) : unquoteStringChars (quoteStringChars name) = some (name, []) := by
+      simpa using unquote_quoteString name [] (by simp)
+
     theorem assign_foldl (toks : List Tok) (acc : List Piece) (next : Nat) :
         ((toks.foldl assignStep (acc, next)).1.reverse).filterMap pieceSlot
           = acc.reverse.filterMap pieceSlot ++ List.range' next (toks.filterMap tokValue).length := by
@@ -134,28 +172,164 @@ leanfran::lean! {
     inductive Direction where
       | asc
       | desc
+      | ascNullsFirst
+      | ascNullsLast
+      | descNullsFirst
+      | descNullsLast
       deriving DecidableEq, Repr
 
     inductive Kind where
       | object
       | array
+      | aggregate
       deriving DecidableEq, Repr
+
+    inductive Comparison where
+      | eq | neq | gt | gte | lt | lte | like | nlike | ilike | nilike
+      deriving DecidableEq, Repr
+
+    structure Reference where
+      schema : String
+      table : String
+      parent : List String
+      child : List String
+      deriving DecidableEq, Repr
+
+    inductive Expression (R : Type) where
+      | compare (field : String) (op : Comparison) (value : Value)
+      | member (field : String) (negated : Bool) (values : List Value)
+      | isNull (field : String) (value : Bool)
+      | and (children : List (Expression R))
+      | or (children : List (Expression R))
+      | not (child : Expression R)
+      | relation (reference : R) (child : Expression R)
+      deriving Repr
+
+    mutual
+    def expressionValues {R : Type} : Expression R → List Value
+      | .compare _ _ v => [v]
+      | .member _ _ vs => vs
+      | .isNull _ _ => []
+      | .and es | .or es => expressionsValues es
+      | .not e | .relation _ e => expressionValues e
+    def expressionsValues {R : Type} : List (Expression R) → List Value
+      | [] => []
+      | e :: es => expressionValues e ++ expressionsValues es
+    end
+
+    mutual
+    def eraseExpression {R : Type} : Expression R → Expression R
+      | .compare f op _ => .compare f op (.int 0)
+      | .member f neg vs => .member f neg (vs.map fun _ => .int 0)
+      | .isNull f b => .isNull f b
+      | .and es => .and (eraseExpressions es)
+      | .or es => .or (eraseExpressions es)
+      | .not e => .not (eraseExpression e)
+      | .relation r e => .relation r (eraseExpression e)
+    def eraseExpressions {R : Type} : List (Expression R) → List (Expression R)
+      | [] => []
+      | e :: es => eraseExpression e :: eraseExpressions es
+    end
+
+    def comparisonText : Comparison → String
+      | .eq => "=" | .neq => "<>" | .gt => ">" | .gte => ">=" | .lt => "<" | .lte => "<="
+      | .like => "LIKE" | .nlike => "NOT LIKE" | .ilike => "ILIKE" | .nilike => "NOT ILIKE"
+
+    def paramToks : List Value → List Tok
+      | [] => []
+      | v :: vs => .param v :: vs.flatMap (fun x => [.lex (.raw ","), .param x])
+
+    mutual
+    def expressionToks (depth : Nat) (qualifier : String) : Expression Reference → List Tok
+      | .compare field op v => lift [.col qualifier field, .raw (comparisonText op)] ++ [.param v]
+      | .member field neg vs =>
+        if vs.isEmpty then lift [.raw (if neg then "true" else "false")]
+        else lift [.col qualifier field, .raw (if neg then "NOT IN (" else "IN (")]
+          ++ paramToks vs ++ lift [.raw ")"]
+      | .isNull field b => lift [.col qualifier field, .raw (if b then "IS NULL" else "IS NOT NULL")]
+      | .and es => lift [.raw "( true"] ++ expressionsToks depth qualifier "AND" es ++ lift [.raw ")"]
+      | .or es => lift [.raw "( false"] ++ expressionsToks depth qualifier "OR" es ++ lift [.raw ")"]
+      | .not e => lift [.raw "NOT ("] ++ expressionToks depth qualifier e ++ lift [.raw ")"]
+      | .relation ref e =>
+        let alias := "e" ++ toString depth
+        lift ([.raw "EXISTS (SELECT 1 FROM", .col ref.schema ref.table, .raw "AS", .ident alias,
+          .raw "WHERE true"] ++ (ref.parent.zip ref.child).flatMap (fun pair =>
+            [.raw "AND", .col alias pair.2, .raw "=", .col qualifier pair.1]) ++ [.raw "AND ("])
+          ++ expressionToks (depth + 1) alias e ++ lift [.raw "))"]
+    def expressionsToks (depth : Nat) (qualifier op : String) : List (Expression Reference) → List Tok
+      | [] => []
+      | e :: es => lift [.raw op, .raw "("] ++ expressionToks depth qualifier e ++ lift [.raw ")"]
+          ++ expressionsToks depth qualifier op es
+    end
+
+    theorem paramToks_values (vs : List Value) : (paramToks vs).filterMap tokValue = vs := by
+      cases vs <;> simp [paramToks, tokValue, List.filterMap_flatMap, List.filterMap]
+
+    theorem paramToks_erase (vs : List Value) :
+        (paramToks vs).map eraseTok = paramToks (vs.map fun _ => .int 0) := by
+      cases vs <;> simp [paramToks, eraseTok, List.map_flatMap, List.flatMap_map]
+
+    mutual
+    theorem expressionToks_values (depth : Nat) (q : String) (e : Expression Reference) :
+        (expressionToks depth q e).filterMap tokValue = expressionValues e := by
+      cases e <;> simp only [expressionToks, expressionValues]
+      all_goals try split
+      all_goals simp_all [lift_values, paramToks_values, tokValue, List.filterMap, expressionToks_values, expressionsToks_values]
+    theorem expressionsToks_values (depth : Nat) (q op : String) (es : List (Expression Reference)) :
+        (expressionsToks depth q op es).filterMap tokValue = expressionsValues es := by
+      cases es <;> simp [expressionsToks, expressionsValues, lift_values, expressionToks_values, expressionsToks_values]
+    end
+
+    mutual
+    theorem expressionToks_erase (depth : Nat) (q : String) (e : Expression Reference) :
+        (expressionToks depth q e).map eraseTok = expressionToks depth q (eraseExpression e) := by
+      cases e <;> simp only [expressionToks, eraseExpression]
+      all_goals try split
+      all_goals simp_all [lift_erase, paramToks_erase, eraseTok, expressionToks_erase, expressionsToks_erase]
+    theorem expressionsToks_erase (depth : Nat) (q op : String) (es : List (Expression Reference)) :
+        (expressionsToks depth q op es).map eraseTok = expressionsToks depth q op (eraseExpressions es) := by
+      cases es <;> simp [expressionsToks, eraseExpressions, lift_erase, expressionToks_erase, expressionsToks_erase]
+    end
 
     structure Scan where
       schema : String
       table : String
-      conds : List (String × Value)
+      conds : Expression Reference
       order : List (String × Direction)
       limit : Option Nat
+      offset : Option Nat
+      deriving Repr
+
+    inductive AggregateOp where
+      | sum | avg | min | max
       deriving DecidableEq, Repr
 
+    def aggregateText : AggregateOp → String
+      | .sum => "sum(" | .avg => "avg(" | .min => "min(" | .max => "max("
+
+    inductive Leaf where
+      | column (name : String)
+      | typename (name : String)
+      | count
+      | metric (op : AggregateOp) (name : String)
+      deriving DecidableEq, Repr
+
+    def leafLex (qualifier : String) : Leaf → List Lex
+      | .column name => [.col qualifier name]
+      | .typename name => [.string name]
+      | .count => [.raw "count(", .ident qualifier, .raw ".*)"]
+      | .metric op name => [.raw (aggregateText op), .col qualifier name, .raw ")"]
+
     inductive Node where
-      | column (alias column : String)
+      | group (alias : String) (children : List Node)
+      | nodes (alias : String) (order : List (String × Direction)) (children : List Node)
+      | column (alias : String) (column : Leaf)
       | relation (alias : String) (kind : Kind) (scan : Scan) (parent child : List String)
           (children : List Node)
       deriving Repr
 
     structure Query where
+      kind : Kind
       scan : Scan
       children : List Node
       deriving Repr
@@ -176,6 +350,10 @@ leanfran::lean! {
     def directionText : Direction → String
       | .asc => "ASC NULLS LAST"
       | .desc => "DESC NULLS FIRST"
+      | .ascNullsFirst => "ASC NULLS FIRST"
+      | .ascNullsLast => "ASC NULLS LAST"
+      | .descNullsFirst => "DESC NULLS FIRST"
+      | .descNullsLast => "DESC NULLS LAST"
 
     def orderLex (qualifier : String) (order : List (String × Direction)) : List Lex :=
       if order.isEmpty then []
@@ -185,31 +363,57 @@ leanfran::lean! {
       | none => []
       | some n => [.raw "LIMIT", .nat n]
 
-    def condToks (cond : String × Value) : List Tok :=
-      [.lex (.raw "AND"), .lex (.col "s" cond.1), .lex (.raw "="), .param cond.2]
+    def offsetLex : Option Nat → List Lex
+      | none => []
+      | some n => [.raw "OFFSET", .nat n]
 
     def scanToks (scan : Scan) (link : List Lex) : List Tok :=
       lift ([.raw "SELECT \"s\".* FROM", .col scan.schema scan.table, .raw "AS \"s\" WHERE"] ++ link)
-        ++ scan.conds.flatMap condToks
-        ++ lift (orderLex "s" scan.order ++ limitLex scan.limit)
+        ++ lift [.raw "AND ("] ++ expressionToks 0 "s" scan.conds ++ lift [.raw ")"]
+        ++ lift (orderLex "s" scan.order ++ limitLex scan.limit ++ offsetLex scan.offset)
 
-    def isSet (set : Bool) (kind : Kind) (limit : Option Nat) : Bool :=
-      set && kind == .array && limit.isNone
+    def isSet (set : Bool) (kind : Kind) (limit offset : Option Nat) : Bool :=
+      set && kind != .object && limit.isNone && offset.isNone
 
+    def emptyLeaf : Leaf → List Lex
+      | .count => [.nat 0]
+      | .typename name => [.string name]
+      | _ => [.raw "null"]
+
+    mutual
+    def emptyField : Node → List Lex
+      | .column alias leaf => emptyLeaf leaf ++ [.raw "AS", .ident alias]
+      | .group alias children => emptyRow children ++ [.raw "AS", .ident alias]
+      | .nodes alias _ _ => [.raw "'[]'::json AS", .ident alias]
+      | .relation alias _ _ _ _ _ => [.raw "null AS", .ident alias]
+    def emptyFields : List Node → List (List Lex)
+      | [] => []
+      | n :: ns => emptyField n :: emptyFields ns
+    def emptyRow (children : List Node) : List Lex :=
+      [.raw "row_to_json((SELECT \"%\" FROM (SELECT"] ++ commas (emptyFields children)
+        ++ [.raw ") AS \"%\"))"]
+    end
+
+    mutual
     def fieldLex (depth index : Nat) (set : Bool) : Node → List Lex
-      | .column alias column => [.col (tName depth) column, .raw "AS", .ident alias]
-      | .relation alias kind scan _ _ _ =>
-        if isSet set kind scan.limit then
-          [.raw "coalesce(", .col (cName index) "j", .raw ", '[]') AS", .ident alias]
+      | .column alias column => leafLex (tName depth) column ++ [.raw "AS", .ident alias]
+      | .group alias children => rowLex depth set children ++ [.raw "AS", .ident alias]
+      | .nodes alias order _ =>
+        [.raw "coalesce(json_agg(", .col (cName index) "j"] ++ orderLex (tName depth) order
+          ++ [.raw "), '[]') AS", .ident alias]
+      | .relation alias kind scan _ _ children =>
+        if isSet set kind scan.limit scan.offset then
+          [.raw "coalesce(", .col (cName index) "j", .raw ","]
+            ++ (if kind = .aggregate then emptyRow children else [.raw "'[]'::json"])
+            ++ [.raw ") AS", .ident alias]
         else [.col (cName index) "j", .raw "AS", .ident alias]
-
     def fieldsFrom (depth index : Nat) (set : Bool) : List Node → List (List Lex)
       | [] => []
       | n :: ns => fieldLex depth index set n :: fieldsFrom depth (index + 1) set ns
-
     def rowLex (depth : Nat) (set : Bool) (children : List Node) : List Lex :=
       [.raw "row_to_json((SELECT \"%\" FROM (SELECT"] ++ commas (fieldsFrom depth 0 set children)
         ++ [.raw ") AS \"%\"))"]
+    end
 
     def lateralLink (depth : Nat) (parent child : List String) : List Lex :=
       .raw "true" :: (parent.zip child).flatMap fun pair =>
@@ -231,26 +435,36 @@ leanfran::lean! {
 
     def lateralScan (kind : Kind) (scan : Scan) : Scan :=
       match kind with
-      | .object => { scan with order := [], limit := some 1 }
-      | .array => scan
+      | .object => { scan with order := [], limit := some 1, offset := none }
+      | .array | .aggregate => scan
 
     def lateralAgg (depth : Nat) (kind : Kind) (scan : Scan) (children : List Node) : List Lex :=
       match kind with
-      | .object => rowLex depth false children
+      | .object | .aggregate => rowLex depth false children
       | .array =>
         [.raw "coalesce(json_agg("] ++ rowLex depth false children ++ orderLex (tName depth) scan.order
           ++ [.raw "), '[]')"]
 
+    def resultLex (depth : Nat) (set : Bool) (kind : Kind) (scan : Scan) (children : List Node) : List Lex :=
+      if kind = .aggregate then rowLex depth set children
+      else [.raw "coalesce(json_agg("] ++ rowLex depth set children ++ orderLex (tName depth) scan.order
+        ++ [.raw "), '[]')"]
+
     mutual
     def joinToks (depth index : Nat) (set : Bool) : Node → List Tok
       | .column _ _ => []
+      | .group _ children => joinsToks depth 0 set children
+      | .nodes _ _ children =>
+        lift ([.raw "LEFT JOIN LATERAL (SELECT"] ++ rowLex depth set children
+          ++ [.raw "AS \"j\" FROM (SELECT true) AS \"_\""])
+          ++ joinsToks depth 0 set children
+          ++ lift [.raw ") AS", .ident (cName index), .raw "ON true"]
       | .relation _ kind scan parent child children =>
-        if isSet set kind scan.limit then
+        if isSet set kind scan.limit scan.offset then
           lift [.raw "LEFT JOIN (WITH", .ident (rName (depth + 1)), .raw "AS ("]
             ++ scanToks scan (setLink depth parent child)
-            ++ lift ([.raw ") SELECT"] ++ keyLex (depth + 1) child ++ [.raw "json_agg("]
-              ++ rowLex (depth + 1) true children ++ orderLex (tName (depth + 1)) scan.order
-              ++ [.raw ") AS \"j\" FROM", .ident (rName (depth + 1)), .raw "AS", .ident (tName (depth + 1))])
+            ++ lift ([.raw ") SELECT"] ++ keyLex (depth + 1) child ++ resultLex (depth + 1) true kind scan children
+              ++ [.raw "AS \"j\" FROM", .ident (rName (depth + 1)), .raw "AS", .ident (tName (depth + 1))])
             ++ joinsToks (depth + 1) 0 true children
             ++ lift ([.raw "GROUP BY"] ++ groupLex (depth + 1) child
               ++ [.raw ") AS", .ident (cName index), .raw "ON"] ++ onLex depth index parent)
@@ -268,19 +482,19 @@ leanfran::lean! {
 
     def emit (query : Query) : List Tok :=
       lift [.raw "WITH", .ident (rName 0), .raw "AS ("] ++ scanToks query.scan [.raw "true"]
-        ++ lift ([.raw ") SELECT coalesce(json_agg("] ++ rowLex 0 true query.children
-          ++ orderLex (tName 0) query.scan.order
-          ++ [.raw "), '[]') FROM", .ident (rName 0), .raw "AS", .ident (tName 0)])
+        ++ lift ([.raw ") SELECT"] ++ resultLex 0 true query.kind query.scan query.children
+          ++ [.raw "FROM", .ident (rName 0), .raw "AS", .ident (tName 0)])
         ++ joinsToks 0 0 true query.children
 
     def compile (query : Query) : Compiled := render (emit query)
 
     def placeholders (query : Query) : List Nat := slots (emit query)
 
-    def scanValues (scan : Scan) : List Value := scan.conds.map (·.2)
+    def scanValues (scan : Scan) : List Value := expressionValues scan.conds
 
     mutual
     def nodeValues : Node → List Value
+      | .group _ children | .nodes _ _ children => nodesValues children
       | .column _ _ => []
       | .relation _ _ scan _ _ children => scanValues scan ++ nodesValues children
     def nodesValues : List Node → List Value
@@ -290,10 +504,12 @@ leanfran::lean! {
 
     def queryValues (query : Query) : List Value := scanValues query.scan ++ nodesValues query.children
 
-    def eraseScan (scan : Scan) : Scan := { scan with conds := scan.conds.map fun c => (c.1, .int 0) }
+    def eraseScan (scan : Scan) : Scan := { scan with conds := eraseExpression scan.conds }
 
     mutual
     def eraseNode : Node → Node
+      | .group alias children => .group alias (eraseNodes children)
+      | .nodes alias order children => .nodes alias order (eraseNodes children)
       | .column alias column => .column alias column
       | .relation alias kind scan parent child children =>
         .relation alias kind (eraseScan scan) parent child (eraseNodes children)
@@ -303,27 +519,15 @@ leanfran::lean! {
     end
 
     def eraseQuery (query : Query) : Query :=
-      { scan := eraseScan query.scan, children := eraseNodes query.children }
-
-    theorem conds_values (conds : List (String × Value)) :
-        (conds.flatMap condToks).filterMap tokValue = conds.map (·.2) := by
-      induction conds with
-      | nil => rfl
-      | cons c conds ih => simp [condToks, tokValue, List.filterMap, ih]
-
-    theorem conds_erase (conds : List (String × Value)) :
-        (conds.flatMap condToks).map eraseTok = (conds.map fun c => (c.1, Value.int 0)).flatMap condToks := by
-      induction conds with
-      | nil => rfl
-      | cons c conds ih => simp [condToks, eraseTok, ih]
+      { kind := query.kind, scan := eraseScan query.scan, children := eraseNodes query.children }
 
     theorem scanToks_values (scan : Scan) (link : List Lex) :
         (scanToks scan link).filterMap tokValue = scanValues scan := by
-      simp [scanToks, scanValues, lift_values, conds_values]
+      simp [scanToks, scanValues, lift_values, expressionToks_values]
 
     theorem scanToks_erase (scan : Scan) (link : List Lex) :
         (scanToks scan link).map eraseTok = scanToks (eraseScan scan) link := by
-      simp [scanToks, eraseScan, lift_erase, conds_erase]
+      simp [scanToks, eraseScan, lift_erase, expressionToks_erase]
 
     theorem lateralScan_values (kind : Kind) (scan : Scan) :
         scanValues (lateralScan kind scan) = scanValues scan := by
@@ -343,6 +547,8 @@ leanfran::lean! {
         split <;>
           simp [lift_values, scanToks_values, lateralScan_values,
             joinsToks_values (depth + 1) 0 _ children]
+      | group alias children => simpa [joinToks, nodeValues] using joinsToks_values depth 0 set children
+      | nodes alias order children => simp [joinToks, nodeValues, lift_values, joinsToks_values depth 0 set children]
     theorem joinsToks_values (depth index : Nat) (set : Bool) (ns : List Node) :
         (joinsToks depth index set ns).filterMap tokValue = nodesValues ns := by
       cases ns with
@@ -352,19 +558,61 @@ leanfran::lean! {
           joinsToks_values depth (index + 1) set ns]
     end
 
+    mutual
+    theorem emptyField_erase (n : Node) : emptyField (eraseNode n) = emptyField n := by
+      cases n with
+      | column alias leaf => rfl
+      | relation alias kind scan parent child children => simp [emptyField, eraseNode]
+      | nodes alias order children => simp [emptyField, eraseNode]
+      | group alias children => simp [emptyField, eraseNode, emptyRow_erase children]
+    termination_by 2 * sizeOf n + 0
+    decreasing_by all_goals simp_wf <;> omega
+
+    theorem emptyFields_erase (ns : List Node) : emptyFields (eraseNodes ns) = emptyFields ns := by
+      cases ns with
+      | nil => rfl
+      | cons n ns => simp [emptyFields, eraseNodes, emptyField_erase n, emptyFields_erase ns]
+    termination_by 2 * sizeOf ns + 0
+    decreasing_by all_goals simp_wf <;> omega
+
+    theorem emptyRow_erase (ns : List Node) : emptyRow (eraseNodes ns) = emptyRow ns := by
+      simp [emptyRow, emptyFields_erase ns]
+    termination_by 2 * sizeOf ns + 1
+    decreasing_by all_goals simp_wf <;> omega
+
+    end
+
+    mutual
     theorem fieldLex_erase (depth index : Nat) (set : Bool) (n : Node) :
         fieldLex depth index set (eraseNode n) = fieldLex depth index set n := by
-      cases n <;> simp [eraseNode, fieldLex, eraseScan]
+      cases n with
+      | column alias leaf => rfl
+      | nodes alias order children => simp [fieldLex, eraseNode]
+      | relation alias kind scan parent child children => simp [eraseNode, fieldLex, eraseScan, emptyRow_erase]
+      | group alias children => simp [eraseNode, fieldLex, rowLex_erase depth set children]
+    termination_by 2 * sizeOf n + 0
+    decreasing_by all_goals simp_wf <;> omega
 
     theorem fieldsFrom_erase (depth index : Nat) (set : Bool) (ns : List Node) :
         fieldsFrom depth index set (eraseNodes ns) = fieldsFrom depth index set ns := by
-      induction ns generalizing index with
-      | nil => simp [eraseNodes, fieldsFrom]
-      | cons n ns ih => simp [eraseNodes, fieldsFrom, fieldLex_erase, ih]
+      cases ns with
+      | nil => rfl
+      | cons n ns => simp [eraseNodes, fieldsFrom, fieldLex_erase depth index set n,
+          fieldsFrom_erase depth (index + 1) set ns]
+    termination_by 2 * sizeOf ns + 0
+    decreasing_by all_goals simp_wf <;> omega
 
     theorem rowLex_erase (depth : Nat) (set : Bool) (ns : List Node) :
         rowLex depth set (eraseNodes ns) = rowLex depth set ns := by
-      simp [rowLex, fieldsFrom_erase]
+      simp [rowLex, fieldsFrom_erase depth 0 set ns]
+    termination_by 2 * sizeOf ns + 1
+    decreasing_by all_goals simp_wf <;> omega
+
+    end
+
+    theorem resultLex_erase (depth : Nat) (set : Bool) (kind : Kind) (scan : Scan) (ns : List Node) :
+        resultLex depth set kind (eraseScan scan) (eraseNodes ns) = resultLex depth set kind scan ns := by
+      simp [resultLex, rowLex_erase, eraseScan]
 
     theorem lateralAgg_erase (depth : Nat) (kind : Kind) (scan : Scan) (ns : List Node) :
         lateralAgg depth kind (eraseScan scan) (eraseNodes ns) = lateralAgg depth kind scan ns := by
@@ -378,11 +626,13 @@ leanfran::lean! {
       | relation alias kind scan parent child children =>
         simp only [joinToks, eraseNode]
         have hlimit : (eraseScan scan).limit = scan.limit := rfl
-        have horder : (eraseScan scan).order = scan.order := rfl
-        rw [hlimit, horder]
+        have hoffset : (eraseScan scan).offset = scan.offset := rfl
+        rw [hlimit, hoffset]
         split <;>
-          simp [lift_erase, scanToks_erase, lateralScan_erase, rowLex_erase, lateralAgg_erase,
-            joinsToks_erase (depth + 1) 0 _ children]
+          simp [lift_erase, scanToks_erase, lateralScan_erase, lateralAgg_erase,
+            joinsToks_erase (depth + 1) 0 _ children, resultLex_erase]
+      | group alias children => simpa [joinToks, eraseNode] using joinsToks_erase depth 0 set children
+      | nodes alias order children => simp [joinToks, eraseNode, lift_erase, rowLex_erase, joinsToks_erase depth 0 set children]
     theorem joinsToks_erase (depth index : Nat) (set : Bool) (ns : List Node) :
         (joinsToks depth index set ns).map eraseTok = joinsToks depth index set (eraseNodes ns) := by
       cases ns with
@@ -396,8 +646,7 @@ leanfran::lean! {
       simp [emit, queryValues, lift_values, scanToks_values, joinsToks_values]
 
     theorem emit_erase (query : Query) : (emit query).map eraseTok = emit (eraseQuery query) := by
-      have horder : (eraseScan query.scan).order = query.scan.order := rfl
-      simp [emit, eraseQuery, lift_erase, scanToks_erase, joinsToks_erase, rowLex_erase, horder]
+      simp [emit, eraseQuery, lift_erase, scanToks_erase, joinsToks_erase, resultLex_erase]
 
     theorem compile_params (query : Query) : (compile query).params = queryValues query := by
       simp [compile, render, emit_values]
@@ -412,7 +661,13 @@ leanfran::lean! {
       simp [placeholders, slots_numbered, h]
 
     theorem lateralScan_object (scan : Scan) :
-        lateralScan .object scan = { scan with order := [], limit := some 1 } := rfl
+        lateralScan .object scan = { scan with order := [], limit := some 1, offset := none } := rfl
+
+    theorem lateralScan_limit (kind : Kind) (scan : Scan) :
+        (lateralScan kind scan).limit = (if kind = .object then some 1 else scan.limit) := by
+      cases kind <;> rfl
+
+    theorem lateralScan_aggregate (scan : Scan) : lateralScan .aggregate scan = scan := rfl
 
     theorem lateralScan_array (scan : Scan) : lateralScan .array scan = scan := rfl
 
@@ -437,13 +692,19 @@ leanfran::lean! {
       relations : List Relation
       deriving DecidableEq, Repr
 
-    structure Schema where
-      tables : List Table
+    inductive RootKind where
+      | list | aggregate
       deriving DecidableEq, Repr
 
-    structure Cond where
+    structure RootField where
       field : String
-      value : Value
+      target : String
+      kind : RootKind
+      deriving DecidableEq, Repr
+
+    structure Schema where
+      tables : List Table
+      roots : List RootField
       deriving DecidableEq, Repr
 
     structure Order where
@@ -454,19 +715,22 @@ leanfran::lean! {
     structure Selection where
       alias : String
       name : String
-      conds : List Cond
+      conds : Option (Expression String)
       order : List Order
       limit : Option Nat
+      offset : Option Nat
       children : List Selection
       deriving Repr
 
     inductive Error where
+      | unknownRoot (name : String)
       | unknownType (name : String)
       | unknownField (type field : String)
       | columnArguments (type field : String)
       | objectArguments (type field : String)
       | invalidRelation (type field : String)
       | invalidSelection (type : String)
+      | invalidFilter
       | tooDeep
       deriving DecidableEq, Repr
 
@@ -474,10 +738,21 @@ leanfran::lean! {
 
     def maxFields : Nat := 1000
 
+    def maxFilterDepth : Nat := 32
+
+    def maxInValues : Nat := 1000
+
+    def filterValues (f : Option (Expression String)) : List Value :=
+      f.toList.flatMap expressionValues
+
     def rowAlias : String := "%"
 
     def findColumn (table : Table) (field : String) : Option String :=
       (table.columns.find? (·.field = field)).map (·.column)
+
+    def findField (table : Table) (name : String) : Option Leaf :=
+      if name = "__typename" then some (.typename table.name)
+      else (findColumn table name).map Leaf.column
 
     def findRelation (table : Table) (field : String) : Option Relation :=
       table.relations.find? (·.field = field)
@@ -485,15 +760,70 @@ leanfran::lean! {
     def findTable (schema : Schema) (name : String) : Option Table :=
       schema.tables.find? (·.name = name)
 
-    def resolveConds (table : Table) : List Cond → Except Error (List (String × Value))
+    def scalarValid : Value → Bool
+      | .null => false
+      | .float bits => (bits / 4503599627370496) % 2048 != 2047
+      | _ => true
+
+    def membershipValid (vs : List Value) : Bool :=
+      vs.length ≤ maxInValues && vs.all scalarValid
+
+    def relationValid (relation : Relation) : Bool :=
+      !relation.parent.isEmpty && relation.parent.length == relation.child.length
+
+    mutual
+    def resolveExpression (schema : Schema) (table : Table) (depth : Nat)
+        (e : Expression String) : Except Error (Expression Reference) :=
+        if maxFilterDepth < depth then .error .tooDeep
+        else match e with
+        | .compare field op v =>
+          if !scalarValid v then .error .invalidFilter
+          else match findColumn table field with
+          | none => .error (.unknownField table.name field)
+          | some column => .ok (.compare column op v)
+        | .member field neg vs =>
+          if !membershipValid vs then .error .invalidFilter
+          else match findColumn table field with
+          | none => .error (.unknownField table.name field)
+          | some column => .ok (.member column neg vs)
+        | .isNull field b =>
+          match findColumn table field with
+          | none => .error (.unknownField table.name field)
+          | some column => .ok (.isNull column b)
+        | .and es =>
+          if maxFields < es.length then .error .invalidFilter
+          else (resolveExpressions schema table (depth + 1) es).map Expression.and
+        | .or es =>
+          if maxFields < es.length then .error .invalidFilter
+          else (resolveExpressions schema table (depth + 1) es).map Expression.or
+        | .not e => (resolveExpression schema table (depth + 1) e).map Expression.not
+        | .relation name e =>
+          match findRelation table name with
+          | none => .error (.unknownField table.name name)
+          | some relation =>
+            if relation.kind = .aggregate then .error (.unknownField table.name name)
+            else if !relationValid relation then .error (.invalidRelation table.name name)
+            else match findTable schema relation.target with
+            | none => .error (.unknownType relation.target)
+            | some target =>
+              (resolveExpression schema target (depth + 1) e).map fun out =>
+                .relation ⟨target.schema, target.table, relation.parent, relation.child⟩ out
+    termination_by sizeOf e
+    def resolveExpressions (schema : Schema) (table : Table) (depth : Nat)
+        (es : List (Expression String)) : Except Error (List (Expression Reference)) :=
+      match es with
       | [] => .ok []
-      | c :: cs =>
-        match findColumn table c.field with
-        | none => .error (.unknownField table.name c.field)
-        | some column =>
-          match resolveConds table cs with
-          | .error e => .error e
-          | .ok rest => .ok ((column, c.value) :: rest)
+      | e :: es =>
+        match resolveExpression schema table depth e with
+        | .error err => .error err
+        | .ok out => (resolveExpressions schema table depth es).map (out :: ·)
+    termination_by sizeOf es
+    end
+
+    def resolveFilter (schema : Schema) (table : Table) :
+        Option (Expression String) → Except Error (Expression Reference)
+      | none => .ok (.and [])
+      | some e => resolveExpression schema table 0 e
 
     def resolveOrder (table : Table) : List Order → Except Error (List (String × Direction))
       | [] => .ok []
@@ -505,14 +835,14 @@ leanfran::lean! {
           | .error e => .error e
           | .ok rest => .ok ((column, o.direction) :: rest)
 
-    def resolveScan (table : Table) (conds : List Cond) (order : List Order) (limit : Option Nat) :
+    def resolveScan (schema : Schema) (table : Table) (conds : Option (Expression String)) (order : List Order) (limit offset : Option Nat) :
         Except Error Scan :=
-      match resolveConds table conds with
+      match resolveFilter schema table conds with
       | .error e => .error e
       | .ok conds =>
         match resolveOrder table order with
         | .error e => .error e
-        | .ok order => .ok { schema := table.schema, table := table.table, conds, order, limit }
+        | .ok order => .ok { schema := table.schema, table := table.table, conds, order, limit, offset }
 
     def aliasValid (alias : String) : Bool :=
       alias ≠ "" && alias ≠ rowAlias && alias.utf8ByteSize ≤ 63
@@ -524,63 +854,102 @@ leanfran::lean! {
     def selectionValid (aliases : List String) : Bool :=
       !aliases.isEmpty && aliases.length ≤ maxFields && aliases.all aliasValid && distinct aliases
 
-    def relationValid (relation : Relation) : Bool :=
-      !relation.parent.isEmpty && relation.parent.length == relation.child.length
-
     def plain (selection : Selection) : Bool :=
-      selection.conds.isEmpty && selection.order.isEmpty && selection.limit.isNone
+      selection.conds.isNone && selection.order.isEmpty && selection.limit.isNone && selection.offset.isNone
+
+    inductive Mode where
+      | row | aggregate | summary | metric (op : AggregateOp)
+      deriving DecidableEq, Repr
+
+    def relationMode : Kind → Mode
+      | .aggregate => .aggregate
+      | _ => .row
+
+    def summaryOp : String → Option AggregateOp
+      | "sum" => some .sum | "avg" => some .avg | "min" => some .min | "max" => some .max
+      | _ => none
+
+    def modeLeaf (table : Table) (mode : Mode) (name : String) : Option Leaf :=
+      match mode with
+      | .row => findField table name
+      | .summary => if name = "count" then some .count else none
+      | .metric op => (findColumn table name).map (.metric op)
+      | .aggregate => none
+
+    def childMode (mode : Mode) (name : String) : Option Mode :=
+      match mode with
+      | .aggregate => if name = "aggregate" then some .summary else if name = "nodes" then some .row else none
+      | .summary => (summaryOp name).map Mode.metric
+      | _ => none
 
     mutual
-    def resolveNode (schema : Schema) (table : Table) (depth : Nat) : Selection → Except Error Node
-      | ⟨alias, name, conds, order, limit, children⟩ =>
-        match findColumn table name with
+    def resolveNode (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+        (scanOrder : List (String × Direction)) : Selection → Except Error Node
+      | ⟨alias, name, conds, order, limit, offset, children⟩ =>
+        match modeLeaf table mode name with
         | some column =>
-          if conds.isEmpty && order.isEmpty && limit.isNone && children.isEmpty then
+          if conds.isNone && order.isEmpty && limit.isNone && offset.isNone && children.isEmpty then
             .ok (.column alias column)
           else .error (.columnArguments table.name name)
         | none =>
-          match findRelation table name with
-          | none => .error (.unknownField table.name name)
-          | some relation =>
-            match findTable schema relation.target with
-            | none => .error (.unknownType relation.target)
-            | some target =>
-              if maxDepth ≤ depth then .error .tooDeep
-              else if relation.kind = .object && !(conds.isEmpty && order.isEmpty && limit.isNone) then
-                .error (.objectArguments table.name name)
-              else if !relationValid relation then .error (.invalidRelation table.name name)
-              else if !selectionValid (children.map (·.alias)) then .error (.invalidSelection target.name)
-              else
-                match resolveScan target conds order limit with
-                | .error e => .error e
-                | .ok scan =>
-                  match resolveNodes schema target (depth + 1) children with
+          match childMode mode name with
+          | some next =>
+            if maxDepth + 3 ≤ depth then .error .tooDeep
+            else if !(conds.isNone && order.isEmpty && limit.isNone && offset.isNone) then
+              .error (.columnArguments table.name name)
+            else if !selectionValid (children.map (·.alias)) then .error (.invalidSelection table.name)
+            else
+              match resolveNodes schema table (depth + 1) next scanOrder children with
+              | .error e => .error e
+              | .ok nodes => .ok (if mode = .aggregate && name = "nodes" then .nodes alias scanOrder nodes else .group alias nodes)
+          | none =>
+            if mode != .row then .error (.unknownField table.name name)
+            else match findRelation table name with
+            | none => .error (.unknownField table.name name)
+            | some relation =>
+              match findTable schema relation.target with
+              | none => .error (.unknownType relation.target)
+              | some target =>
+                if maxDepth ≤ depth then .error .tooDeep
+                else if relation.kind = .object && !(conds.isNone && order.isEmpty && limit.isNone && offset.isNone) then
+                  .error (.objectArguments table.name name)
+                else if !relationValid relation then .error (.invalidRelation table.name name)
+                else if !selectionValid (children.map (·.alias)) then .error (.invalidSelection target.name)
+                else
+                  match resolveScan schema target conds order limit offset with
                   | .error e => .error e
-                  | .ok nodes => .ok (.relation alias relation.kind scan relation.parent relation.child nodes)
-    def resolveNodes (schema : Schema) (table : Table) (depth : Nat) :
-        List Selection → Except Error (List Node)
+                  | .ok scan =>
+                    match resolveNodes schema target (depth + 1) (relationMode relation.kind) scan.order children with
+                    | .error e => .error e
+                    | .ok nodes => .ok (.relation alias relation.kind scan relation.parent relation.child nodes)
+    def resolveNodes (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+        (scanOrder : List (String × Direction)) : List Selection → Except Error (List Node)
       | [] => .ok []
       | s :: ss =>
-        match resolveNode schema table depth s with
+        match resolveNode schema table depth mode scanOrder s with
         | .error e => .error e
         | .ok node =>
-          match resolveNodes schema table depth ss with
+          match resolveNodes schema table depth mode scanOrder ss with
           | .error e => .error e
           | .ok nodes => .ok (node :: nodes)
     end
 
     def resolve (schema : Schema) (root : Selection) : Except Error Query :=
-      match findTable schema root.name with
-      | none => .error (.unknownType root.name)
-      | some table =>
-        if !selectionValid (root.children.map (·.alias)) then .error (.invalidSelection table.name)
-        else
-          match resolveScan table root.conds root.order root.limit with
-          | .error e => .error e
-          | .ok scan =>
-            match resolveNodes schema table 0 root.children with
+      match schema.roots.find? (·.field = root.name) with
+      | none => .error (.unknownRoot root.name)
+      | some field =>
+        match findTable schema field.target with
+        | none => .error (.unknownType field.target)
+        | some table =>
+          if !selectionValid (root.children.map (·.alias)) then .error (.invalidSelection table.name)
+          else
+            match resolveScan schema table root.conds root.order root.limit root.offset with
             | .error e => .error e
-            | .ok children => .ok { scan, children }
+            | .ok scan =>
+              let kind := if field.kind = .aggregate then Kind.aggregate else Kind.array
+              match resolveNodes schema table 0 (relationMode kind) scan.order root.children with
+              | .error e => .error e
+              | .ok children => .ok { kind, scan, children }
 
     def run (schema : Schema) (root : Selection) : Except Error Compiled :=
       match resolve schema root with
@@ -589,29 +958,51 @@ leanfran::lean! {
 
     mutual
     def selectionValues : Selection → List Value
-      | ⟨_, _, conds, _, _, children⟩ => conds.map (·.value) ++ selectionsValues children
+      | ⟨_, _, conds, _, _, _, children⟩ => filterValues conds ++ selectionsValues children
     def selectionsValues : List Selection → List Value
       | [] => []
       | s :: ss => selectionValues s ++ selectionsValues ss
     end
 
-    theorem resolveConds_values (table : Table) (conds : List Cond) (out : List (String × Value))
-        (h : resolveConds table conds = .ok out) : out.map (·.2) = conds.map (·.value) := by
-      induction conds generalizing out with
-      | nil => simp [resolveConds] at h; simp [← h]
-      | cons c cs ih =>
-        simp only [resolveConds] at h
-        split at h
-        · cases h
-        · split at h
-          · cases h
-          · rename_i rest hrest
-            cases h
-            simp [ih rest hrest]
+    mutual
+    theorem resolveExpression_values (schema : Schema) (table : Table) (depth : Nat)
+        (e : Expression String) (out : Expression Reference)
+        (h : resolveExpression schema table depth e = .ok out) :
+        expressionValues out = expressionValues e := by
+      cases e <;> simp only [resolveExpression] at h
+      all_goals repeat' first | cases h | split at h
+      all_goals try simp only [Except.map] at h
+      all_goals repeat' first | cases h | split at h
+      all_goals simp only [expressionValues]
+      all_goals first
+        | rfl
+        | exact resolveExpression_values _ _ _ _ _ (by assumption)
+        | exact resolveExpressions_values _ _ _ _ _ (by assumption)
+    theorem resolveExpressions_values (schema : Schema) (table : Table) (depth : Nat)
+        (es : List (Expression String)) (out : List (Expression Reference))
+        (h : resolveExpressions schema table depth es = .ok out) :
+        expressionsValues out = expressionsValues es := by
+      cases es <;> simp only [resolveExpressions] at h
+      all_goals repeat' first | cases h | split at h
+      all_goals try simp only [Except.map] at h
+      all_goals repeat' first | cases h | split at h
+      all_goals simp only [expressionsValues]
+      all_goals first
+        | rfl
+        | rw [resolveExpression_values _ _ _ _ _ (by assumption),
+            resolveExpressions_values _ _ _ _ _ (by assumption)]
+    end
 
-    theorem resolveScan_values (table : Table) (conds : List Cond) (order : List Order)
-        (limit : Option Nat) (scan : Scan) (h : resolveScan table conds order limit = .ok scan) :
-        scanValues scan = conds.map (·.value) := by
+    theorem resolveFilter_values (schema : Schema) (table : Table) (f : Option (Expression String))
+        (out : Expression Reference) (h : resolveFilter schema table f = .ok out) :
+        expressionValues out = filterValues f := by
+      cases f with
+      | none => cases h; rfl
+      | some e => simpa [resolveFilter, filterValues] using resolveExpression_values schema table 0 e out h
+
+    theorem resolveScan_values (schema : Schema) (table : Table) (conds : Option (Expression String)) (order : List Order)
+        (limit offset : Option Nat) (scan : Scan) (h : resolveScan schema table conds order limit offset = .ok scan) :
+        scanValues scan = filterValues conds := by
       simp only [resolveScan] at h
       split at h
       · cases h
@@ -619,58 +1010,36 @@ leanfran::lean! {
         split at h
         · cases h
         · cases h
-          simpa [scanValues] using resolveConds_values table conds out hout
+          simpa [scanValues] using resolveFilter_values schema table conds out hout
 
     mutual
-    theorem resolveNode_values (schema : Schema) (table : Table) (depth : Nat) (s : Selection)
-        (n : Node) (h : resolveNode schema table depth s = .ok n) :
+    theorem resolveNode_values (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+        (scanOrder : List (String × Direction)) (s : Selection)
+        (n : Node) (h : resolveNode schema table depth mode scanOrder s = .ok n) :
         nodeValues n = selectionValues s := by
-      obtain ⟨alias, name, conds, order, limit, children⟩ := s
+      obtain ⟨alias, name, conds, order, limit, offset, children⟩ := s
       simp only [resolveNode] at h
-      split at h
-      · split at h
-        · rename_i hplain
-          cases h
-          simp at hplain
-          simp [nodeValues, selectionValues, selectionsValues, hplain]
-        · cases h
-      · split at h
-        · cases h
-        · split at h
-          · cases h
-          · split at h
-            · cases h
-            · split at h
-              · cases h
-              · split at h
-                · cases h
-                · split at h
-                  · cases h
-                  · split at h
-                    · cases h
-                    · rename_i scan hscan
-                      split at h
-                      · cases h
-                      · rename_i nodes hnodes
-                        cases h
-                        simp [nodeValues, selectionValues, resolveScan_values _ _ _ _ _ hscan,
-                          resolveNodes_values _ _ _ _ _ hnodes]
-    theorem resolveNodes_values (schema : Schema) (table : Table) (depth : Nat) (ss : List Selection)
-        (ns : List Node) (h : resolveNodes schema table depth ss = .ok ns) :
+      all_goals repeat' first | cases h | split at h
+      all_goals simp_all
+      all_goals try split
+      all_goals simp only [nodeValues, selectionValues, filterValues, Option.toList_none, List.flatMap_nil,
+        List.nil_append, selectionsValues]
+      all_goals first
+        | rfl
+        | exact resolveNodes_values _ _ _ _ _ _ _ (by assumption)
+        | rw [resolveScan_values _ _ _ _ _ _ _ (by assumption),
+            resolveNodes_values _ _ _ _ _ _ _ (by assumption)]; rfl
+    theorem resolveNodes_values (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+        (scanOrder : List (String × Direction)) (ss : List Selection)
+        (ns : List Node) (h : resolveNodes schema table depth mode scanOrder ss = .ok ns) :
         nodesValues ns = selectionsValues ss := by
-      cases ss with
-      | nil => simp [resolveNodes] at h; simp [h, nodesValues, selectionsValues]
-      | cons s ss =>
-        simp only [resolveNodes] at h
-        split at h
-        · cases h
-        · rename_i node hnode
-          split at h
-          · cases h
-          · rename_i nodes hnodes
-            cases h
-            simp [nodesValues, selectionsValues, resolveNode_values _ _ _ _ _ hnode,
-              resolveNodes_values _ _ _ _ _ hnodes]
+      cases ss <;> simp only [resolveNodes] at h
+      all_goals repeat' first | cases h | split at h
+      all_goals simp only [nodesValues, selectionsValues]
+      all_goals first
+        | rfl
+        | rw [resolveNode_values _ _ _ _ _ _ _ (by assumption),
+            resolveNodes_values _ _ _ _ _ _ _ (by assumption)]
     end
 
     theorem resolve_values (schema : Schema) (root : Selection) :
@@ -679,21 +1048,12 @@ leanfran::lean! {
         | .error _ => True := by
       split
       · rename_i query h
-        obtain ⟨alias, name, conds, order, limit, children⟩ := root
         simp only [resolve] at h
-        split at h
-        · cases h
-        · split at h
-          · cases h
-          · split at h
-            · cases h
-            · rename_i scan hscan
-              split at h
-              · cases h
-              · rename_i nodes hnodes
-                cases h
-                simp [queryValues, selectionValues, resolveScan_values _ _ _ _ _ hscan,
-                  resolveNodes_values _ _ _ _ _ hnodes]
+        repeat' first | cases h | split at h
+        simp only [queryValues]
+        rw [resolveScan_values _ _ _ _ _ _ _ (by assumption),
+          resolveNodes_values _ _ _ _ _ _ _ (by assumption)]
+        cases root; rfl
       · trivial
 
     theorem run_params (schema : Schema) (root : Selection) :
@@ -708,11 +1068,70 @@ leanfran::lean! {
       · rename_i e hq
         simp [hq]
 
+    def referenceDeclared (schema : Schema) (ref : Reference) : Bool :=
+      schema.tables.any fun t => t.schema = ref.schema && t.table = ref.table
+
+    mutual
+    def expressionDeclared (schema : Schema) : Expression Reference → Bool
+      | .compare _ _ _ | .member _ _ _ | .isNull _ _ => true
+      | .and es | .or es => expressionsDeclared schema es
+      | .not e => expressionDeclared schema e
+      | .relation ref e => referenceDeclared schema ref && expressionDeclared schema e
+    def expressionsDeclared (schema : Schema) : List (Expression Reference) → Bool
+      | [] => true
+      | e :: es => expressionDeclared schema e && expressionsDeclared schema es
+    end
+
+    theorem found_reference (schema : Schema) (name : String) (table : Table)
+        (parent child : List String) (h : findTable schema name = some table) :
+        referenceDeclared schema ⟨table.schema, table.table, parent, child⟩ = true := by
+      have hmem := List.mem_of_find?_eq_some h
+      exact List.any_eq_true.mpr ⟨table, hmem, by simp⟩
+
+    mutual
+    theorem resolveExpression_declared (schema : Schema) (table : Table) (depth : Nat)
+        (e : Expression String) (out : Expression Reference)
+        (h : resolveExpression schema table depth e = .ok out) :
+        expressionDeclared schema out = true := by
+      cases e <;> simp only [resolveExpression] at h
+      all_goals repeat' first | cases h | split at h
+      all_goals try simp only [Except.map] at h
+      all_goals repeat' first | cases h | split at h
+      all_goals simp only [expressionDeclared, Bool.and_eq_true]
+      all_goals first
+        | rfl
+        | exact resolveExpression_declared _ _ _ _ _ (by assumption)
+        | exact resolveExpressions_declared _ _ _ _ _ (by assumption)
+        | exact ⟨found_reference _ _ _ _ _ (by assumption),
+            resolveExpression_declared _ _ _ _ _ (by assumption)⟩
+    theorem resolveExpressions_declared (schema : Schema) (table : Table) (depth : Nat)
+        (es : List (Expression String)) (out : List (Expression Reference))
+        (h : resolveExpressions schema table depth es = .ok out) :
+        expressionsDeclared schema out = true := by
+      cases es <;> simp only [resolveExpressions] at h
+      all_goals repeat' first | cases h | split at h
+      all_goals try simp only [Except.map] at h
+      all_goals repeat' first | cases h | split at h
+      all_goals simp only [expressionsDeclared, Bool.and_eq_true]
+      all_goals first
+        | rfl
+        | exact ⟨resolveExpression_declared _ _ _ _ _ (by assumption),
+            resolveExpressions_declared _ _ _ _ _ (by assumption)⟩
+    end
+
+    theorem resolveFilter_declared (schema : Schema) (table : Table) (f : Option (Expression String))
+        (out : Expression Reference) (h : resolveFilter schema table f = .ok out) :
+        expressionDeclared schema out = true := by
+      cases f with
+      | none => cases h; rfl
+      | some e => exact resolveExpression_declared schema table 0 e out h
+
     def declared (schema : Schema) (scan : Scan) : Bool :=
-      schema.tables.any fun t => t.schema = scan.schema && t.table = scan.table
+      referenceDeclared schema ⟨scan.schema, scan.table, [], []⟩ && expressionDeclared schema scan.conds
 
     mutual
     def nodeScans : Node → List Scan
+      | .group _ children | .nodes _ _ children => nodesScans children
       | .column _ _ => []
       | .relation _ _ scan _ _ children => scan :: nodesScans children
     def nodesScans : List Node → List Scan
@@ -723,69 +1142,45 @@ leanfran::lean! {
     def queryScans (query : Query) : List Scan := query.scan :: nodesScans query.children
 
     theorem findTable_declared (schema : Schema) (name : String) (table : Table)
-        (conds : List Cond) (order : List Order) (limit : Option Nat) (scan : Scan)
+        (conds : Option (Expression String)) (order : List Order) (limit offset : Option Nat) (scan : Scan)
         (hfind : findTable schema name = some table)
-        (hscan : resolveScan table conds order limit = .ok scan) : declared schema scan = true := by
-      have hmem : table ∈ schema.tables := List.mem_of_find?_eq_some hfind
+        (hscan : resolveScan schema table conds order limit offset = .ok scan) : declared schema scan = true := by
       simp only [resolveScan] at hscan
       split at hscan
       · cases hscan
-      · split at hscan
+      · rename_i out hout
+        split at hscan
         · cases hscan
         · cases hscan
-          simp only [declared, List.any_eq_true]
-          exact ⟨table, hmem, by simp⟩
+          simp only [declared, Bool.and_eq_true]
+          exact ⟨found_reference _ _ _ _ _ hfind, resolveFilter_declared _ _ _ _ hout⟩
 
     mutual
-    theorem resolveNode_declared (schema : Schema) (table : Table) (depth : Nat) (s : Selection)
-        (n : Node) (h : resolveNode schema table depth s = .ok n) :
+    theorem resolveNode_declared (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+        (scanOrder : List (String × Direction)) (s : Selection)
+        (n : Node) (h : resolveNode schema table depth mode scanOrder s = .ok n) :
         (nodeScans n).all (declared schema) = true := by
-      obtain ⟨alias, name, conds, order, limit, children⟩ := s
+      obtain ⟨alias, name, conds, order, limit, offset, children⟩ := s
       simp only [resolveNode] at h
-      split at h
-      · split at h
-        · cases h
-          simp [nodeScans]
-        · cases h
-      · split at h
-        · cases h
-        · split at h
-          · cases h
-          · rename_i target htarget
-            split at h
-            · cases h
-            · split at h
-              · cases h
-              · split at h
-                · cases h
-                · split at h
-                  · cases h
-                  · split at h
-                    · cases h
-                    · rename_i scan hscan
-                      split at h
-                      · cases h
-                      · rename_i nodes hnodes
-                        cases h
-                        simp only [nodeScans, List.all_cons, Bool.and_eq_true]
-                        exact ⟨findTable_declared _ _ _ _ _ _ _ htarget hscan,
-                          resolveNodes_declared _ _ _ _ _ hnodes⟩
-    theorem resolveNodes_declared (schema : Schema) (table : Table) (depth : Nat)
-        (ss : List Selection) (ns : List Node) (h : resolveNodes schema table depth ss = .ok ns) :
+      all_goals repeat' first | cases h | split at h
+      all_goals try split
+      all_goals simp only [nodeScans, List.all_nil, List.all_cons, Bool.and_eq_true]
+      all_goals first
+        | rfl
+        | exact resolveNodes_declared _ _ _ _ _ _ _ (by assumption)
+        | exact ⟨findTable_declared _ _ _ _ _ _ _ _ (by assumption) (by assumption),
+            resolveNodes_declared _ _ _ _ _ _ _ (by assumption)⟩
+    theorem resolveNodes_declared (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+        (scanOrder : List (String × Direction)) (ss : List Selection)
+        (ns : List Node) (h : resolveNodes schema table depth mode scanOrder ss = .ok ns) :
         (nodesScans ns).all (declared schema) = true := by
-      cases ss with
-      | nil => simp [resolveNodes] at h; simp [h, nodesScans]
-      | cons s ss =>
-        simp only [resolveNodes] at h
-        split at h
-        · cases h
-        · rename_i node hnode
-          split at h
-          · cases h
-          · rename_i nodes hnodes
-            cases h
-            simp only [nodesScans, List.all_append, Bool.and_eq_true]
-            exact ⟨resolveNode_declared _ _ _ _ _ hnode, resolveNodes_declared _ _ _ _ _ hnodes⟩
+      cases ss <;> simp only [resolveNodes] at h
+      all_goals repeat' first | cases h | split at h
+      all_goals simp only [nodesScans, List.all_nil, List.all_append, Bool.and_eq_true]
+      all_goals first
+        | rfl
+        | exact ⟨resolveNode_declared _ _ _ _ _ _ _ (by assumption),
+            resolveNodes_declared _ _ _ _ _ _ _ (by assumption)⟩
     end
 
     theorem resolve_declared (schema : Schema) (root : Selection) :
@@ -795,21 +1190,10 @@ leanfran::lean! {
       split
       · rename_i query h
         simp only [resolve] at h
-        split at h
-        · cases h
-        · rename_i table htable
-          split at h
-          · cases h
-          · split at h
-            · cases h
-            · rename_i scan hscan
-              split at h
-              · cases h
-              · rename_i nodes hnodes
-                cases h
-                simp only [queryScans, List.all_cons, Bool.and_eq_true]
-                exact ⟨findTable_declared _ _ _ _ _ _ _ htable hscan,
-                  resolveNodes_declared _ _ _ _ _ hnodes⟩
+        repeat' first | cases h | split at h
+        simp only [queryScans, List.all_cons, Bool.and_eq_true]
+        exact ⟨findTable_declared _ _ _ _ _ _ _ _ (by assumption) (by assumption),
+          resolveNodes_declared _ _ _ _ _ _ _ (by assumption)⟩
       · trivial
 
     theorem distinct_iff (aliases : List String) : distinct aliases = true ↔ aliases.Nodup := by
@@ -826,6 +1210,16 @@ leanfran::lean! {
           aliases ≠ [] ∧ aliases.length ≤ maxFields ∧ (∀ a, a ∈ aliases → aliasValid a = true)
             ∧ aliases.Nodup := by
       simp [selectionValid, distinct_iff, and_assoc]
+
+    theorem scalarValid_iff (v : Value) : scalarValid v = true ↔
+        (v != .null && (match v with
+          | .float bits => (bits / 4503599627370496) % 2048 != 2047
+          | _ => true)) = true := by
+      cases v <;> simp [scalarValid]
+
+    theorem membershipValid_iff (vs : List Value) : membershipValid vs = true ↔
+        vs.length ≤ maxInValues ∧ ∀ v ∈ vs, scalarValid v = true := by
+      simp [membershipValid]
 
     theorem relationValid_iff (relation : Relation) :
         relationValid relation = true ↔

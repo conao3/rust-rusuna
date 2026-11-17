@@ -1,0 +1,1 @@
+query { author(where: {id: {_nin: [1, 3, 6]}}, order_by: {id: asc}) { id } }

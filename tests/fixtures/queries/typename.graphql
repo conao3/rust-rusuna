@@ -1,0 +1,1 @@
+query { article(limit: 2, order_by: {id: asc}) { __typename id author { kind: __typename name } comments { __typename id } } }
