@@ -4,3 +4,4 @@ CREATE TABLE comment (id int PRIMARY KEY, article_id int NOT NULL REFERENCES art
 CREATE INDEX ON article (author_id);
 CREATE INDEX ON article (published_at);
 CREATE INDEX ON comment (article_id);
+CREATE TABLE revision (article_id int NOT NULL REFERENCES article(id), author_id int NOT NULL REFERENCES author(id), note text NOT NULL, PRIMARY KEY (article_id, author_id, note));

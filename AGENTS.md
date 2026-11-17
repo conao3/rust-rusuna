@@ -96,11 +96,13 @@ terminate.
 - `condToks`, `scanToks`, `joinToks`, `joinsToks`, `emit` and `compile` build the SQL
   text. `compile_params` and `placeholders_numbered` refute 15 of 139 broken versions,
   those that lose or reorder a parameter; `compile_erase` refutes none of the versions
-  tried. The 120 holes change the text around the parameters, which no theorem
+  tried, and its proof fails for a `condToks` that writes a text value into the
+  statement. The 120 holes change the text around the parameters, which no theorem
   describes. The differential test and `tests/fixtures/expected/` pin the text.
 - `resolveConds`, `resolveOrder`, `resolveScan`, `resolveNode`, `resolveNodes`, `resolve`
   and `run` decide which selections are accepted. `resolve_values` and `run_params`
-  refute 5 of 85 broken versions; `resolve_declared` refutes none of the versions tried.
+  refute 5 of 85 broken versions; `resolve_declared` refutes none of the versions tried, and its proof
+  fails for a `resolveScan` that reads another schema.
   The 38 holes accept or reject a different set of selections or return a different
   error. `invalid_queries_are_rejected` in `tests/compile.rs` pins the rules by example.
   33 versions do not typecheck and 9 give the same output on every input tried.
@@ -118,8 +120,8 @@ again.
 
 - `tests/differential.rs` runs each query of `tests/common/mod.rs` and the statement of
   Hasura for it on the data of `tests/fixtures/seed.sql` and compares the JSON. Lists
-  without `order_by` are compared as multisets. The seed has an author without articles
-  and articles without comments. A new query gets its GraphQL text, the statement from
+  without `order_by` are compared as multisets. The seed has an author without articles,
+  articles without comments, and a table with a two-column relationship. A new query gets its GraphQL text, the statement from
   Hasura's Explain API and an entry in `cases`.
 - `tests/compile.rs` holds the expected statements, the parameters and their order, the
   rejected selections, the largest query on a small stack and compiling from several

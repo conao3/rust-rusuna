@@ -1,0 +1,1 @@
+query G { article(order_by: [{author_id: desc}, {id: asc}]) { id author_id revisions { note } comments { id } latest: revisions(limit: 1, order_by: [{note: desc}]) { note article { title } } } }

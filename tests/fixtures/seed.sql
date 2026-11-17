@@ -18,4 +18,7 @@ INSERT INTO comment VALUES
   (9, 3, 'comment body 9'), (10, 9, 'comment body 10'), (11, 9, 'comment body 11'), (12, 9, 'comment body 12'),
   (13, 4, 'comment body 13'), (14, 5, 'comment body 14'), (15, 10, 'comment body 15'), (16, 10, 'comment body 16'),
   (17, 12, 'comment body 17'), (18, 12, 'it''s "quoted"'), (19, 3, 'it''s "quoted"'), (20, 7, 'comment body 20');
+INSERT INTO revision VALUES
+  (1, 1, 'first'), (1, 1, 'second'), (1, 2, 'by another author'), (3, 3, 'typo'), (4, 3, 'title'),
+  (4, 3, 'body'), (9, 3, 'draft'), (10, 5, 'draft'), (12, 2, 'by another author');
 ANALYZE;

@@ -38,6 +38,13 @@ pub fn schema() -> Schema {
                 "comment",
                 ["id"],
                 ["article_id"],
+            ))
+            .relation(Relation::new(
+                "revisions",
+                Kind::Array,
+                "revision",
+                ["id", "author_id"],
+                ["article_id", "author_id"],
             )),
         Table::new("comment", "public", "comment")
             .column("id", "id")
@@ -49,6 +56,17 @@ pub fn schema() -> Schema {
                 "article",
                 ["article_id"],
                 ["id"],
+            )),
+        Table::new("revision", "public", "revision")
+            .column("article_id", "article_id")
+            .column("author_id", "author_id")
+            .column("note", "note")
+            .relation(Relation::new(
+                "article",
+                Kind::Object,
+                "article",
+                ["article_id", "author_id"],
+                ["id", "author_id"],
             )),
     ])
 }
@@ -157,6 +175,25 @@ pub fn cases() -> Vec<Case> {
                         .field(f("author").field(f("name"))),
                 ),
             unordered: &[],
+        },
+        Case {
+            name: "g",
+            query: f("article")
+                .order_by("author_id", Direction::Desc)
+                .order_by("id", Direction::Asc)
+                .field(f("id"))
+                .field(f("author_id"))
+                .field(f("revisions").field(f("note")))
+                .field(f("comments").field(f("id")))
+                .field(
+                    f("revisions")
+                        .alias("latest")
+                        .limit(1)
+                        .order_by("note", Direction::Desc)
+                        .field(f("note"))
+                        .field(f("article").field(f("title"))),
+                ),
+            unordered: &["revisions", "comments"],
         },
     ]
 }
