@@ -56,6 +56,25 @@ async fn run(pool: &PgPool, sql: &str) -> anyhow::Result<(Json, f64)> {
     Ok((value, start.elapsed().as_secs_f64() * 1000.0))
 }
 
+async fn run_with_params(
+    pool: &PgPool,
+    compiled: &rusuna::Compiled,
+) -> anyhow::Result<(Json, f64)> {
+    let start = Instant::now();
+    let mut query = sqlx::query_scalar(sqlx::AssertSqlSafe(compiled.sql.clone()));
+    for value in &compiled.params {
+        query = match value {
+            rusuna::Value::Int(v) => query.bind(*v),
+            rusuna::Value::Float(v) => query.bind(*v),
+            rusuna::Value::Text(v) => query.bind(v.clone()),
+            rusuna::Value::Bool(v) => query.bind(*v),
+            rusuna::Value::Null => query.bind(None::<String>),
+        };
+    }
+    let value = query.fetch_one(pool).await?;
+    Ok((value, start.elapsed().as_secs_f64() * 1000.0))
+}
+
 fn options(config: &str) -> anyhow::Result<PgConnectOptions> {
     let field = |name: &str| {
         config
@@ -89,11 +108,21 @@ async fn main() -> anyhow::Result<()> {
         )?;
         let start = Instant::now();
         for _ in 0..1000 {
-            std::hint::black_box(schema.compile(&query, &serde_json::json!({}), None)?);
+            std::hint::black_box(schema.compile(
+                &query,
+                &serde_json::json!({}),
+                None,
+                &rusuna::Session::new("admin"),
+            )?);
         }
         let compile_us = start.elapsed().as_secs_f64() * 1000.0;
         let compiled = schema
-            .compile(&query, &serde_json::json!({}), None)?
+            .compile(
+                &query,
+                &serde_json::json!({}),
+                None,
+                &rusuna::Session::new("admin"),
+            )?
             .remove(0)
             .compiled;
         anyhow::ensure!(compiled.params.is_empty(), "query {name} has parameters");
@@ -167,6 +196,37 @@ async fn main() -> anyhow::Result<()> {
                 "goal missed"
             }
         ));
+    }
+    let permission_schema =
+        rusuna::Schema::from_sdl(include_str!("../../tests/fixtures/permissions.graphql"))?;
+    let session = rusuna::Session::new("user").variable("user_id", rusuna::Value::Int(3));
+    for case in common::cases().into_iter().take(3) {
+        let name = case.name;
+        let query = std::fs::read_to_string(root.join(format!(
+            "../tests/fixtures/permissions/queries/user_{name}_3.graphql"
+        )))?;
+        let compiled = permission_schema
+            .compile(&query, &serde_json::json!({}), None, &session)?
+            .remove(0)
+            .compiled;
+        let hasura = std::fs::read_to_string(root.join(format!(
+            "../tests/fixtures/permissions/hasura/user_{name}_3.sql"
+        )))?;
+        let mut samples = Vec::new();
+        let expected = run(&pool, &hasura).await?.0;
+        for _ in 0..RUNS {
+            let (value, ms) = run_with_params(&pool, &compiled).await?;
+            anyhow::ensure!(
+                sorted(value, case.unordered) == sorted(expected.clone(), case.unordered),
+                "role user query {name} differs from Hasura"
+            );
+            samples.push(ms);
+        }
+        let t = times(samples);
+        println!(
+            "{name}\trusuna-user\t{:.1}\t{:.1}\t{:.1}\t{RUNS}",
+            t.median, t.min, t.max
+        );
     }
     println!("results\tequal for rusuna, viat-gql, hasura and hand");
     for verdict in verdicts {

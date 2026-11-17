@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use rusuna::{Schema, Value};
+use rusuna::{Schema, Session, Value};
 use serde_json::{Value as Json, json};
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -47,6 +47,8 @@ enum Command {
 enum SchemaCommand {
     #[command(about = "Expand mapping SDL into a query schema")]
     ExpandSdl {
+        #[arg(long)]
+        role: String,
         #[arg(long, value_parser = input)]
         schema: String,
     },
@@ -56,6 +58,10 @@ enum SchemaCommand {
 enum QueryCommand {
     #[command(about = "Compile each selected root field to SQL and parameters")]
     CompileSql {
+        #[arg(long)]
+        role: String,
+        #[arg(long, default_value = "{}", value_parser = variables)]
+        session: Json,
         #[arg(long, value_parser = input)]
         schema: String,
         #[arg(long, value_parser = input)]
@@ -95,11 +101,13 @@ fn parameter(value: Value) -> Json {
 fn execute(command: Command) -> Result<Json, rusuna::Error> {
     match command {
         Command::Schema {
-            command: SchemaCommand::ExpandSdl { schema },
-        } => Ok(json!({"Sdl": Schema::from_sdl(&schema)?.expanded_sdl()?})),
+            command: SchemaCommand::ExpandSdl { schema, role },
+        } => Ok(json!({"Sdl": Schema::from_sdl(&schema)?.expanded_sdl(&role)?})),
         Command::Query {
             command:
                 QueryCommand::CompileSql {
+                    role,
+                    session,
                     schema,
                     query,
                     operation_name,
@@ -110,6 +118,7 @@ fn execute(command: Command) -> Result<Json, rusuna::Error> {
                 &query,
                 &variables,
                 operation_name.as_deref(),
+                &Session::from_json(role, &session)?,
             )?;
             Ok(
                 json!({"Fields": fields.into_iter().map(|f| json!({"ResponseKey": f.response_key, "Sql": f.compiled.sql, "Params": f.compiled.params.into_iter().map(parameter).collect::<Vec<_>>()})).collect::<Vec<_>>()}),

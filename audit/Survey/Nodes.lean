@@ -2,4 +2,4 @@ import Audit.Generators
 
 open model
 
-#assay resolveNode resolveNodes using resolve_values run_params resolve_declared
+#assay resolveNode resolveNodes using resolveSelection_values runSelection_params resolveSelection_declared

@@ -1,7 +1,7 @@
 mod query;
 mod schema;
 
-use crate::{Compiled, Error, Schema, Selection};
+use crate::{Compiled, Error, Schema, Selection, Session};
 use async_graphql_parser::{Pos, types::*};
 use std::collections::BTreeMap;
 
@@ -20,6 +20,7 @@ pub(crate) struct DocumentSchema {
     pub targets: BTreeMap<(String, String), String>,
     pub sdl: String,
     pub query: String,
+    pub session_types: Vec<(String, String, String)>,
 }
 
 impl Schema {
@@ -27,8 +28,8 @@ impl Schema {
         schema::load(sdl)
     }
 
-    pub fn expanded_sdl(&self) -> Result<&str, Error> {
-        Ok(&self.document()?.sdl)
+    pub fn expanded_sdl(&self, role: &str) -> Result<String, Error> {
+        Ok(schema::for_role(self.document()?, &self.model, role).sdl)
     }
 
     pub fn parse_query(
@@ -36,8 +37,17 @@ impl Schema {
         query: &str,
         variables: &serde_json::Value,
         operation_name: Option<&str>,
+        role: &str,
     ) -> Result<Vec<Selection>, Error> {
-        query::parse(self.document()?, query, variables, operation_name)
+        if role == "admin" {
+            return query::parse(self.document()?, query, variables, operation_name);
+        }
+        query::parse(
+            &schema::for_role(self.document()?, &self.model, role),
+            query,
+            variables,
+            operation_name,
+        )
     }
 
     pub fn compile(
@@ -45,13 +55,15 @@ impl Schema {
         query: &str,
         variables: &serde_json::Value,
         operation_name: Option<&str>,
+        session: &Session,
     ) -> Result<Vec<CompiledField>, Error> {
-        self.parse_query(query, variables, operation_name)?
+        query::check_session(self.document()?, session)?;
+        self.parse_query(query, variables, operation_name, &session.role)?
             .into_iter()
             .map(|selection| {
                 Ok(CompiledField {
                     response_key: selection.alias.clone(),
-                    compiled: self.compile_selection(&selection)?,
+                    compiled: self.compile_selection(&selection, session)?,
                 })
             })
             .collect()

@@ -27,13 +27,14 @@ fn compatible(actual: &Type, expected: &Type) -> bool {
         }
 }
 
-fn coerce(
+fn coerce_input(
     schema: &DocumentSchema,
     value: C,
     ty: &Type,
     json: bool,
     pos: Pos,
     depth: usize,
+    permission: bool,
 ) -> Result<C, Error> {
     if depth > MAX_DOCUMENT_DEPTH {
         return Err(error(pos, "input nesting limit exceeded"));
@@ -53,7 +54,7 @@ fn coerce(
         return Ok(C::List(
             values
                 .into_iter()
-                .map(|v| coerce(schema, v, inner, json, pos, depth + 1))
+                .map(|v| coerce_input(schema, v, inner, json, pos, depth + 1, permission))
                 .collect::<Result<_, _>>()?,
         ));
     }
@@ -72,7 +73,15 @@ fn coerce(
                     .ok_or_else(|| error(pos, format!("unknown field {name}.{key}")))?;
                 out.insert(
                     key,
-                    coerce(schema, value, &field.node.ty.node, json, pos, depth + 1)?,
+                    coerce_input(
+                        schema,
+                        value,
+                        &field.node.ty.node,
+                        json,
+                        pos,
+                        depth + 1,
+                        permission,
+                    )?,
                 );
             }
             Ok(C::Object(out))
@@ -90,6 +99,9 @@ fn coerce(
             }
         }
         Some(TypeKind::Scalar) => {
+            if permission && matches!(&value, C::String(s) if s.starts_with('$')) {
+                return Ok(value);
+            }
             let valid = match (name, &value) {
                 ("Int", C::Number(n)) => n.as_i64().is_some_and(|n| i32::try_from(n).is_ok()),
                 ("Float", C::Number(n)) => n.as_f64().is_some_and(f64::is_finite),
@@ -106,6 +118,17 @@ fn coerce(
         }
         _ => Err(error(pos, format!("{name} is not an input type"))),
     }
+}
+
+fn coerce(
+    schema: &DocumentSchema,
+    value: C,
+    ty: &Type,
+    json: bool,
+    pos: Pos,
+    depth: usize,
+) -> Result<C, Error> {
+    coerce_input(schema, value, ty, json, pos, depth, false)
 }
 
 impl Context<'_> {
@@ -333,7 +356,14 @@ impl Context<'_> {
                 "offset" => selection.offset = Some(unsigned(&value, key.pos)?),
                 "where" => {
                     let target = &self.schema.targets[&(parent.to_string(), name.to_string())];
-                    selection.filter = Some(filter(self.schema, target, &value, key.pos, 0)?);
+                    selection.filter = Some(filter(
+                        self.schema,
+                        target,
+                        &value,
+                        key.pos,
+                        0,
+                        &mut scalar,
+                    )?);
                 }
                 "order_by" => selection.order_by = order(&value, key.pos)?,
                 _ => unreachable!(),
@@ -390,7 +420,7 @@ fn scalar(value: &C, ty: &str, pos: Pos) -> Result<Value, Error> {
     })
 }
 
-fn conjunction(mut values: Vec<Filter>) -> Filter {
+fn conjunction<T>(mut values: Vec<Filter<T>>) -> Filter<T> {
     if values.len() == 1 {
         values.remove(0)
     } else {
@@ -398,13 +428,14 @@ fn conjunction(mut values: Vec<Filter>) -> Filter {
     }
 }
 
-fn filter(
+fn filter<T>(
     schema: &DocumentSchema,
     target: &str,
     value: &C,
     pos: Pos,
     depth: usize,
-) -> Result<Filter, Error> {
+    scalar: &mut impl FnMut(&C, &str, Pos) -> Result<T, Error>,
+) -> Result<Filter<T>, Error> {
     if depth > MAX_DOCUMENT_DEPTH {
         return Err(error(pos, "input nesting limit exceeded"));
     }
@@ -420,7 +451,7 @@ fn filter(
                 };
                 let children = values
                     .iter()
-                    .map(|v| filter(schema, target, v, pos, depth + 1))
+                    .map(|v| filter(schema, target, v, pos, depth + 1, scalar))
                     .collect::<Result<_, _>>()?;
                 out.push(if field == "_and" {
                     Filter::And(children)
@@ -434,6 +465,7 @@ fn filter(
                 value,
                 pos,
                 depth + 1,
+                scalar,
             )?))),
             _ => {
                 let TypeKind::InputObject(input) = &schema.types[&format!("{target}_bool_exp")]
@@ -449,7 +481,7 @@ fn filter(
                 if let Some(related) = ty.strip_suffix("_bool_exp") {
                     out.push(Filter::Relation {
                         field: field.to_string(),
-                        filter: Box::new(filter(schema, related, value, pos, depth + 1)?),
+                        filter: Box::new(filter(schema, related, value, pos, depth + 1, scalar)?),
                     });
                 } else {
                     let ty = ty.strip_suffix("_comparison_exp").unwrap();
@@ -505,6 +537,73 @@ fn filter(
         }
     }
     Ok(conjunction(out))
+}
+
+type PermissionFilter = (Filter<crate::Operand>, Vec<(String, String)>);
+
+pub(super) fn permission_filter(
+    schema: &DocumentSchema,
+    target: &str,
+    value: &C,
+    pos: Pos,
+) -> Result<PermissionFilter, Error> {
+    let ty = Type::new(&format!("{target}_bool_exp!")).unwrap();
+    let value = coerce_input(schema, value.clone(), &ty, false, pos, 0, true)?;
+    let mut types = Vec::new();
+    let filter = filter(schema, target, &value, pos, 0, &mut |value, ty, pos| {
+        if let C::String(text) = value
+            && let Some(literal) = text.strip_prefix("$$")
+        {
+            return scalar(&C::String(format!("${literal}")), ty, pos).map(crate::Operand::Literal);
+        }
+        if let C::String(name) = value
+            && let Some(name) = name.strip_prefix('$')
+        {
+            if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+                return Err(error(
+                    pos,
+                    "session names require letters, digits or underscores after $",
+                ));
+            }
+            types.push((name.to_string(), ty.to_string()));
+            return Ok(crate::Operand::Session(name.to_string()));
+        }
+        scalar(value, ty, pos).map(crate::Operand::Literal)
+    })?;
+    Ok((filter, types))
+}
+
+pub(super) fn check_session(
+    schema: &DocumentSchema,
+    session: &crate::Session,
+) -> Result<(), Error> {
+    for (role, name, ty) in &schema.session_types {
+        if role != &session.role {
+            continue;
+        }
+        let Some(value) = session.variables.get(name) else {
+            continue;
+        };
+        let value = match value {
+            Value::Int(v) => C::Number((*v).into()),
+            Value::Float(v) => C::Number(
+                serde_json::Number::from_f64(*v)
+                    .ok_or_else(|| error(Pos::default(), "session floats must be finite"))?,
+            ),
+            Value::Text(v) => C::String(v.clone()),
+            Value::Bool(v) => C::Boolean(*v),
+            Value::Null => C::Null,
+        };
+        coerce(
+            schema,
+            value,
+            &Type::new(&format!("{ty}!")).unwrap(),
+            true,
+            Pos::default(),
+            0,
+        )?;
+    }
+    Ok(())
 }
 
 fn order(value: &C, pos: Pos) -> Result<Vec<Order>, Error> {

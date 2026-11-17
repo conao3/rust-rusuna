@@ -1,0 +1,1 @@
+{ author(where: {articles: {comments: {id: {_eq: 8}}}}, order_by: {id: asc}) { id } }

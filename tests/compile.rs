@@ -26,7 +26,9 @@ fn in_small_stack(run: impl FnOnce() + Send + 'static) {
 fn compiled_sql_matches_the_committed_statements() {
     let schema = common::schema();
     for case in common::cases() {
-        let compiled = schema.compile_selection(&case.query).unwrap();
+        let compiled = schema
+            .compile_selection(&case.query, &rusuna::Session::new("admin"))
+            .unwrap();
         let path = fixture(&format!("expected/{}.sql", case.name));
         if std::env::var_os("RUSUNA_UPDATE_EXPECTED").is_some() {
             std::fs::write(&path, format!("{}\n", compiled.sql)).unwrap();
@@ -66,7 +68,9 @@ fn values_become_parameters_in_document_order() {
                     .field(f("id")),
             ),
         );
-    let compiled = schema.compile_selection(&query).unwrap();
+    let compiled = schema
+        .compile_selection(&query, &rusuna::Session::new("admin"))
+        .unwrap();
     assert_eq!(
         compiled.params,
         vec![
@@ -95,8 +99,12 @@ fn the_statement_does_not_depend_on_the_values() {
                     .field(f("id")),
             )
     };
-    let first = schema.compile_selection(&query(1, "a")).unwrap();
-    let second = schema.compile_selection(&query(2, "b\"'")).unwrap();
+    let first = schema
+        .compile_selection(&query(1, "a"), &rusuna::Session::new("admin"))
+        .unwrap();
+    let second = schema
+        .compile_selection(&query(2, "b\"'"), &rusuna::Session::new("admin"))
+        .unwrap();
     assert_eq!(first.sql, second.sql);
     assert_ne!(first.params, second.params);
 }
@@ -105,7 +113,10 @@ fn the_statement_does_not_depend_on_the_values() {
 fn aliases_are_quoted_identifiers() {
     let schema = common::schema();
     let compiled = schema
-        .compile_selection(&f("author").field(f("name").alias("a\"b; DROP TABLE author")))
+        .compile_selection(
+            &f("author").field(f("name").alias("a\"b; DROP TABLE author")),
+            &rusuna::Session::new("admin"),
+        )
         .unwrap();
     assert!(compiled.sql.contains(r#"AS "a""b; DROP TABLE author""#));
 }
@@ -192,13 +203,17 @@ fn invalid_queries_are_rejected() {
         ),
     ];
     for (query, error) in cases {
-        assert_eq!(schema.compile_selection(&query), Err(error), "{query:?}");
+        assert_eq!(
+            schema.compile_selection(&query, &rusuna::Session::new("admin")),
+            Err(error),
+            "{query:?}"
+        );
     }
     let wide = (0..=rusuna::MAX_FIELDS).fold(f("article"), |query, index| {
         query.field(f("id").alias(format!("f{index}")))
     });
     assert_eq!(
-        schema.compile_selection(&wide),
+        schema.compile_selection(&wide, &rusuna::Session::new("admin")),
         Err(Error::InvalidSelection { table: table() })
     );
 }
@@ -219,11 +234,16 @@ fn the_largest_queries_compile_on_a_small_stack() {
         let wide = (0..rusuna::MAX_FIELDS - 2).fold(root, |query, index| {
             query.field(f("id").alias(format!("f{index}")))
         });
-        let compiled = schema.compile_selection(&wide).unwrap();
+        let compiled = schema
+            .compile_selection(&wide, &rusuna::Session::new("admin"))
+            .unwrap();
         assert!(compiled.sql.len() > 10_000);
         let too_deep = (0..1_000).fold(f("id"), |inner, _| f("author").field(inner));
         assert_eq!(
-            schema.compile_selection(&f("article").field(too_deep)),
+            schema.compile_selection(
+                &f("article").field(too_deep),
+                &rusuna::Session::new("admin")
+            ),
             Err(Error::TooDeep)
         );
     });
@@ -236,7 +256,9 @@ fn compiles_from_several_threads() {
         for _ in 0..8 {
             scope.spawn(|| {
                 for case in common::cases() {
-                    schema.compile_selection(&case.query).unwrap();
+                    schema
+                        .compile_selection(&case.query, &rusuna::Session::new("admin"))
+                        .unwrap();
                 }
             });
         }
@@ -272,7 +294,9 @@ fn filters_keep_values_in_depth_first_document_order() {
                     ),
                 ),
         );
-    let compiled = common::schema().compile_selection(&query).unwrap();
+    let compiled = common::schema()
+        .compile_selection(&query, &rusuna::Session::new("admin"))
+        .unwrap();
     assert_eq!(
         compiled.params,
         vec![
@@ -301,7 +325,8 @@ fn null_and_nonfinite_comparisons_are_rejected() {
             common::schema().compile_selection(
                 &f("author")
                     .filter(Filter::eq("rating", value.clone()))
-                    .field(f("id"))
+                    .field(f("id")),
+                &rusuna::Session::new("admin")
             ),
             Err(Error::InvalidFilter)
         );
@@ -313,7 +338,8 @@ fn null_and_nonfinite_comparisons_are_rejected() {
                         negated: false,
                         values: vec![value]
                     })
-                    .field(f("id"))
+                    .field(f("id")),
+                &rusuna::Session::new("admin")
             ),
             Err(Error::InvalidFilter)
         );
@@ -331,6 +357,7 @@ fn null_and_nonfinite_comparisons_are_rejected() {
                 &f("author")
                     .filter(Filter::eq("rating", Value::Float(value)))
                     .field(f("id")),
+                &rusuna::Session::new("admin"),
             )
             .unwrap();
         let Value::Float(actual) = out.params[0] else {
@@ -356,7 +383,10 @@ fn filters_at_the_limits_compile_on_a_small_stack() {
         }
         assert_eq!(
             schema
-                .compile_selection(&f("author").filter(filter).field(f("id")))
+                .compile_selection(
+                    &f("author").filter(filter).field(f("id")),
+                    &rusuna::Session::new("admin")
+                )
                 .unwrap()
                 .params
                 .len(),
@@ -369,7 +399,10 @@ fn filters_at_the_limits_compile_on_a_small_stack() {
         );
         assert_eq!(
             schema
-                .compile_selection(&f("author").filter(wide).field(f("id")))
+                .compile_selection(
+                    &f("author").filter(wide).field(f("id")),
+                    &rusuna::Session::new("admin")
+                )
                 .unwrap()
                 .params
                 .len(),
@@ -381,17 +414,26 @@ fn filters_at_the_limits_compile_on_a_small_stack() {
             values: vec![Value::Int(1); rusuna::MAX_IN_VALUES + 1],
         };
         assert_eq!(
-            schema.compile_selection(&f("author").filter(too_many).field(f("id"))),
+            schema.compile_selection(
+                &f("author").filter(too_many).field(f("id")),
+                &rusuna::Session::new("admin")
+            ),
             Err(Error::InvalidFilter)
         );
         let too_wide = Filter::Or(vec![Filter::And(vec![]); rusuna::MAX_FIELDS + 1]);
         assert_eq!(
-            schema.compile_selection(&f("author").filter(too_wide).field(f("id"))),
+            schema.compile_selection(
+                &f("author").filter(too_wide).field(f("id")),
+                &rusuna::Session::new("admin")
+            ),
             Err(Error::InvalidFilter)
         );
         let too_deep = (0..1000).fold(Filter::And(vec![]), |f, _| Filter::Not(Box::new(f)));
         assert_eq!(
-            schema.compile_selection(&f("author").filter(too_deep).field(f("id"))),
+            schema.compile_selection(
+                &f("author").filter(too_deep).field(f("id")),
+                &rusuna::Session::new("admin")
+            ),
             Err(Error::TooDeep)
         );
     });
@@ -403,14 +445,18 @@ fn root_names_and_type_names_are_independent_and_literals_are_quoted() {
     let schema = Schema::new(
         vec![Table::new("Author's\\type", "public", "author").column("id", "id")],
         vec![RootField::new("people", "Author's\\type", RootKind::List)],
-    );
+    )
+    .unwrap();
     let compiled = schema
-        .compile_selection(&f("people").field(f("__typename")))
+        .compile_selection(
+            &f("people").field(f("__typename")),
+            &rusuna::Session::new("admin"),
+        )
         .unwrap();
     assert!(compiled.sql.contains("'Author''s\\type'"));
     assert!(compiled.params.is_empty());
     assert_eq!(
-        schema.compile_selection(&f("author").field(f("id"))),
+        schema.compile_selection(&f("author").field(f("id")), &rusuna::Session::new("admin")),
         Err(Error::UnknownRoot {
             name: "author".into()
         })
@@ -427,7 +473,7 @@ fn aggregate_selections_validate_arguments_and_emit_only_requested_functions() {
             .unwrap();
         assert!(
             !schema
-                .compile_selection(&case.query)
+                .compile_selection(&case.query, &rusuna::Session::new("admin"))
                 .unwrap()
                 .sql
                 .contains("count(")
@@ -454,7 +500,12 @@ fn aggregate_selections_validate_arguments_and_emit_only_requested_functions() {
             })
             .field(f("id")),
     ] {
-        assert!(schema.compile_selection(&query).is_err(), "{query:?}");
+        assert!(
+            schema
+                .compile_selection(&query, &rusuna::Session::new("admin"))
+                .is_err(),
+            "{query:?}"
+        );
     }
 }
 
@@ -476,7 +527,10 @@ fn nested_relations_with_a_maximum_filter_compile_on_a_small_stack() {
             selection = f(if level % 2 == 1 { "author" } else { "articles" }).field(selection);
         }
         let compiled = common::schema()
-            .compile_selection(&f("article").field(selection))
+            .compile_selection(
+                &f("article").field(selection),
+                &rusuna::Session::new("admin"),
+            )
             .unwrap();
         assert_eq!(
             compiled.params.len(),

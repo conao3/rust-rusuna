@@ -23,6 +23,7 @@ fn directives<'a>(
             "relation" => &["columns", "references"],
             "aggregate" => &["target"],
             "list" => &[],
+            "permission" => &["role", "where", "columns", "allow_aggregations"],
             _ => unreachable!(),
         };
         let mut seen = BTreeSet::new();
@@ -173,7 +174,22 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             unreachable!()
         };
         let root = name == &query;
-        let d = directives(&t.node.directives, if root { &[] } else { &["table"] })?;
+        let mappings: Vec<_> = t
+            .node
+            .directives
+            .iter()
+            .filter(|d| d.node.name.node != "permission")
+            .cloned()
+            .collect();
+        let d = directives(&mappings, if root { &[] } else { &["table"] })?;
+        if root
+            && t.node
+                .directives
+                .iter()
+                .any(|d| d.node.name.node == "permission")
+        {
+            return Err(error(t.pos, "@permission applies to table types"));
+        }
         let mut table = if root {
             Table::new(name, "", "")
         } else {
@@ -418,12 +434,254 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     for scalar in scalars {
         types.insert(scalar, TypeKind::Scalar);
     }
-    let mut schema = Schema::new(tables, roots);
-    schema.document = Some(DocumentSchema {
+    let mut document = DocumentSchema {
         types,
         targets,
         sdl,
         query,
-    });
+        session_types: Vec::new(),
+    };
+    for table in &mut tables {
+        let mut roles = BTreeSet::new();
+        for directive in &objects[&table.name].node.directives {
+            if directive.node.name.node != "permission" {
+                continue;
+            }
+            directives(std::slice::from_ref(directive), &["permission"])?;
+            let d = &directive.node;
+            let role = string(d, "role")?;
+            if role == "admin" || !roles.insert(role.clone()) {
+                return Err(error(
+                    directive.pos,
+                    "permission roles must be distinct and cannot be admin",
+                ));
+            }
+            let columns = strings(d, "columns")?;
+            if columns.iter().collect::<BTreeSet<_>>().len() != columns.len()
+                || columns
+                    .iter()
+                    .any(|f| !table.columns.iter().any(|c| &c.field == f))
+            {
+                return Err(error(
+                    directive.pos,
+                    "permission columns must be distinct scalar field names",
+                ));
+            }
+            let value = d
+                .get_argument("where")
+                .ok_or_else(|| error(directive.pos, "@permission requires where"))?;
+            let (filter, session_types) =
+                query::permission_filter(&document, &table.name, &value.node, value.pos)?;
+            let allow_aggregations = match d.get_argument("allow_aggregations") {
+                None => false,
+                Some(Positioned {
+                    node: ConstValue::Boolean(b),
+                    ..
+                }) => *b,
+                _ => return Err(error(directive.pos, "allow_aggregations must be a boolean")),
+            };
+            document.session_types.extend(
+                session_types
+                    .into_iter()
+                    .map(|(name, ty)| (role.clone(), name, ty)),
+            );
+            table.permissions.push(crate::Permission {
+                role,
+                filter,
+                columns,
+                allow_aggregations,
+            });
+        }
+    }
+    let mut schema = Schema::new(tables, roots)?;
+    schema.document = Some(document);
     Ok(schema)
+}
+
+pub(super) fn for_role(
+    document: &DocumentSchema,
+    schema: &crate::compiler::model::Schema,
+    role: &str,
+) -> DocumentSchema {
+    if role == "admin" {
+        return document.clone();
+    }
+    let visible = crate::compiler::model::visible_schema(schema.clone(), role);
+    let mut document = document.clone();
+    let suffixes = [
+        "",
+        "_bool_exp",
+        "_order_by",
+        "_aggregate",
+        "_aggregate_fields",
+        "_sum_fields",
+        "_avg_fields",
+        "_min_fields",
+        "_max_fields",
+    ];
+    for table in &schema.tables {
+        let permitted = visible.tables.iter().find(|t| t.name == table.name);
+        let aggregate =
+            crate::compiler::model::aggregate_visible(schema.clone(), role, table.name.clone());
+        for suffix in suffixes {
+            let name = format!("{}{suffix}", table.name);
+            let Some(permitted) = permitted else {
+                document.types.remove(&name);
+                continue;
+            };
+            if !aggregate && !["", "_bool_exp", "_order_by"].contains(&suffix) {
+                document.types.remove(&name);
+                continue;
+            }
+            let column = |f: &str| permitted.columns.iter().any(|c| c.field == f);
+            let relation = |f: &str| permitted.relations.iter().any(|r| r.field == f);
+            match document.types.get_mut(&name) {
+                Some(TypeKind::Object(object)) => {
+                    if suffix.is_empty() {
+                        object.fields.retain(|f| {
+                            column(f.node.name.node.as_str()) || relation(f.node.name.node.as_str())
+                        });
+                        for field in &mut object.fields {
+                            if permitted.relations.iter().any(|r| {
+                                r.field == field.node.name.node.as_str()
+                                    && matches!(r.kind, crate::compiler::model::Kind::Object)
+                            }) {
+                                field.node.ty.node.nullable = true;
+                            }
+                        }
+                    } else if ["_sum_fields", "_avg_fields", "_min_fields", "_max_fields"]
+                        .contains(&suffix)
+                    {
+                        object.fields.retain(|f| column(f.node.name.node.as_str()));
+                        if object.fields.is_empty() {
+                            document.types.remove(&name);
+                        }
+                    }
+                }
+                Some(TypeKind::InputObject(input)) => input.fields.retain(|f| {
+                    let field = f.node.name.node.as_str();
+                    column(field)
+                        || (suffix == "_bool_exp"
+                            && (["_and", "_or", "_not"].contains(&field) || relation(field)))
+                }),
+                _ => {}
+            }
+        }
+    }
+    let names: BTreeSet<_> = document.types.keys().cloned().collect();
+    for (name, kind) in &mut document.types {
+        if let TypeKind::Object(object) = kind {
+            if name == &document.query {
+                object.fields.retain(|f| {
+                    visible
+                        .roots
+                        .iter()
+                        .any(|r| r.field == f.node.name.node.as_str())
+                });
+            }
+            object
+                .fields
+                .retain(|f| names.contains(named(&f.node.ty.node)));
+        }
+    }
+    document.targets.retain(|(parent, field), _| matches!(document.types.get(parent), Some(TypeKind::Object(o)) if o.fields.iter().any(|f| f.node.name.node == field.as_str())));
+    let mut reachable = BTreeSet::new();
+    let mut pending = vec![document.query.clone()];
+    while let Some(name) = pending.pop() {
+        if !reachable.insert(name.clone()) {
+            continue;
+        }
+        match document.types.get(&name) {
+            Some(TypeKind::Object(object)) => {
+                for field in &object.fields {
+                    pending.push(named(&field.node.ty.node).to_string());
+                    pending.extend(
+                        field
+                            .node
+                            .arguments
+                            .iter()
+                            .map(|a| named(&a.node.ty.node).to_string()),
+                    );
+                }
+            }
+            Some(TypeKind::InputObject(input)) => {
+                pending.extend(
+                    input
+                        .fields
+                        .iter()
+                        .map(|f| named(&f.node.ty.node).to_string()),
+                );
+            }
+            _ => {}
+        }
+    }
+    document.types.retain(|name, _| {
+        reachable.contains(name)
+            || ["Int", "Float", "String", "Boolean", "ID"].contains(&name.as_str())
+    });
+    let mut rendered = Vec::new();
+    for (name, kind) in &document.types {
+        let fields = match kind {
+            TypeKind::Scalar => {
+                if name == "DateTime" {
+                    rendered.push(format!("scalar {name}\n"));
+                }
+                continue;
+            }
+            TypeKind::Enum(enumeration) => {
+                rendered.push(format!(
+                    "enum {name} {{ {} }}\n",
+                    enumeration
+                        .values
+                        .iter()
+                        .map(|v| v.node.value.node.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
+                continue;
+            }
+            TypeKind::Object(object) => object
+                .fields
+                .iter()
+                .map(|f| {
+                    let args = if f.node.arguments.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "({})",
+                            f.node
+                                .arguments
+                                .iter()
+                                .map(|a| format!("{}: {}", a.node.name.node, a.node.ty.node))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                    format!("  {}{args}: {}\n", f.node.name.node, f.node.ty.node)
+                })
+                .collect::<String>(),
+            TypeKind::InputObject(input) => input
+                .fields
+                .iter()
+                .map(|f| format!("  {}: {}\n", f.node.name.node, f.node.ty.node))
+                .collect::<String>(),
+            _ => unreachable!(),
+        };
+        let keyword = if matches!(kind, TypeKind::InputObject(_)) {
+            "input"
+        } else {
+            "type"
+        };
+        rendered.push(if fields.is_empty() {
+            format!("{keyword} {name}\n")
+        } else {
+            format!("{keyword} {name} {{\n{fields}}}\n")
+        });
+    }
+    document.sdl = format!(
+        "schema {{ query: {} }}\n\n{}",
+        document.query,
+        rendered.join("\n")
+    );
+    document
 }

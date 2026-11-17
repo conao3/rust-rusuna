@@ -1,0 +1,1 @@
+query B { article(limit: 50000, order_by: {id: asc}) { id title author { name } } }

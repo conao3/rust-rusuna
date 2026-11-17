@@ -2,4 +2,4 @@ import Audit.Generators
 
 open model
 
-#assay resolveOrder resolveScan using resolve_values run_params resolve_declared
+#assay resolveOrder resolveScan using resolveSelection_values runSelection_params resolveSelection_declared

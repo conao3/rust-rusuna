@@ -5,7 +5,7 @@ open Plausible model
 
 deriving instance DecidableEq for Except
 
-deriving instance Arbitrary, Shrinkable for Value, Direction, Kind, Comparison, AggregateOp, Leaf, RootKind
+deriving instance Arbitrary, Shrinkable for Value, Direction, Kind, Comparison, AggregateOp, Leaf, RootKind, Operand
 
 def genOf (xs : List String) : Gen String := do
   let i ← Gen.choose Nat 0 (xs.length - 1) (by omega)
@@ -17,7 +17,7 @@ def genList (most : Nat) (gen : Gen α) : Gen (List α) := do
 
 def genColumn : Gen String := genOf ["id", "a", "b\"c", ""]
 
-def genExpression (genRef : Gen R) : Nat → Gen (Expression R)
+def genExpression (genRef : Gen R) : Nat → Gen (Expression R Value)
   | 0 => do
     match (← Gen.choose Nat 0 2 (by omega)).val with
     | 0 => pure (.compare (← genColumn) (← Arbitrary.arbitrary) (← Arbitrary.arbitrary))
@@ -34,18 +34,36 @@ def genExpression (genRef : Gen R) : Nat → Gen (Expression R)
 def genReference : Gen Reference := do
   pure ⟨"public", (← genOf ["t", "u"]), ["id"], ["id"]⟩
 
-instance : Arbitrary (Expression Reference) := ⟨genExpression genReference 2⟩
-instance : Shrinkable (Expression Reference) := ⟨fun _ => []⟩
-instance : Arbitrary (Expression String) := ⟨genExpression (genOf ["r", "s"]) 2⟩
-instance : Shrinkable (Expression String) := ⟨fun _ => []⟩
+instance : Arbitrary (Expression String Value) := ⟨genExpression (genOf ["r", "s"]) 2⟩
+instance : Shrinkable (Expression String Value) := ⟨fun _ => []⟩
 
-def genScan : Gen Scan := do
+mutual
+def genPredicate : Nat → Gen Predicate
+  | 0 => do
+    match (← Gen.choose Nat 0 2 (by omega)).val with
+    | 0 => pure (.compare (← genColumn) (← Arbitrary.arbitrary) (← Arbitrary.arbitrary))
+    | 1 => pure (.member (← genColumn) (← Arbitrary.arbitrary) (← genList 3 Arbitrary.arbitrary))
+    | _ => pure (.isNull (← genColumn) (← Arbitrary.arbitrary))
+  | fuel + 1 => do
+    match (← Gen.choose Nat 0 6 (by omega)).val with
+    | 0 => pure (.and (← genList 2 (genPredicate fuel)))
+    | 1 => pure (.or (← genList 2 (genPredicate fuel)))
+    | 2 => pure (.not (← genPredicate fuel))
+    | 3 => pure (.exists (← genScan fuel) ["id"] ["id"])
+    | _ => genPredicate 0
+termination_by fuel => (fuel, 0)
+def genScan (fuel : Nat) : Gen Scan := do
   let schema ← genOf ["public", "s"]
   let table ← genOf ["t", "u"]
-  let conds ← genExpression genReference 2
+  let conds ← genPredicate fuel
   let order ← genList 2 (do pure ((← genColumn), (← Arbitrary.arbitrary)))
   let limit ← Arbitrary.arbitrary
-  pure { schema, table, conds, order, limit, offset := (← Arbitrary.arbitrary) }
+  pure ⟨(← genOf ["t", "u"]), schema, table, conds, order, limit, (← Arbitrary.arbitrary)⟩
+termination_by (fuel, 1)
+end
+
+instance : Arbitrary Predicate := ⟨genPredicate 2⟩
+instance : Shrinkable Predicate := ⟨fun _ => []⟩
 
 def genNode : Nat → Gen Node
   | 0 => do pure (.column (← genColumn) (.column (← genColumn)))
@@ -56,14 +74,17 @@ def genNode : Nat → Gen Node
     else if (← Gen.choose Nat 0 5 (by omega)).val = 0 then
       pure (.nodes "nodes" [] (← genList 2 (genNode fuel)))
     else
-      pure (.relation (← genColumn) (← Arbitrary.arbitrary) (← genScan) (← genList 2 genColumn)
+      pure (.relation (← genColumn) (← Arbitrary.arbitrary) (← genScan 2) (← genList 2 genColumn)
         (← genList 2 genColumn) (← genList 3 (genNode fuel)))
 
-instance : Arbitrary Scan := ⟨genScan⟩
+instance : Inhabited Scan := ⟨.mk "" "" "" (.and []) [] none none⟩
+instance : Inhabited (Except Error Scan) := ⟨.error .invalidFilter⟩
+
+instance : Arbitrary Scan := ⟨genScan 2⟩
 instance : Shrinkable Scan := ⟨fun _ => []⟩
 instance : Arbitrary Node := ⟨genNode 3⟩
 instance : Shrinkable Node := ⟨fun _ => []⟩
-instance : Arbitrary Query := ⟨do pure { kind := (← Arbitrary.arbitrary), scan := (← genScan), children := (← genList 3 (genNode 3)) }⟩
+instance : Arbitrary Query := ⟨do pure { kind := (← Arbitrary.arbitrary), scan := (← genScan 2), children := (← genList 3 (genNode 3)) }⟩
 instance : Shrinkable Query := ⟨fun _ => []⟩
 
 def genKeys : Gen (List String) := do
@@ -84,7 +105,20 @@ def genTable (name other : String) : Gen Table := do
       { field := "s", kind := .array, target := other, parent := (← genKeys), child := (← genKeys) }]
       ++ relations }
 
-instance : Arbitrary Schema := ⟨do pure { tables := [← genTable "t" "u", ← genTable "u" "t"], roots := [⟨"t", "t", .list⟩, ⟨"u", "u", .list⟩, ⟨"t_aggregate", "t", .aggregate⟩] }⟩
+instance : DecidableEq Predicate := fun a b => decidable_of_iff (predicateEq a b = true) (predicateEq_iff a b)
+
+instance : DecidableEq Scan
+  | .mk n s t c o l f, .mk n' s' t' c' o' l' f' =>
+    decidable_of_iff (n = n' ∧ s = s' ∧ t = t' ∧ c = c' ∧ o = o' ∧ l = l' ∧ f = f') (by simp)
+
+instance : Arbitrary Session := ⟨do pure ⟨(← genOf ["user", "other", "admin"]), [("id", ← Arbitrary.arbitrary)]⟩⟩
+instance : Shrinkable Session := ⟨fun _ => []⟩
+
+def genPermission (target role : String) : Gen Permission := do
+  let value ← if (← Gen.choose Nat 0 1 (by omega)).val = 0 then pure (.session "id") else pure (.literal (← Arbitrary.arbitrary))
+  pure ⟨target, role, .compare "a" .eq value, ["a", "b"], true⟩
+
+instance : Arbitrary Schema := ⟨do pure { tables := [← genTable "t" "u", ← genTable "u" "t"], permissions := [← genPermission "t" "user", ← genPermission "u" "user", ← genPermission "t" "other", ← genPermission "u" "other"], roots := [⟨"t", "t", .list⟩, ⟨"u", "u", .list⟩, ⟨"t_aggregate", "t", .aggregate⟩] }⟩
 instance : Shrinkable Schema := ⟨fun _ => []⟩
 
 partial def genSelection (fuel index : Nat) : Gen Selection := do

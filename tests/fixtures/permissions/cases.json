@@ -1,0 +1,164 @@
+[
+  {
+    "name": "user_a_3",
+    "role": "user",
+    "session": {
+      "user_id": 3
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_b_3",
+    "role": "user",
+    "session": {
+      "user_id": 3
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_c_3",
+    "role": "user",
+    "session": {
+      "user_id": 3
+    },
+    "unordered": [
+      "articles",
+      "comments"
+    ]
+  },
+  {
+    "name": "user_root_3",
+    "role": "user",
+    "session": {
+      "user_id": 3
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_object_3",
+    "role": "user",
+    "session": {
+      "user_id": 3
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_exists_3",
+    "role": "user",
+    "session": {
+      "user_id": 3
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_aggregate_3",
+    "role": "user",
+    "session": {
+      "user_id": 3
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_rel_aggregate_3",
+    "role": "user",
+    "session": {
+      "user_id": 3
+    },
+    "unordered": [
+      "nodes"
+    ]
+  },
+  {
+    "name": "user_a_1",
+    "role": "user",
+    "session": {
+      "user_id": 1
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_b_1",
+    "role": "user",
+    "session": {
+      "user_id": 1
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_c_1",
+    "role": "user",
+    "session": {
+      "user_id": 1
+    },
+    "unordered": [
+      "articles",
+      "comments"
+    ]
+  },
+  {
+    "name": "user_root_1",
+    "role": "user",
+    "session": {
+      "user_id": 1
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_object_1",
+    "role": "user",
+    "session": {
+      "user_id": 1
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_exists_1",
+    "role": "user",
+    "session": {
+      "user_id": 1
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_aggregate_1",
+    "role": "user",
+    "session": {
+      "user_id": 1
+    },
+    "unordered": []
+  },
+  {
+    "name": "user_rel_aggregate_1",
+    "role": "user",
+    "session": {
+      "user_id": 1
+    },
+    "unordered": [
+      "nodes"
+    ]
+  },
+  {
+    "name": "reviewer_object",
+    "role": "reviewer",
+    "session": {},
+    "unordered": [
+      "nodes"
+    ]
+  },
+  {
+    "name": "reviewer_exists",
+    "role": "reviewer",
+    "session": {},
+    "unordered": [
+      "nodes"
+    ]
+  },
+  {
+    "name": "reviewer_aggregate",
+    "role": "reviewer",
+    "session": {},
+    "unordered": [
+      "nodes"
+    ]
+  }
+]

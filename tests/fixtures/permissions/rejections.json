@@ -1,0 +1,42 @@
+[
+  [
+    "user",
+    "{ revision { note } }"
+  ],
+  [
+    "user",
+    "{ author { rating } }"
+  ],
+  [
+    "user",
+    "{ author(where: {rating: {_gt: 0.0}}) { id } }"
+  ],
+  [
+    "user",
+    "{ author(order_by: {rating: asc}) { id } }"
+  ],
+  [
+    "user",
+    "{ author_aggregate { aggregate { sum { rating } } } }"
+  ],
+  [
+    "reviewer",
+    "{ author_aggregate { aggregate { count } } }"
+  ],
+  [
+    "reviewer",
+    "{ article { comments { body } } }"
+  ],
+  [
+    "unknown",
+    "{ article { id } }"
+  ],
+  [
+    "user",
+    "{ article { revisions { note } } }"
+  ],
+  [
+    "user",
+    "{ article(where: {revisions: {note: {_eq: \"draft\"}}}) { id } }"
+  ]
+]

@@ -44,19 +44,25 @@ Rust owns the public types, the depth check that bounds the recursion of the con
 and everything with I/O: tests, the database client and the benchmark. Rust also parses SDL and GraphQL, expands fragments and variables, and checks values
 against the generated GraphQL type graph. SQL types and database execution remain caller
 responsibilities. `Schema::from_sdl` builds the schema; `Schema::compile` accepts text,
-JSON variables and an optional operation name. `compile_selection` is the lower-level
+JSON variables, an optional operation name and an explicit `Session`. `compile_selection` is the lower-level
 entry to Lean. Keep selection acceptance rules and SQL generation in Lean.
 
-The block has three parts.
+The block has four parts.
 
 - SQL tokens. A statement is a list of `Tok`: a `Lex` (raw text, an identifier, a
   qualified column, a number or a quoted string literal) or a parameter. `render` prints the tokens and numbers the
   parameters. Only a `Tok.param` carries a value of the query.
-- The plan. `Query` and `Node` hold one `Scan` per table reference (table, recursive filter,
+- The plan. `Query`, `Node` and `Predicate.exists` hold one `Scan` per table reference (GraphQL name, SQL table, recursive filter,
   order, limit and offset). `emit` turns a plan into tokens. Functions that return `List Lex` cannot
   emit a parameter; `expressionToks` emits filter values through `Tok.param`, including predicates in `EXISTS`.
-- Resolution. `resolve` checks a `Selection` against a `Schema` and builds the plan;
-  `run` is `resolve` followed by `compile`.
+- Resolution. `resolveSelection` builds the raw plan from a `Selection` and the role's
+  visible schema. `resolve` inserts permissions and validates all scans and user column
+  references. `run` is `resolve` followed by `compile`.
+- Permissions. `Permission` holds a role, target, `Expression String Operand`, visible
+  column fields and an aggregation flag. `Session` holds a role and scalar variables.
+  `bindExpression` resolves `Operand.session` to a `Value` before normal expression
+  resolution. The reserved `admin` role skips permission insertion. Rust calls the Lean
+  `visibleSchema` to build the role's expanded SDL; permission decisions stay in Lean.
 
 Names in a statement depend only on the nesting depth and the position of a field:
 `r<depth>` for the rows of a level read as a set, `t<depth>` for a row of a level,
@@ -75,16 +81,28 @@ deep as the query and as long as a selection; `tests/compile.rs` compiles the la
 accepted query on a 2 MiB stack. The public limit constants in `src/lib.rs` repeat these numbers and a unit test
 compares them. Rust also bounds filter conversion before descending recursively.
 A combined test places the maximum filter inside the deepest accepted relationship.
+`tests/permissions.rs` also checks maximum permission depth, boolean size and membership
+size on a 2 MiB stack. A combined case has 32 relationship levels, 32 `EXISTS`
+levels, a maximum-depth 1000-term permission and 65,001 parameters. Permission `limit` and session-valued `_is_null` are unsupported.
+
+Do not silently apply another table's permission inside a permission relationship:
+Hasura does not do so. `queryPermitted` requires every such nested scan to already contain
+its role condition exactly, or as an immediate conjunction member. More general logical
+implications are rejected. `allScans` includes these scans; `queryReads` excludes the
+appended policy conjunct and join keys. `Scan` always wraps a user condition and policy
+as `.and [user, policy]` after insertion. Keep this boundary consistent with `scanReads`.
+Policy values follow the user filter values of each scan. The authorization proofs are
+syntactic invariants of this plan; they do not establish PostgreSQL result semantics.
 
 ## Theorems and the audit
 
 A theorem counts when it rules out a broken implementation. `audit/Audit/Compiler.lean`
-runs [leanassay](https://github.com/conao3/lean-leanassay): `#assay` breaks each function in small ways and runs the theorems on the
+and `audit/Audit/Permissions.lean` run [leanassay](https://github.com/conao3/lean-leanassay): `#assay` breaks each function in small ways and runs the theorems on the
 broken versions. `lake -d audit build --wfail` fails when no broken version of a function
 is refuted, when a broken version satisfies every theorem but changes the output (a
 hole), or when no input satisfies a theorem's hypotheses.
 
-The audit covers twelve functions: 97 broken versions, 74 refuted, 16 with the same output
+The audit covers fourteen functions: 101 broken versions, 78 refuted, 16 with the same output
 on every input tried, 7 that do not typecheck, no hole and no untested version.
 
 - Properties: `quoteChars` and `quoteStringChars` (`unquote_quote`, `unquote_quoteChars`: reading a quoted name
@@ -97,17 +115,21 @@ on every input tried, 7 that do not typecheck, no hole and no untested version.
   `relationValid_iff`), `scalarValid` and `membershipValid` (`scalarValid_iff`,
   `membershipValid_iff`), and `lateralScan` (`lateralScan_limit`). The full scan equalities
   `lateralScan_object`, `lateralScan_array` and `lateralScan_aggregate` are proved too;
-  the audit uses the limit projection because recursive expressions lack `DecidableEq`.
+  the audit now checks the complete scan equalities as well as the limit projection.
   They stop an edit of one side only; they do not connect the definition to anything
   written independently.
+- `appendCondition` and `addPermission` use `appendCondition_exact` and
+  `addPermission_condition`: all three mutations are refuted, including returning the
+  original scan without its condition. The table is in README.md. Audit-only default
+  instances supply constant failing scans and errors to the mutator.
 
 A function added to the block gets a theorem and an `#assay` line in the same change, or
 an entry below. `maxDepth`, `maxFields`, `maxFilterDepth`, `maxInValues` and `rowAlias` are constants
 and are not audited.
 
-Two groups stay outside the audit. `make survey` prints their tables with hand-written
+Three groups, targeting twenty functions, stay outside the audit. `make survey` prints their tables with hand-written
 generators shared in `audit/Audit/Generators.lean`, since automatically derived generators
-for recursive expressions and selections do not terminate. The library builds eight
+for recursive expressions and selections do not terminate. The library builds nine
 independent survey modules so their automatically derived instances stay separate and
 completed groups can be reused independently.
 
@@ -120,16 +142,25 @@ completed groups can be reused independently.
   typecheck; none is untested or times out. The differential test and
   `tests/fixtures/expected/` pin the text.
 - `resolveExpression`, `resolveExpressions`, `resolveFilter`, `resolveOrder`,
-  `resolveScan`, `resolveNode`, `resolveNodes`, `resolve` and `run` decide which selections are accepted. `resolve_values` and `run_params`
-  refute 4 of 303 broken versions; `resolve_declared` refutes none of the versions tried.
-  The 107 holes accept or reject a different set of selections or return a different
+  `resolveScan`, `resolveNode`, `resolveNodes`, `resolveSelection` and `runSelection` decide which selections are accepted. `resolveSelection_values` and `runSelection_params`
+  refute 4 of 304 broken versions; `resolveSelection_declared` refutes none of the versions tried.
+  The 100 holes accept or reject a different set of selections or return a different
   error. `invalid_queries_are_rejected` in `tests/compile.rs` pins the rules by example.
-  126 versions do not typecheck and 66 give the same output on every input tried.
-  None is untested or times out.
+  126 versions do not typecheck and 47 give the same output on every input tried.
+  None is untested. The filter survey has 27 unresolved timeouts at the default
+  30-second deadline per mutation in this run with concurrent machine load; do not
+  count these as equivalent or killed.
+- `guardQuery`, `resolve` and `run` use `resolve_values` and `run_params`. The mutator
+  generates one changed role comparison in `resolve`: zero killed, one hole, zero
+  equivalent, ill-typed, untested or timed-out versions. It changes the accepted set
+  while successful outputs still satisfy parameter preservation. No mutation is
+  generated for `guardQuery` or `run` by this pinned revision.
 
-leanassay compares outputs only for types with `DecidableEq`. `Expression`, `Scan`, `Node`, `Query` and
-`Selection` have none (the deriving handler does not apply to nested inductive types), so
-the survey compares the output of `run` and declares `DecidableEq` for `Except`.
+leanassay compares outputs only for types with `DecidableEq`. The audit implements
+`DecidableEq Predicate` from `predicateEq_iff` and a constructor comparison for `Scan`.
+`Expression`, `Node`, `Query` and `Selection` have no instance; the surveys compare the
+output of `runSelection` or `run` and declare `DecidableEq` for `Except`. The pinned
+leanassay revision is unchanged. Hand-written generators remain necessary.
 
 The lexical helpers `comparisonText`, `aggregateText`, `leafLex`, `offsetLex`,
 `emptyLeaf`, `emptyField`, `emptyFields`, `emptyRow` and `resultLex` return text or
@@ -140,11 +171,36 @@ aggregate selection contexts; their uses are covered by the resolution survey an
 rejection tests. Value traversal, erasure and declared-reference helpers state and
 support the preservation theorems; they are not independent acceptance checks.
 
-The reported properties are seven independent properties, stated by twelve public
-boundary theorems; nine conditions restated next to the implementation; and zero
-variable-free checks. The helpers proving the same preservation at intermediate nodes
-are not counted as additional independent properties. Three of the nine restated
-conditions are the full scan equalities above, which the audit cannot execute.
+The reported properties are nine independent properties, stated by fifteen boundary
+theorems; fourteen conditions restated next to the implementation; and zero variable-free
+checks. `PROOFS.md` lists every counted statement verbatim. Intermediate value,
+declaration and permission traversal lemmas support those properties and are not counted
+again. The new independent guarantees are each non-admin scan's role condition and the
+visibility of user columns. `resolve_tables` follows from the scan condition guarantee.
+
+The complete acceptance equivalence is unfinished. No independent Bool function yet
+characterizes every selection accepted by `resolveSelection` and `resolve`. In particular,
+`documentValues` uses raw resolution and is a parameter-order specification, not an
+acceptance predicate. Changes in the accepted set or error variant can still be survey
+holes. Keep this boundary explicit in public descriptions.
+
+Manual mutation checks supplement automatic generation. Replacing the inserted
+`.and [scan.conds, condition]` with `scan.conds` in `appendCondition` makes
+`appendCondition_exact`, `addPermission_condition` and `addPermission_values` fail. Calling `roleCondition` with `{ session with role := "other" }`
+inside `addPermission` fails `addPermission_condition` and `addPermission_values`. The pinned mutator does not generate
+that role substitution; record the automatic table separately from these manual failures.
+Earlier manual checks recorded in commit `1fe806c` made `condToks` emit a text value
+and made `resolveScan` read another SQL schema; the erasure and raw declaration proofs
+failed respectively. Those two historical mutations were not rerun for this change.
+The new final validator can reject a corrupted scan before successful resolution.
+Removing the column filter from `visibleSchema` fails `columnPermitted_origin`,
+which derives original-table and original-permission witnesses for `resolve_columns`.
+Manual proof failures are not extra automatic mutation kills.
+
+`findPermission`, visibility, binding and guard traversal helpers implement the permissions;
+the `addPermission` audit checks insertion, the permission survey checks the public chain,
+and the differential/rejection tests cover their behavior. The syntactic equality and
+scan/read traversal helpers state the invariants; they are not a second policy language.
 
 When a proof is written, check it in a file of its own before building: wrap the
 definitions in `namespace model` and run `lean` on the file. A build that fails in Lean
@@ -153,11 +209,17 @@ again.
 
 ## Tests
 
-- `tests/differential.rs` parses all 43 GraphQL fixtures with the SDL schema and runs the statement of
+- `tests/differential.rs` parses all 43 admin GraphQL fixtures with the SDL schema and runs the statement of
   Hasura for it on the data of `tests/fixtures/seed.sql` and compares the JSON. Lists
   without `order_by` are compared as multisets. The seed has nullable text and floating-point columns, an author without articles,
   articles without comments, and a table with a two-column relationship. A new query gets its GraphQL text, the statement from
   Hasura's Explain API and a reference selection in `cases`.
+- Another 19 differential fixtures use roles `user` and `reviewer`, two session values,
+  restricted columns, and permissions on root, relationship, aggregate and `EXISTS`
+  scans. Ten Hasura-rejected inputs are checked for rejection. Their SQL snapshots were
+  compared with Hasura v2.51.6 HTTP responses; `tests/fixtures/permissions/metadata.json`
+  records the metadata. The same PostgreSQL connection sets `hasura.user` before each
+  Hasura statement, including statements that embed the captured session value directly.
 - `tests/graphql.rs` checks SDL positions, typed inputs, fragment and variable expansion,
   input bounds and the committed expanded SDL. `crates/rusuna-cli/tests/` checks CLI
   output, help and exit codes. `make check` and the Nix package test the whole workspace.

@@ -1,0 +1,1 @@
+{ article(order_by: {id: asc}) { id title author { id } } }

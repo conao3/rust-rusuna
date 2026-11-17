@@ -16,7 +16,7 @@ rusuna loads a mapping schema from SDL and compiles GraphQL query documents to S
 |---|---|
 | Lists, relationships, recursive filters, pagination, null ordering, aggregates and row `__typename` | available |
 | SDL with directives, typed GraphQL text parsing, expanded SDL and a CLI | available |
-| Row and column permissions per role, with proofs | planned |
+| Row and column read permissions per role, with plan invariants | available |
 | Mutations in one transaction | planned |
 | Parts for an `async-graphql` schema and `axum` routes | planned |
 | Subscriptions, event triggers | planned |
@@ -24,7 +24,7 @@ rusuna loads a mapping schema from SDL and compiles GraphQL query documents to S
 ## Usage
 
 ```rust
-use rusuna::Schema;
+use rusuna::{Schema, Session};
 use serde_json::json;
 
 let schema = Schema::from_sdl(r#"
@@ -43,6 +43,7 @@ let fields = schema.compile(
     "query Articles($limit: Int = 20) { articles(limit: $limit) { id title author { name } } }",
     &json!({}),
     Some("Articles"),
+    &Session::new("admin"),
 )?;
 for field in fields {
     println!("{}: {} {:?}", field.response_key, field.compiled.sql, field.compiled.params);
@@ -51,7 +52,7 @@ for field in fields {
 
 Execute each `CompiledField.compiled` with a PostgreSQL client and put its JSON result
 under `CompiledField.response_key` in the response's `data` object. Compilation performs
-no I/O. `Schema::parse_query(query, &variables, operation_name)` returns the expanded
+no I/O. `Schema::parse_query(query, &variables, operation_name, role)` returns the expanded
 `Vec<Selection>`; `Schema::compile` additionally calls the Lean compiler for each root.
 `variables` is a JSON object; `operation_name: Option<&str>` is required when a document
 has multiple operations. `Error::Document { message, line, column }` reports syntax and
@@ -97,7 +98,7 @@ non-list type `<target>_aggregate` and can be combined with `@relation` on row f
 The generated aggregate types are referenced but not declared in the mapping SDL.
 A `schema { query: Root }` definition selects a custom query root type.
 
-`Schema::expanded_sdl()` returns deterministic SDL with `where`, `order_by`, `limit`
+`Schema::expanded_sdl(role)` returns deterministic SDL with `where`, `order_by`, `limit`
 and `offset` arguments on list and aggregate fields. Object relationships have no
 arguments. The output includes `<Type>_bool_exp`, `<Type>_order_by`, scalar comparison
 inputs, `order_by`, and aggregate output types. This same expanded type graph validates
@@ -122,19 +123,83 @@ selection rules; a skipped root emits no statement.
 Documents and variables are bounded to 1 MiB, document nesting to 128 levels and fragment
 expansion to 100,000 visited selections, before the core's tighter selection limits.
 The parser is [async-graphql-parser](https://docs.rs/async-graphql-parser/7.2.1/async_graphql_parser/)
-7.2.1 with async-graphql-value 7.2.1. Permissions and database execution belong to later
-integration layers; every declared table and column is currently accessible.
+7.2.1 with async-graphql-value 7.2.1. Database execution belongs to the caller.
+
+## Read permissions
+
+```graphql
+type Article @table(name: "article")
+  @permission(role: "user", columns: ["id", "title"],
+              where: {author_id: {_eq: "$user_id"}}, allow_aggregations: true) {
+  id: Int!
+  title: String!
+  author_id: Int!
+}
+type Query {
+  articles: [Article!]! @list
+  articleStats: Article_aggregate! @aggregate(target: "Article")
+}
+```
+
+`@permission(role: String!, columns: [String!]!, where: <Type>_bool_exp!,
+allow_aggregations: Boolean)` is repeatable, once per role per table. Column names are
+GraphQL field names; an empty list grants no scalar columns. `allow_aggregations`
+defaults to false. Filters use the same grammar as query filters, including relationships.
+A scalar string `"$name"` reads a session variable; `"$$price"` is the literal `"$price"`.
+Names after `$` contain letters, digits or underscores. `_is_null` takes a literal
+Boolean, since it selects SQL syntax rather than a bound value. Membership lists can contain
+individual session references; a session variable cannot hold a list. Permission `limit`
+is not supported: limiting selected nodes and aggregate inputs requires a separate
+Hasura-compatible plan rule. Supplying that argument is an error.
+
+```rust
+let session = Session::new("user").variable("user_id", rusuna::Value::Int(3));
+let fields = schema.compile("{ articles { id title } }", &json!({}), None, &session)?;
+```
+
+The caller constructs the role and session from its authentication result. rusuna does
+not authenticate a request. `Session::from_json(role, &object)` accepts scalar JSON
+values; missing referenced variables, null comparisons and nonfinite numbers are errors.
+The text API additionally checks session types against the permission's scalar fields.
+`admin` is reserved and unrestricted; it requires no permission definitions. Declaring
+an `admin` permission in SDL is an error. Every other role sees only granted tables and
+columns, including filters, ordering and aggregate operands. Hidden roots and relationships
+produce the same unknown-field errors as absent fields. Join keys and columns used by
+the permission itself need not be selectable. Object relationships become nullable in
+that role's expanded SDL because their target row can be hidden.
+
+Each user table scan receives its permission as a conjunct: roots, object and array
+relationships, aggregates and `EXISTS`. User predicates are traversed in document order;
+a scan's permission values follow its user predicate values, before child selections.
+Both literal and session permission values become parameters through `Tok.param`.
+
+A relationship inside a permission has an additional restriction. Hasura evaluates that
+predicate without automatically applying the target table's permission. To preserve its
+result while ensuring every scan contains its role condition, rusuna requires the nested
+predicate to already equal that condition or contain it as an immediate `_and` child.
+For example, if Article requires `author_id = $user_id`, a Comment permission of
+`{article: {author_id: {_eq: "$user_id"}}}` is supported. A different predicate on
+Article that omits the condition is rejected with `InvalidPermission`, even if it would
+logically imply it. This check uses the resolved expression after session binding; it
+never searches the SQL text or expands permission cycles.
+
+The lower-level API uses `Table.permissions: Vec<Permission>` and
+`Permission { role, filter: Filter<Operand>, columns, allow_aggregations }`, where
+`Operand` is `Literal(Value)` or `Session(String)`. Permission filters have the same
+32-edge, 1000-child and 1000-membership limits as query filters. No mutation permissions
+are implemented.
 
 ## CLI
 
 ```sh
-nix run . -- schema expand-sdl --schema file://tests/fixtures/schema.graphql --output text
-nix run . -- query compile-sql --schema file://tests/fixtures/schema.graphql --query file://tests/fixtures/queries/a.graphql
+nix run . -- schema expand-sdl --role admin --schema file://tests/fixtures/schema.graphql --output text
+nix run . -- query compile-sql --role admin --schema file://tests/fixtures/schema.graphql --query file://tests/fixtures/queries/a.graphql
+nix run . -- query compile-sql --role user --session '{"user_id":3}' --schema file://tests/fixtures/permissions.graphql --query '{ article { id } }'
 ```
 
 `rusuna-cli` installs the binary `rusuna`. Values beginning with `file://` are read from
 files, including `file:///dev/stdin`. `query compile-sql` accepts `--operation-name` and
-`--variables` (a JSON object or file). Global options are `--output json|text|table`
+`--variables` and `--session` (JSON objects or files). Both commands require `--role`. Global options are `--output json|text|table`
 (default `json`), `--debug`, `--no-debug` and `--version`. Each command level has `help`.
 JSON keys are `Sdl`, or `Fields` containing `ResponseKey`, `Sql` and `Params`. Text
 expansion is raw SDL; query text is tab-separated and table output adds column names.
@@ -143,7 +208,7 @@ query errors, and 255 for other failures. Diagnostics go to stderr.
 
 ## Schema and selection values
 
-The lower-level `Schema::new(tables: Vec<Table>, roots: Vec<RootField>)` declares root fields explicitly. `Schema::compile_selection(&Selection)` invokes the Lean core directly; typed text compilation requires `Schema::from_sdl`.
+The lower-level `Schema::new(tables: Vec<Table>, roots: Vec<RootField>)` returns `Result<Schema, Error>` and declares root fields explicitly. `Schema::compile_selection(&Selection, &Session)` invokes the Lean core directly; typed text compilation requires `Schema::from_sdl`.
 `RootField::new(field, target, RootKind::List | RootKind::Aggregate)` targets a table's
 GraphQL type name. `Table::name` is the row's `__typename`; it is independent of the root
 field and SQL table names. Each `Relation` declares its field, target, column mapping and
@@ -205,7 +270,8 @@ Selections have at most `MAX_FIELDS` (1000) fields. Relations are bounded by `MA
 levels allowed. Filters have at most `MAX_FILTER_DEPTH` (32) edges from the root,
 1000 children per boolean expression and `MAX_IN_VALUES` (1000) membership elements.
 Rust bounds recursive conversion before entering Lean, and Lean checks the limits too.
-Tests exercise the accepted boundaries on a 2 MiB stack.
+Tests exercise the accepted boundaries on a 2 MiB stack, including 32 relationship
+levels plus 32 `EXISTS` levels and a maximum-depth 1000-term permission (65,001 parameters).
 
 ## The generated SQL
 
@@ -234,20 +300,26 @@ Tests exercise the accepted boundaries on a 2 MiB stack.
 
 ## What is proved
 
-The Lean definitions and theorems are in `src/compiler.rs`. Each theorem holds for every
-schema and every query.
+The Lean definitions and theorems are in `src/compiler.rs`. Each theorem is universally quantified over its Lean inputs.
+[PROOFS.md](PROOFS.md) lists the exact statements and their classification.
+The permission statements concern successful resolution with a schema and session.
 
 Properties:
 
 | Theorem | Statement |
 |---|---|
-| `run_params`, `compile_params`, `resolve_values` | The parameters of a compiled query are the values of the query, in document order. |
-| `compile_erase` | The SQL text is the same for two queries that differ only in their values. |
+| `run_params`, `compile_params`, `resolve_values` | Parameters follow document order, including each scan's bound permission values after its user filter. |
+| `compile_erase` | Resolved plans that differ only in their query or session-derived values produce the same SQL text. |
 | `placeholders_numbered`, `slots_numbered` | The placeholders are `$1` … `$n`, in the order of the parameters. |
 | `unquote_quote`, `unquote_quoteChars` | `unquoteChars`, a reader of a double-quoted identifier written after PostgreSQL's lexical rules, reads a quoted name back as the name and stops at its closing quote. |
 | `unquote_quoteString`, `unquote_quoteStringChars` | Reading a quoted string literal returns the original string and stops at the closing quote. |
 | `resolve_declared` | Every table in the plan, including relationship predicates inside `EXISTS`, is declared in the schema. |
 | `distinct_iff` | The check for repeated aliases accepts exactly the lists without duplicates. |
+| `resolve_scan_conditions`, `resolve_tables` | Every non-admin scan, including scans inside permission predicates, contains the bound condition of that role and has a permission definition. |
+| `resolve_columns` | User column references in selections, filters, ordering and aggregates belong to the role's visible columns; join keys and policy columns are excluded. |
+
+`compile_erase` erases `Value` operands, including bound session operands. It does not
+erase pagination, `_is_null` flags, names, role choices or permission syntax.
 
 Conditions written a second time, as an equivalence next to the definition:
 
@@ -257,34 +329,58 @@ Conditions written a second time, as an equivalence next to the definition:
 | `relationValid_iff` | An accepted relationship has as many columns as references, and at least one. |
 | `lateralScan_object`, `lateralScan_array`, `lateralScan_aggregate`, `lateralScan_limit` | The scan of an object relationship has the limit 1 and the conditions of the relationship; array and aggregate scans are unchanged. |
 | `scalarValid_iff`, `membershipValid_iff` | Comparison values are non-null and finite, and membership lists respect their size bound. |
+| `predicateEq_iff`, `predicatesEq_iff`, `hasConjunct_iff` | Structural expression equality and immediate conjunct membership have their stated meanings. |
+| `appendCondition_exact`, `addPermission_condition` | The inserted scan is exactly the original scan with the requested role condition appended; binding errors are preserved. |
 
 [leanassay](https://github.com/conao3/lean-leanassay) checks which theorems rule out
-broken implementations: the audit covers twelve functions, with 97 mutations, 74 killed,
+broken implementations: the audit covers fourteen functions, with 101 mutations, 78 killed,
 16 equivalent on the sampled inputs, 7 ill-typed, zero holes and zero untested.
-There are seven independent properties (twelve principal theorem statements), nine
-restated conditions and zero variable-free checks. Three restated conditions are full
-scan equalities; the executable audit checks their limit projection. AGENTS.md lists the functions it covers and the ones it does not.
+There are nine independent properties (fifteen principal theorem statements), fourteen
+restated conditions and zero variable-free checks. The executable audit checks full
+scan equalities as well as their limit projection. AGENTS.md lists the functions it covers and the ones it does not.
+
+The permission insertion audit has the following table (`✗` means a theorem refuted
+the mutation):
+
+| Mutation | `appendCondition_exact` | `addPermission_condition` |
+|---|---|---|
+| `appendCondition := fun _ _ => default` | ✗ | ✗ |
+| `appendCondition := fun x _ => x` | ✗ | ✗ |
+| `addPermission := fun _ _ _ => default` | — | ✗ |
+
+Replacing the requested role with `"other"` is not generated by the pinned mutator.
+A manual mutation failed both the insertion and parameter-preservation proofs.
 
 `make survey` examines functions outside that audit with the boundary theorems:
 
-| Group | Mutations | Killed | Holes | Equivalent on sampled inputs | Ill-typed |
-|---|---|---|---|---|---|
-| SQL emission | 295 | 26 | 172 | 4 | 93 |
-| Selection resolution | 303 | 4 | 107 | 66 | 126 |
+| Group | Mutations | Killed | Holes | Equivalent on sampled inputs | Timed out | Ill-typed |
+|---|---|---|---|---|---|---|
+| SQL emission | 295 | 26 | 172 | 4 | 0 | 93 |
+| Selection resolution | 304 | 4 | 100 | 47 | 27 | 126 |
+| Permission resolution | 1 | 0 | 1 | 0 | 0 | 0 |
+| Total | 600 | 30 | 273 | 51 | 27 | 219 |
 
-Neither group has an untested or timed-out mutation. The holes change SQL text or
-acceptance rules outside the properties proved above; the tests cover these by example.
+The survey targets twenty functions; this revision generates no mutation for
+`guardQuery` or `run`. No group has an untested mutation. The filter survey has
+27 unresolved timeouts at the default 30-second deadline per mutation in this run
+with concurrent machine load. These are not counted as equivalent or killed.
+The holes change SQL text or acceptance rules outside the properties proved above;
+the tests cover these by example.
 
 Outside the proofs:
 
-- What a statement returns. The theorems are about the text and the parameters of a
-  statement, not about its result in PostgreSQL. The differential test compares the
-  results with those of the statements Hasura generates.
-- The acceptance rules of `resolve`, apart from the conditions above. Tests cover them by
-  example.
+- What PostgreSQL returns. The row permission theorem proves that each `Scan` contains
+  its role condition as an expression in the plan. It does not interpret SQL execution,
+  or prove that the expression represents the application author's intended policy.
+  Differential tests compare PostgreSQL results with Hasura-generated statements.
+- The complete acceptance rules of `resolveSelection` and `resolve`. An independent
+  Bool acceptance function and its success equivalence remain pending; no theorem
+  fixes the complete accepted set or every error variant. Tests cover them by example.
 - leanfran, which translates the Lean definitions to the Rust that runs. The tests run
   the generated Rust.
-- `src/lib.rs`, which converts the public Rust types to the Lean types and back.
+- `src/lib.rs`, which converts public Rust types to Lean types and back; SDL parsing,
+  role-specific SDL rendering and scalar type checking in `src/graphql/`; authentication
+  and construction of the session by the caller.
 - `unquoteChars` as a description of PostgreSQL's reader.
 
 ## Results and speed
@@ -300,14 +396,24 @@ one connection, the statement of rusuna, of [viat-gql](https://crates.io/crates/
 
 | Query | rusuna | viat-gql | Hasura | hand-written |
 |---|---|---|---|---|
-| A: 20 articles, their author and 5 comments each | 0.6 (0.6–4.7) | 0.6 (0.5–1.4) | 0.6 (0.5–3.4) | 0.6 (0.5–1.6) |
-| B: 50,000 articles and their author | 204.9 (128.7–330.9) | 263.9 (181.0–399.7) | 222.3 (121.8–405.8) | 308.6 (166.0–673.0) |
-| C: 2,000 authors, all their articles and all their comments | 613.5 (488.0–1387.2) | 756.7 (575.5–1151.3) | 671.1 (568.9–916.0) | 675.5 (508.7–1126.5) |
+| A: 20 articles, their author and 5 comments each | 0.7 (0.6–7.4) | 0.6 (0.6–3.9) | 0.7 (0.6–7.1) | 1.1 (0.5–7.6) |
+| B: 50,000 articles and their author | 426.5 (125.8–580.3) | 427.3 (315.8–798.4) | 415.3 (130.1–565.8) | 504.8 (222.9–879.5) |
+| C: 2,000 authors, all their articles and all their comments | 1269.3 (743.5–2340.7) | 1257.0 (772.8–2514.4) | 1610.2 (734.3–2128.6) | 1336.9 (901.6–2038.7) |
 
-All three speed goals pass in this run. Compiling these GraphQL documents, including parsing and type checking, takes 93 to 376 µs.
+All three speed goals pass in this run. Compiling these GraphQL documents, including parsing and type checking, takes 274 to 506 µs.
 All four implementations return equal results on the benchmark data. The differential
-test covers 43 queries, including empty results, nested aggregates, custom root names,
-nullable columns, composite relationship predicates and every supported comparison.
+test covers 43 admin queries and 19 permission queries, including empty results, nested
+aggregates, custom root names, nullable columns, composite relationship predicates and
+every supported comparison. Ten rejected role queries are fixtures too. The permission
+fixtures use two roles and session IDs 1 and 3, covering roots, object and array
+relationships, set and lateral aggregation, and nested `EXISTS`. Each captured Hasura
+statement was also compared with its role-bearing HTTP response. The exported metadata
+is in `tests/fixtures/permissions/metadata.json`.
+
+With role `user` and `user_id = 3`, the same benchmark measures A at 1.0 ms (0.7–3.9),
+B at 0.3 ms (0.2–7.8), and C at 7.5 ms (3.6–10.0), 15 runs each. These smaller result
+sets also match Hasura. The timings include concurrent machine load; compare the
+statements within the same run.
 
 ## Development
 

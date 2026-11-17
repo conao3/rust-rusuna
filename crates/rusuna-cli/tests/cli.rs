@@ -19,6 +19,8 @@ fn syntax_and_target_errors_have_distinct_exit_codes() {
         vec![
             "query",
             "compile-sql",
+            "--role",
+            "admin",
             "--schema",
             SDL,
             "--query",
@@ -30,10 +32,19 @@ fn syntax_and_target_errors_have_distinct_exit_codes() {
         assert_eq!(run(&args).status.code(), Some(252), "{args:?}");
     }
     for args in [
-        vec!["schema", "expand-sdl", "--schema", "invalid"],
+        vec![
+            "schema",
+            "expand-sdl",
+            "--role",
+            "admin",
+            "--schema",
+            "invalid",
+        ],
         vec![
             "query",
             "compile-sql",
+            "--role",
+            "admin",
             "--schema",
             SDL,
             "--query",
@@ -61,7 +72,7 @@ fn all_help_levels_and_version_succeed() {
 
 #[test]
 fn expansion_and_compilation_support_json_text_and_files() {
-    let expanded = run(&["schema", "expand-sdl", "--schema", SDL]);
+    let expanded = run(&["schema", "expand-sdl", "--role", "admin", "--schema", SDL]);
     assert!(expanded.status.success());
     let value: serde_json::Value = serde_json::from_slice(&expanded.stdout).unwrap();
     assert!(value["Sdl"].as_str().unwrap().contains("A_bool_exp"));
@@ -69,6 +80,8 @@ fn expansion_and_compilation_support_json_text_and_files() {
     let compiled = run(&[
         "query",
         "compile-sql",
+        "--role",
+        "admin",
         "--schema",
         SDL,
         "--query",
@@ -91,6 +104,8 @@ fn expansion_and_compilation_support_json_text_and_files() {
         let result = run(&[
             "schema",
             "expand-sdl",
+            "--role",
+            "admin",
             "--schema",
             &file,
             "--output",
@@ -100,6 +115,8 @@ fn expansion_and_compilation_support_json_text_and_files() {
         let result = run(&[
             "query",
             "compile-sql",
+            "--role",
+            "admin",
             "--schema",
             SDL,
             "--query",
@@ -109,4 +126,26 @@ fn expansion_and_compilation_support_json_text_and_files() {
         ]);
         assert!(result.status.success());
     }
+}
+
+#[test]
+fn permissions_accept_session_json_and_require_the_selected_role() {
+    let schema = r#"type A @table(name: "a") @permission(role: "user", columns: ["id"], where: {id: {_eq: "$id"}}) { id: Int! } type Query { rows: [A!]! @list }"#;
+    let args = [
+        "query",
+        "compile-sql",
+        "--schema",
+        schema,
+        "--query",
+        "{ rows { id } }",
+        "--role",
+        "user",
+    ];
+    assert_eq!(run(&args).status.code(), Some(254));
+    let mut with_session = args.to_vec();
+    with_session.extend(["--session", r#"{"id":3}"#]);
+    let compiled = run(&with_session);
+    assert!(compiled.status.success(), "{:?}", compiled.stderr);
+    let value: serde_json::Value = serde_json::from_slice(&compiled.stdout).unwrap();
+    assert_eq!(value["Fields"][0]["Params"], serde_json::json!([3]));
 }

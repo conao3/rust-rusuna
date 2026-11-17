@@ -195,30 +195,30 @@ leanfran::lean! {
       child : List String
       deriving DecidableEq, Repr
 
-    inductive Expression (R : Type) where
-      | compare (field : String) (op : Comparison) (value : Value)
-      | member (field : String) (negated : Bool) (values : List Value)
+    inductive Expression (R V : Type) where
+      | compare (field : String) (op : Comparison) (value : V)
+      | member (field : String) (negated : Bool) (values : List V)
       | isNull (field : String) (value : Bool)
-      | and (children : List (Expression R))
-      | or (children : List (Expression R))
-      | not (child : Expression R)
-      | relation (reference : R) (child : Expression R)
+      | and (children : List (Expression R V))
+      | or (children : List (Expression R V))
+      | not (child : Expression R V)
+      | relation (reference : R) (child : Expression R V)
       deriving Repr
 
     mutual
-    def expressionValues {R : Type} : Expression R → List Value
+    def expressionValues {R V : Type} : Expression R V → List V
       | .compare _ _ v => [v]
       | .member _ _ vs => vs
       | .isNull _ _ => []
       | .and es | .or es => expressionsValues es
       | .not e | .relation _ e => expressionValues e
-    def expressionsValues {R : Type} : List (Expression R) → List Value
+    def expressionsValues {R V : Type} : List (Expression R V) → List V
       | [] => []
       | e :: es => expressionValues e ++ expressionsValues es
     end
 
     mutual
-    def eraseExpression {R : Type} : Expression R → Expression R
+    def eraseExpression {R : Type} : Expression R Value → Expression R Value
       | .compare f op _ => .compare f op (.int 0)
       | .member f neg vs => .member f neg (vs.map fun _ => .int 0)
       | .isNull f b => .isNull f b
@@ -226,9 +226,61 @@ leanfran::lean! {
       | .or es => .or (eraseExpressions es)
       | .not e => .not (eraseExpression e)
       | .relation r e => .relation r (eraseExpression e)
-    def eraseExpressions {R : Type} : List (Expression R) → List (Expression R)
+    def eraseExpressions {R : Type} : List (Expression R Value) → List (Expression R Value)
       | [] => []
       | e :: es => eraseExpression e :: eraseExpressions es
+    end
+
+    mutual
+    inductive Predicate where
+      | compare (field : String) (op : Comparison) (value : Value)
+      | member (field : String) (negated : Bool) (values : List Value)
+      | isNull (field : String) (value : Bool)
+      | and (children : List Predicate)
+      | or (children : List Predicate)
+      | not (child : Predicate)
+      | exists (scan : Scan) (parent child : List String)
+      deriving Repr
+    inductive Scan where
+      | mk (name schema table : String) (conds : Predicate) (order : List (String × Direction))
+          (limit offset : Option Nat)
+      deriving Repr
+    end
+
+    def Scan.name : Scan → String | .mk name _ _ _ _ _ _ => name
+    def Scan.schema : Scan → String | .mk _ schema _ _ _ _ _ => schema
+    def Scan.table : Scan → String | .mk _ _ table _ _ _ _ => table
+    def Scan.conds : Scan → Predicate | .mk _ _ _ conds _ _ _ => conds
+    def Scan.order : Scan → List (String × Direction) | .mk _ _ _ _ order _ _ => order
+    def Scan.limit : Scan → Option Nat | .mk _ _ _ _ _ limit _ => limit
+    def Scan.offset : Scan → Option Nat | .mk _ _ _ _ _ _ offset => offset
+
+    mutual
+    def predicateValues : Predicate → List Value
+      | .compare _ _ v => [v]
+      | .member _ _ vs => vs
+      | .isNull _ _ => []
+      | .and es | .or es => predicatesValues es
+      | .not e => predicateValues e
+      | .exists (.mk _ _ _ conds _ _ _) _ _ => predicateValues conds
+    def predicatesValues : List Predicate → List Value
+      | [] => []
+      | e :: es => predicateValues e ++ predicatesValues es
+    end
+
+    mutual
+    def erasePredicate : Predicate → Predicate
+      | .compare f op _ => .compare f op (.int 0)
+      | .member f neg vs => .member f neg (vs.map fun _ => .int 0)
+      | .isNull f b => .isNull f b
+      | .and es => .and (erasePredicates es)
+      | .or es => .or (erasePredicates es)
+      | .not e => .not (erasePredicate e)
+      | .exists (.mk name schema table conds order limit offset) parent child =>
+        .exists (.mk name schema table (erasePredicate conds) order limit offset) parent child
+    def erasePredicates : List Predicate → List Predicate
+      | [] => []
+      | e :: es => erasePredicate e :: erasePredicates es
     end
 
     def comparisonText : Comparison → String
@@ -240,7 +292,7 @@ leanfran::lean! {
       | v :: vs => .param v :: vs.flatMap (fun x => [.lex (.raw ","), .param x])
 
     mutual
-    def expressionToks (depth : Nat) (qualifier : String) : Expression Reference → List Tok
+    def expressionToks (depth : Nat) (qualifier : String) : Predicate → List Tok
       | .compare field op v => lift [.col qualifier field, .raw (comparisonText op)] ++ [.param v]
       | .member field neg vs =>
         if vs.isEmpty then lift [.raw (if neg then "true" else "false")]
@@ -250,13 +302,13 @@ leanfran::lean! {
       | .and es => lift [.raw "( true"] ++ expressionsToks depth qualifier "AND" es ++ lift [.raw ")"]
       | .or es => lift [.raw "( false"] ++ expressionsToks depth qualifier "OR" es ++ lift [.raw ")"]
       | .not e => lift [.raw "NOT ("] ++ expressionToks depth qualifier e ++ lift [.raw ")"]
-      | .relation ref e =>
+      | .exists (.mk _ schema table e _ _ _) parent child =>
         let alias := "e" ++ toString depth
-        lift ([.raw "EXISTS (SELECT 1 FROM", .col ref.schema ref.table, .raw "AS", .ident alias,
-          .raw "WHERE true"] ++ (ref.parent.zip ref.child).flatMap (fun pair =>
+        lift ([.raw "EXISTS (SELECT 1 FROM", .col schema table, .raw "AS", .ident alias,
+          .raw "WHERE true"] ++ (parent.zip child).flatMap (fun pair =>
             [.raw "AND", .col alias pair.2, .raw "=", .col qualifier pair.1]) ++ [.raw "AND ("])
           ++ expressionToks (depth + 1) alias e ++ lift [.raw "))"]
-    def expressionsToks (depth : Nat) (qualifier op : String) : List (Expression Reference) → List Tok
+    def expressionsToks (depth : Nat) (qualifier op : String) : List (Predicate) → List Tok
       | [] => []
       | e :: es => lift [.raw op, .raw "("] ++ expressionToks depth qualifier e ++ lift [.raw ")"]
           ++ expressionsToks depth qualifier op es
@@ -270,35 +322,34 @@ leanfran::lean! {
       cases vs <;> simp [paramToks, eraseTok, List.map_flatMap, List.flatMap_map]
 
     mutual
-    theorem expressionToks_values (depth : Nat) (q : String) (e : Expression Reference) :
-        (expressionToks depth q e).filterMap tokValue = expressionValues e := by
-      cases e <;> simp only [expressionToks, expressionValues]
+    theorem expressionToks_values (depth : Nat) (q : String) (e : Predicate) :
+        (expressionToks depth q e).filterMap tokValue = predicateValues e := by
+      cases e
+      case «exists» scan parent child =>
+        cases scan
+        simp [expressionToks, predicateValues, lift_values, expressionToks_values]
+      all_goals simp only [expressionToks, predicateValues]
       all_goals try split
       all_goals simp_all [lift_values, paramToks_values, tokValue, List.filterMap, expressionToks_values, expressionsToks_values]
-    theorem expressionsToks_values (depth : Nat) (q op : String) (es : List (Expression Reference)) :
-        (expressionsToks depth q op es).filterMap tokValue = expressionsValues es := by
-      cases es <;> simp [expressionsToks, expressionsValues, lift_values, expressionToks_values, expressionsToks_values]
+    theorem expressionsToks_values (depth : Nat) (q op : String) (es : List (Predicate)) :
+        (expressionsToks depth q op es).filterMap tokValue = predicatesValues es := by
+      cases es <;> simp [expressionsToks, predicatesValues, lift_values, expressionToks_values, expressionsToks_values]
     end
 
     mutual
-    theorem expressionToks_erase (depth : Nat) (q : String) (e : Expression Reference) :
-        (expressionToks depth q e).map eraseTok = expressionToks depth q (eraseExpression e) := by
-      cases e <;> simp only [expressionToks, eraseExpression]
+    theorem expressionToks_erase (depth : Nat) (q : String) (e : Predicate) :
+        (expressionToks depth q e).map eraseTok = expressionToks depth q (erasePredicate e) := by
+      cases e
+      case «exists» scan parent child =>
+        cases scan
+        simp [expressionToks, erasePredicate, lift_erase, expressionToks_erase]
+      all_goals simp only [expressionToks, erasePredicate]
       all_goals try split
       all_goals simp_all [lift_erase, paramToks_erase, eraseTok, expressionToks_erase, expressionsToks_erase]
-    theorem expressionsToks_erase (depth : Nat) (q op : String) (es : List (Expression Reference)) :
-        (expressionsToks depth q op es).map eraseTok = expressionsToks depth q op (eraseExpressions es) := by
-      cases es <;> simp [expressionsToks, eraseExpressions, lift_erase, expressionToks_erase, expressionsToks_erase]
+    theorem expressionsToks_erase (depth : Nat) (q op : String) (es : List (Predicate)) :
+        (expressionsToks depth q op es).map eraseTok = expressionsToks depth q op (erasePredicates es) := by
+      cases es <;> simp [expressionsToks, erasePredicates, lift_erase, expressionToks_erase, expressionsToks_erase]
     end
-
-    structure Scan where
-      schema : String
-      table : String
-      conds : Expression Reference
-      order : List (String × Direction)
-      limit : Option Nat
-      offset : Option Nat
-      deriving Repr
 
     inductive AggregateOp where
       | sum | avg | min | max
@@ -435,7 +486,7 @@ leanfran::lean! {
 
     def lateralScan (kind : Kind) (scan : Scan) : Scan :=
       match kind with
-      | .object => { scan with order := [], limit := some 1, offset := none }
+      | .object => ⟨scan.name, scan.schema, scan.table, scan.conds, [], some 1, none⟩
       | .array | .aggregate => scan
 
     def lateralAgg (depth : Nat) (kind : Kind) (scan : Scan) (children : List Node) : List Lex :=
@@ -490,7 +541,7 @@ leanfran::lean! {
 
     def placeholders (query : Query) : List Nat := slots (emit query)
 
-    def scanValues (scan : Scan) : List Value := expressionValues scan.conds
+    def scanValues (scan : Scan) : List Value := predicateValues scan.conds
 
     mutual
     def nodeValues : Node → List Value
@@ -504,7 +555,7 @@ leanfran::lean! {
 
     def queryValues (query : Query) : List Value := scanValues query.scan ++ nodesValues query.children
 
-    def eraseScan (scan : Scan) : Scan := { scan with conds := eraseExpression scan.conds }
+    def eraseScan (scan : Scan) : Scan := ⟨scan.name, scan.schema, scan.table, erasePredicate scan.conds, scan.order, scan.limit, scan.offset⟩
 
     mutual
     def eraseNode : Node → Node
@@ -527,15 +578,16 @@ leanfran::lean! {
 
     theorem scanToks_erase (scan : Scan) (link : List Lex) :
         (scanToks scan link).map eraseTok = scanToks (eraseScan scan) link := by
-      simp [scanToks, eraseScan, lift_erase, expressionToks_erase]
+      cases scan
+      simp [scanToks, eraseScan, lift_erase, expressionToks_erase, Scan.schema, Scan.table, Scan.conds, Scan.order, Scan.limit, Scan.offset]
 
     theorem lateralScan_values (kind : Kind) (scan : Scan) :
         scanValues (lateralScan kind scan) = scanValues scan := by
-      cases kind <;> rfl
+      cases kind <;> cases scan <;> rfl
 
     theorem lateralScan_erase (kind : Kind) (scan : Scan) :
         eraseScan (lateralScan kind scan) = lateralScan kind (eraseScan scan) := by
-      cases kind <;> rfl
+      cases kind <;> cases scan <;> rfl
 
     mutual
     theorem joinToks_values (depth index : Nat) (set : Bool) (n : Node) :
@@ -588,7 +640,10 @@ leanfran::lean! {
       cases n with
       | column alias leaf => rfl
       | nodes alias order children => simp [fieldLex, eraseNode]
-      | relation alias kind scan parent child children => simp [eraseNode, fieldLex, eraseScan, emptyRow_erase]
+      | relation alias kind scan parent child children =>
+        cases scan
+        simp [eraseNode, fieldLex, eraseScan, emptyRow_erase, Scan.limit, Scan.offset]
+        rfl
       | group alias children => simp [eraseNode, fieldLex, rowLex_erase depth set children]
     termination_by 2 * sizeOf n + 0
     decreasing_by all_goals simp_wf <;> omega
@@ -612,11 +667,13 @@ leanfran::lean! {
 
     theorem resultLex_erase (depth : Nat) (set : Bool) (kind : Kind) (scan : Scan) (ns : List Node) :
         resultLex depth set kind (eraseScan scan) (eraseNodes ns) = resultLex depth set kind scan ns := by
-      simp [resultLex, rowLex_erase, eraseScan]
+      cases scan
+      simp [resultLex, rowLex_erase, eraseScan, Scan.order]
 
     theorem lateralAgg_erase (depth : Nat) (kind : Kind) (scan : Scan) (ns : List Node) :
         lateralAgg depth kind (eraseScan scan) (eraseNodes ns) = lateralAgg depth kind scan ns := by
-      cases kind <;> simp [lateralAgg, rowLex_erase, eraseScan]
+      cases scan
+      cases kind <;> simp [lateralAgg, rowLex_erase, eraseScan, Scan.order]
 
     mutual
     theorem joinToks_erase (depth index : Nat) (set : Bool) (n : Node) :
@@ -661,11 +718,11 @@ leanfran::lean! {
       simp [placeholders, slots_numbered, h]
 
     theorem lateralScan_object (scan : Scan) :
-        lateralScan .object scan = { scan with order := [], limit := some 1, offset := none } := rfl
+        lateralScan .object scan = ⟨scan.name, scan.schema, scan.table, scan.conds, [], some 1, none⟩ := rfl
 
     theorem lateralScan_limit (kind : Kind) (scan : Scan) :
         (lateralScan kind scan).limit = (if kind = .object then some 1 else scan.limit) := by
-      cases kind <;> rfl
+      cases kind <;> cases scan <;> rfl
 
     theorem lateralScan_aggregate (scan : Scan) : lateralScan .aggregate scan = scan := rfl
 
@@ -702,10 +759,29 @@ leanfran::lean! {
       kind : RootKind
       deriving DecidableEq, Repr
 
+    inductive Operand where
+      | literal (value : Value)
+      | session (name : String)
+      deriving DecidableEq, Repr
+
+    structure Session where
+      role : String
+      variables : List (String × Value)
+      deriving DecidableEq, Repr
+
+    structure Permission where
+      target : String
+      role : String
+      conds : Expression String Operand
+      columns : List String
+      aggregations : Bool
+      deriving Repr
+
     structure Schema where
       tables : List Table
       roots : List RootField
-      deriving DecidableEq, Repr
+      permissions : List Permission
+      deriving Repr
 
     structure Order where
       field : String
@@ -715,7 +791,7 @@ leanfran::lean! {
     structure Selection where
       alias : String
       name : String
-      conds : Option (Expression String)
+      conds : Option (Expression String Value)
       order : List Order
       limit : Option Nat
       offset : Option Nat
@@ -731,6 +807,8 @@ leanfran::lean! {
       | invalidRelation (type field : String)
       | invalidSelection (type : String)
       | invalidFilter
+      | missingSession (name : String)
+      | invalidPermission (name : String)
       | tooDeep
       deriving DecidableEq, Repr
 
@@ -742,7 +820,7 @@ leanfran::lean! {
 
     def maxInValues : Nat := 1000
 
-    def filterValues (f : Option (Expression String)) : List Value :=
+    def filterValues (f : Option (Expression String Value)) : List Value :=
       f.toList.flatMap expressionValues
 
     def rowAlias : String := "%"
@@ -773,7 +851,7 @@ leanfran::lean! {
 
     mutual
     def resolveExpression (schema : Schema) (table : Table) (depth : Nat)
-        (e : Expression String) : Except Error (Expression Reference) :=
+        (e : Expression String Value) : Except Error (Predicate) :=
         if maxFilterDepth < depth then .error .tooDeep
         else match e with
         | .compare field op v =>
@@ -792,11 +870,11 @@ leanfran::lean! {
           | some column => .ok (.isNull column b)
         | .and es =>
           if maxFields < es.length then .error .invalidFilter
-          else (resolveExpressions schema table (depth + 1) es).map Expression.and
+          else (resolveExpressions schema table (depth + 1) es).map Predicate.and
         | .or es =>
           if maxFields < es.length then .error .invalidFilter
-          else (resolveExpressions schema table (depth + 1) es).map Expression.or
-        | .not e => (resolveExpression schema table (depth + 1) e).map Expression.not
+          else (resolveExpressions schema table (depth + 1) es).map Predicate.or
+        | .not e => (resolveExpression schema table (depth + 1) e).map Predicate.not
         | .relation name e =>
           match findRelation table name with
           | none => .error (.unknownField table.name name)
@@ -807,10 +885,10 @@ leanfran::lean! {
             | none => .error (.unknownType relation.target)
             | some target =>
               (resolveExpression schema target (depth + 1) e).map fun out =>
-                .relation ⟨target.schema, target.table, relation.parent, relation.child⟩ out
+                .exists ⟨target.name, target.schema, target.table, out, [], none, none⟩ relation.parent relation.child
     termination_by sizeOf e
     def resolveExpressions (schema : Schema) (table : Table) (depth : Nat)
-        (es : List (Expression String)) : Except Error (List (Expression Reference)) :=
+        (es : List (Expression String Value)) : Except Error (List (Predicate)) :=
       match es with
       | [] => .ok []
       | e :: es =>
@@ -821,7 +899,7 @@ leanfran::lean! {
     end
 
     def resolveFilter (schema : Schema) (table : Table) :
-        Option (Expression String) → Except Error (Expression Reference)
+        Option (Expression String Value) → Except Error (Predicate)
       | none => .ok (.and [])
       | some e => resolveExpression schema table 0 e
 
@@ -835,14 +913,14 @@ leanfran::lean! {
           | .error e => .error e
           | .ok rest => .ok ((column, o.direction) :: rest)
 
-    def resolveScan (schema : Schema) (table : Table) (conds : Option (Expression String)) (order : List Order) (limit offset : Option Nat) :
+    def resolveScan (schema : Schema) (table : Table) (conds : Option (Expression String Value)) (order : List Order) (limit offset : Option Nat) :
         Except Error Scan :=
       match resolveFilter schema table conds with
       | .error e => .error e
       | .ok conds =>
         match resolveOrder table order with
         | .error e => .error e
-        | .ok order => .ok { schema := table.schema, table := table.table, conds, order, limit, offset }
+        | .ok order => .ok ⟨table.name, table.schema, table.table, conds, order, limit, offset⟩
 
     def aliasValid (alias : String) : Bool :=
       alias ≠ "" && alias ≠ rowAlias && alias.utf8ByteSize ≤ 63
@@ -934,7 +1012,7 @@ leanfran::lean! {
           | .ok nodes => .ok (node :: nodes)
     end
 
-    def resolve (schema : Schema) (root : Selection) : Except Error Query :=
+    def resolveSelection (schema : Schema) (root : Selection) : Except Error Query :=
       match schema.roots.find? (·.field = root.name) with
       | none => .error (.unknownRoot root.name)
       | some field =>
@@ -951,8 +1029,8 @@ leanfran::lean! {
               | .error e => .error e
               | .ok children => .ok { kind, scan, children }
 
-    def run (schema : Schema) (root : Selection) : Except Error Compiled :=
-      match resolve schema root with
+    def runSelection (schema : Schema) (root : Selection) : Except Error Compiled :=
+      match resolveSelection schema root with
       | .error e => .error e
       | .ok query => .ok (compile query)
 
@@ -966,41 +1044,41 @@ leanfran::lean! {
 
     mutual
     theorem resolveExpression_values (schema : Schema) (table : Table) (depth : Nat)
-        (e : Expression String) (out : Expression Reference)
+        (e : Expression String Value) (out : Predicate)
         (h : resolveExpression schema table depth e = .ok out) :
-        expressionValues out = expressionValues e := by
+        predicateValues out = expressionValues e := by
       cases e <;> simp only [resolveExpression] at h
       all_goals repeat' first | cases h | split at h
       all_goals try simp only [Except.map] at h
       all_goals repeat' first | cases h | split at h
-      all_goals simp only [expressionValues]
+      all_goals simp only [expressionValues, predicateValues]
       all_goals first
         | rfl
         | exact resolveExpression_values _ _ _ _ _ (by assumption)
         | exact resolveExpressions_values _ _ _ _ _ (by assumption)
     theorem resolveExpressions_values (schema : Schema) (table : Table) (depth : Nat)
-        (es : List (Expression String)) (out : List (Expression Reference))
+        (es : List (Expression String Value)) (out : List (Predicate))
         (h : resolveExpressions schema table depth es = .ok out) :
-        expressionsValues out = expressionsValues es := by
+        predicatesValues out = expressionsValues es := by
       cases es <;> simp only [resolveExpressions] at h
       all_goals repeat' first | cases h | split at h
       all_goals try simp only [Except.map] at h
       all_goals repeat' first | cases h | split at h
-      all_goals simp only [expressionsValues]
+      all_goals simp only [expressionsValues, predicatesValues]
       all_goals first
         | rfl
         | rw [resolveExpression_values _ _ _ _ _ (by assumption),
             resolveExpressions_values _ _ _ _ _ (by assumption)]
     end
 
-    theorem resolveFilter_values (schema : Schema) (table : Table) (f : Option (Expression String))
-        (out : Expression Reference) (h : resolveFilter schema table f = .ok out) :
-        expressionValues out = filterValues f := by
+    theorem resolveFilter_values (schema : Schema) (table : Table) (f : Option (Expression String Value))
+        (out : Predicate) (h : resolveFilter schema table f = .ok out) :
+        predicateValues out = filterValues f := by
       cases f with
       | none => cases h; rfl
       | some e => simpa [resolveFilter, filterValues] using resolveExpression_values schema table 0 e out h
 
-    theorem resolveScan_values (schema : Schema) (table : Table) (conds : Option (Expression String)) (order : List Order)
+    theorem resolveScan_values (schema : Schema) (table : Table) (conds : Option (Expression String Value)) (order : List Order)
         (limit offset : Option Nat) (scan : Scan) (h : resolveScan schema table conds order limit offset = .ok scan) :
         scanValues scan = filterValues conds := by
       simp only [resolveScan] at h
@@ -1010,7 +1088,7 @@ leanfran::lean! {
         split at h
         · cases h
         · cases h
-          simpa [scanValues] using resolveFilter_values schema table conds out hout
+          simpa [scanValues, Scan.conds] using resolveFilter_values schema table conds out hout
 
     mutual
     theorem resolveNode_values (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
@@ -1042,13 +1120,13 @@ leanfran::lean! {
             resolveNodes_values _ _ _ _ _ _ _ (by assumption)]
     end
 
-    theorem resolve_values (schema : Schema) (root : Selection) :
-        match resolve schema root with
+    theorem resolveSelection_values (schema : Schema) (root : Selection) :
+        match resolveSelection schema root with
         | .ok query => queryValues query = selectionValues root
         | .error _ => True := by
       split
       · rename_i query h
-        simp only [resolve] at h
+        simp only [resolveSelection] at h
         repeat' first | cases h | split at h
         simp only [queryValues]
         rw [resolveScan_values _ _ _ _ _ _ _ (by assumption),
@@ -1056,12 +1134,12 @@ leanfran::lean! {
         cases root; rfl
       · trivial
 
-    theorem run_params (schema : Schema) (root : Selection) :
-        match run schema root with
+    theorem runSelection_params (schema : Schema) (root : Selection) :
+        match runSelection schema root with
         | .ok compiled => compiled.params = selectionValues root
         | .error _ => True := by
-      have h := resolve_values schema root
-      simp only [run]
+      have h := resolveSelection_values schema root
+      simp only [runSelection]
       split at h
       · rename_i query hq
         simp [hq, compile_params, h]
@@ -1072,12 +1150,12 @@ leanfran::lean! {
       schema.tables.any fun t => t.schema = ref.schema && t.table = ref.table
 
     mutual
-    def expressionDeclared (schema : Schema) : Expression Reference → Bool
+    def expressionDeclared (schema : Schema) : Predicate → Bool
       | .compare _ _ _ | .member _ _ _ | .isNull _ _ => true
       | .and es | .or es => expressionsDeclared schema es
       | .not e => expressionDeclared schema e
-      | .relation ref e => referenceDeclared schema ref && expressionDeclared schema e
-    def expressionsDeclared (schema : Schema) : List (Expression Reference) → Bool
+      | .exists (.mk _ ns table e _ _ _) parent child => referenceDeclared schema ⟨ns, table, parent, child⟩ && expressionDeclared schema e
+    def expressionsDeclared (schema : Schema) : List (Predicate) → Bool
       | [] => true
       | e :: es => expressionDeclared schema e && expressionsDeclared schema es
     end
@@ -1090,7 +1168,7 @@ leanfran::lean! {
 
     mutual
     theorem resolveExpression_declared (schema : Schema) (table : Table) (depth : Nat)
-        (e : Expression String) (out : Expression Reference)
+        (e : Expression String Value) (out : Predicate)
         (h : resolveExpression schema table depth e = .ok out) :
         expressionDeclared schema out = true := by
       cases e <;> simp only [resolveExpression] at h
@@ -1105,7 +1183,7 @@ leanfran::lean! {
         | exact ⟨found_reference _ _ _ _ _ (by assumption),
             resolveExpression_declared _ _ _ _ _ (by assumption)⟩
     theorem resolveExpressions_declared (schema : Schema) (table : Table) (depth : Nat)
-        (es : List (Expression String)) (out : List (Expression Reference))
+        (es : List (Expression String Value)) (out : List (Predicate))
         (h : resolveExpressions schema table depth es = .ok out) :
         expressionsDeclared schema out = true := by
       cases es <;> simp only [resolveExpressions] at h
@@ -1119,8 +1197,8 @@ leanfran::lean! {
             resolveExpressions_declared _ _ _ _ _ (by assumption)⟩
     end
 
-    theorem resolveFilter_declared (schema : Schema) (table : Table) (f : Option (Expression String))
-        (out : Expression Reference) (h : resolveFilter schema table f = .ok out) :
+    theorem resolveFilter_declared (schema : Schema) (table : Table) (f : Option (Expression String Value))
+        (out : Predicate) (h : resolveFilter schema table f = .ok out) :
         expressionDeclared schema out = true := by
       cases f with
       | none => cases h; rfl
@@ -1142,7 +1220,7 @@ leanfran::lean! {
     def queryScans (query : Query) : List Scan := query.scan :: nodesScans query.children
 
     theorem findTable_declared (schema : Schema) (name : String) (table : Table)
-        (conds : Option (Expression String)) (order : List Order) (limit offset : Option Nat) (scan : Scan)
+        (conds : Option (Expression String Value)) (order : List Order) (limit offset : Option Nat) (scan : Scan)
         (hfind : findTable schema name = some table)
         (hscan : resolveScan schema table conds order limit offset = .ok scan) : declared schema scan = true := by
       simp only [resolveScan] at hscan
@@ -1152,7 +1230,7 @@ leanfran::lean! {
         split at hscan
         · cases hscan
         · cases hscan
-          simp only [declared, Bool.and_eq_true]
+          simp only [declared, Scan.schema, Scan.table, Scan.conds, Bool.and_eq_true]
           exact ⟨found_reference _ _ _ _ _ hfind, resolveFilter_declared _ _ _ _ hout⟩
 
     mutual
@@ -1183,13 +1261,13 @@ leanfran::lean! {
             resolveNodes_declared _ _ _ _ _ _ _ (by assumption)⟩
     end
 
-    theorem resolve_declared (schema : Schema) (root : Selection) :
-        match resolve schema root with
+    theorem resolveSelection_declared (schema : Schema) (root : Selection) :
+        match resolveSelection schema root with
         | .ok query => (queryScans query).all (declared schema) = true
         | .error _ => True := by
       split
       · rename_i query h
-        simp only [resolve] at h
+        simp only [resolveSelection] at h
         repeat' first | cases h | split at h
         simp only [queryScans, List.all_cons, Bool.and_eq_true]
         exact ⟨findTable_declared _ _ _ _ _ _ _ _ (by assumption) (by assumption),
@@ -1225,5 +1303,476 @@ leanfran::lean! {
         relationValid relation = true ↔
           relation.parent ≠ [] ∧ relation.parent.length = relation.child.length := by
       simp [relationValid]
+    def findPermission (schema : Schema) (role target : String) : Option Permission :=
+      schema.permissions.find? fun p => p.role == role && p.target == target
+
+    def tableVisible (schema : Schema) (role target : String) : Bool :=
+      role == "admin" || (findPermission schema role target).isSome
+
+    def aggregateVisible (schema : Schema) (role target : String) : Bool :=
+      role == "admin" || ((findPermission schema role target).map (·.aggregations)).getD false
+
+    def visibleSchema (schema : Schema) (role : String) : Schema :=
+      if role == "admin" then schema else
+      { schema with
+        tables := schema.tables.filterMap fun t =>
+          (findPermission schema role t.name).map fun p => { t with
+            columns := t.columns.filter fun c => p.columns.contains c.field
+            relations := t.relations.filter fun r => tableVisible schema role r.target &&
+              (r.kind != .aggregate || aggregateVisible schema role r.target) }
+        roots := schema.roots.filter fun r => tableVisible schema role r.target &&
+          (r.kind != .aggregate || aggregateVisible schema role r.target) }
+
+    def bindOperand (session : Session) : Operand → Except Error Value
+      | .literal value => .ok value
+      | .session name => match session.variables.find? (·.1 == name) with
+        | some (_, value) => .ok value
+        | none => .error (.missingSession name)
+
+    def bindOperands (session : Session) : List Operand → Except Error (List Value)
+      | [] => .ok []
+      | v :: vs => do return (← bindOperand session v) :: (← bindOperands session vs)
+
+    mutual
+    def bindExpression (session : Session) (depth : Nat) (e : Expression String Operand) :
+        Except Error (Expression String Value) :=
+      if maxFilterDepth < depth then .error .tooDeep else
+      match e with
+      | .compare field op value => (bindOperand session value).map (.compare field op)
+      | .member field neg values =>
+        if maxInValues < values.length then .error .invalidFilter
+        else (bindOperands session values).map (.member field neg)
+      | .isNull field value => .ok (.isNull field value)
+      | .and es =>
+        if maxFields < es.length then .error .invalidFilter
+        else (bindExpressions session (depth + 1) es).map .and
+      | .or es =>
+        if maxFields < es.length then .error .invalidFilter
+        else (bindExpressions session (depth + 1) es).map .or
+      | .not e => (bindExpression session (depth + 1) e).map .not
+      | .relation ref e => (bindExpression session (depth + 1) e).map (.relation ref)
+    def bindExpressions (session : Session) (depth : Nat) : List (Expression String Operand) →
+        Except Error (List (Expression String Value))
+      | [] => .ok []
+      | e :: es => do return (← bindExpression session depth e) :: (← bindExpressions session depth es)
+    end
+
+    def roleCondition (schema : Schema) (session : Session) (name : String) : Except Error Predicate := do
+      let table ← match findTable schema name with
+        | some table => .ok table
+        | none => .error (.unknownType name)
+      let permission ← match findPermission schema session.role name with
+        | some permission => .ok permission
+        | none => .error (.unknownType name)
+      let input ← bindExpression session 0 permission.conds
+      resolveExpression schema table 0 input
+
+    mutual
+    def predicateEq : Predicate → Predicate → Bool
+      | .compare f op v, .compare g oq w => f == g && op == oq && v == w
+      | .member f n vs, .member g m ws => f == g && n == m && vs == ws
+      | .isNull f b, .isNull g c => f == g && b == c
+      | .and es, .and fs | .or es, .or fs => predicatesEq es fs
+      | .not e, .not f => predicateEq e f
+      | .exists (.mk name ns t e os l o) ps cs, .exists (.mk name' ns' t' f os' l' o') ps' cs' =>
+        name == name' && ns == ns' && t == t' && predicateEq e f && os == os' && l == l' && o == o' && ps == ps' && cs == cs'
+      | _, _ => false
+    def predicatesEq : List Predicate → List Predicate → Bool
+      | [], [] => true
+      | e :: es, f :: fs => predicateEq e f && predicatesEq es fs
+      | _, _ => false
+    end
+
+    mutual
+    theorem predicateEq_iff (e f : Predicate) : predicateEq e f = true ↔ e = f := by
+      cases e <;> cases f
+      all_goals try (rename_i s ps cs t qs ds; cases s; cases t)
+      all_goals simp [predicateEq, predicateEq_iff, predicatesEq_iff, and_assoc]
+    theorem predicatesEq_iff (es fs : List Predicate) : predicatesEq es fs = true ↔ es = fs := by
+      cases es <;> cases fs <;> simp [predicatesEq, predicateEq_iff, predicatesEq_iff]
+    end
+
+    def hasConjunct (condition expression : Predicate) : Bool :=
+      predicateEq expression condition || match expression with
+        | .and es => es.any fun e => predicateEq e condition
+        | _ => false
+
+    def scanPermitted (schema : Schema) (session : Session) (scan : Scan) : Bool :=
+      match findTable schema scan.name with
+      | none => false
+      | some table => table.schema == scan.schema && table.table == scan.table &&
+        (session.role == "admin" || match roleCondition schema session scan.name with
+          | .error _ => false
+          | .ok condition => hasConjunct condition scan.conds)
+
+    mutual
+    def predicateScans : Predicate → List Scan
+      | .compare _ _ _ | .member _ _ _ | .isNull _ _ => []
+      | .and es | .or es => predicatesScans es
+      | .not e => predicateScans e
+      | .exists (.mk name ns t e os l o) _ _ => .mk name ns t e os l o :: predicateScans e
+    def predicatesScans : List Predicate → List Scan
+      | [] => []
+      | e :: es => predicateScans e ++ predicatesScans es
+    end
+
+    def scanTree (scan : Scan) : List Scan := scan :: predicateScans scan.conds
+
+    def allScans (query : Query) : List Scan := (queryScans query).flatMap scanTree
+
+    def columnPermitted (schema : Schema) (session : Session) (name column : String) : Bool :=
+      match findTable (visibleSchema schema session.role) name with
+      | none => false
+      | some table => table.columns.any (·.column == column)
+
+    mutual
+    def predicateReads (name : String) : Predicate → List (String × String)
+      | .compare field _ _ | .member field _ _ | .isNull field _ => [(name, field)]
+      | .and es | .or es => predicatesReads name es
+      | .not e => predicateReads name e
+      | .exists scan _ _ => scanReads scan
+    def predicatesReads (name : String) : List Predicate → List (String × String)
+      | [] => []
+      | e :: es => predicateReads name e ++ predicatesReads name es
+    def scanReads : Scan → List (String × String)
+      | .mk name _ _ (.and [user, _]) order _ _ =>
+        predicateReads name user ++ order.map (fun o => (name, o.1))
+      | .mk name _ _ e order _ _ => predicateReads name e ++ order.map (fun o => (name, o.1))
+    end
+
+    def leafReads (name : String) : Leaf → List (String × String)
+      | .column c | .metric _ c => [(name, c)]
+      | _ => []
+
+    mutual
+    def nodeReads (name : String) : Node → List (String × String)
+      | .column _ leaf => leafReads name leaf
+      | .group _ children => nodesReads name children
+      | .nodes _ order children => order.map (fun o => (name, o.1)) ++ nodesReads name children
+      | .relation _ _ scan _ _ children => scanReads scan ++ nodesReads scan.name children
+    def nodesReads (name : String) : List Node → List (String × String)
+      | [] => []
+      | n :: ns => nodeReads name n ++ nodesReads name ns
+    end
+
+    def queryReads (query : Query) : List (String × String) :=
+      scanReads query.scan ++ nodesReads query.scan.name query.children
+
+    def queryPermitted (schema : Schema) (session : Session) (query : Query) : Bool :=
+      (allScans query).all (scanPermitted schema session) &&
+        (queryReads query).all (fun c => columnPermitted schema session c.1 c.2)
+
+    def appendCondition (scan : Scan) (condition : Predicate) : Scan :=
+      ⟨scan.name, scan.schema, scan.table, .and [scan.conds, condition], scan.order, scan.limit, scan.offset⟩
+
+    theorem appendCondition_exact (scan : Scan) (condition : Predicate) :
+        appendCondition scan condition =
+          .mk scan.name scan.schema scan.table (.and [scan.conds, condition]) scan.order scan.limit scan.offset := by
+      rfl
+
+    def addPermission (schema : Schema) (session : Session) (scan : Scan) : Except Error Scan := do
+      let condition ← roleCondition schema session scan.name
+      return appendCondition scan condition
+
+    mutual
+    def guardPredicate (schema : Schema) (session : Session) : Predicate → Except Error Predicate
+      | .compare f op v => .ok (.compare f op v)
+      | .member f n vs => .ok (.member f n vs)
+      | .isNull f b => .ok (.isNull f b)
+      | .and es => (guardPredicates schema session es).map .and
+      | .or es => (guardPredicates schema session es).map .or
+      | .not e => (guardPredicate schema session e).map .not
+      | .exists scan ps cs => (guardScan schema session scan).map fun s => .exists s ps cs
+    def guardPredicates (schema : Schema) (session : Session) : List Predicate → Except Error (List Predicate)
+      | [] => .ok []
+      | e :: es => do return (← guardPredicate schema session e) :: (← guardPredicates schema session es)
+    def guardScan (schema : Schema) (session : Session) : Scan → Except Error Scan
+      | .mk name ns t e os l o => do
+        let e ← guardPredicate schema session e
+        addPermission schema session ⟨name, ns, t, e, os, l, o⟩
+    end
+
+    mutual
+    def guardNode (schema : Schema) (session : Session) : Node → Except Error Node
+      | .column a c => .ok (.column a c)
+      | .group a ns => (guardNodes schema session ns).map (.group a)
+      | .nodes a os ns => (guardNodes schema session ns).map (.nodes a os)
+      | .relation a k s ps cs ns => do
+        let s ← guardScan schema session s
+        let ns ← guardNodes schema session ns
+        return .relation a k s ps cs ns
+    def guardNodes (schema : Schema) (session : Session) : List Node → Except Error (List Node)
+      | [] => .ok []
+      | n :: ns => do return (← guardNode schema session n) :: (← guardNodes schema session ns)
+    end
+
+    def guardQuery (schema : Schema) (session : Session) (query : Query) : Except Error Query := do
+      let scan ← guardScan schema session query.scan
+      let children ← guardNodes schema session query.children
+      return { query with scan, children }
+
+    def resolve (schema : Schema) (session : Session) (root : Selection) : Except Error Query := do
+      let query ← resolveSelection (visibleSchema schema session.role) root
+      let query ← if session.role == "admin" then .ok query else guardQuery schema session query
+      if queryPermitted schema session query then return query
+      else .error (.invalidPermission root.name)
+
+    def run (schema : Schema) (session : Session) (root : Selection) : Except Error Compiled :=
+      (resolve schema session root).map compile
+
+    theorem addPermission_condition (schema : Schema) (session : Session) (scan : Scan) :
+        addPermission schema session scan = (roleCondition schema session scan.name).map
+          (fun condition => .mk scan.name scan.schema scan.table (.and [scan.conds, condition]) scan.order scan.limit scan.offset) := by
+      simp only [addPermission]
+      cases roleCondition schema session scan.name <;> rfl
+
+    theorem resolve_permissions (schema : Schema) (session : Session) (root : Selection)
+        (query : Query) (h : resolve schema session root = .ok query) :
+        (allScans query).all (scanPermitted schema session) = true ∧
+          (queryReads query).all (fun c => columnPermitted schema session c.1 c.2) = true := by
+      simp only [resolve, bind, Except.bind] at h
+      repeat' first | split at h | cases h
+      all_goals simp_all [queryPermitted]
+    theorem hasConjunct_iff (condition expression : Predicate) :
+        hasConjunct condition expression = true ↔
+          expression = condition ∨ ∃ es, expression = .and es ∧ condition ∈ es := by
+      cases expression <;> simp [hasConjunct, predicateEq_iff]
+
+    theorem scanPermitted_condition (schema : Schema) (session : Session) (scan : Scan)
+        (h : scanPermitted schema session scan = true) (role : session.role ≠ "admin") :
+        ∃ condition, roleCondition schema session scan.name = .ok condition ∧
+          (scan.conds = condition ∨ ∃ es, scan.conds = .and es ∧ condition ∈ es) := by
+      simp only [scanPermitted] at h
+      split at h
+      · cases h
+      · simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq] at h
+        rcases h.2 with hr | hc
+        · exact False.elim (role hr)
+        · split at hc
+          · cases hc
+          · exact ⟨_, by assumption, (hasConjunct_iff _ _).mp hc⟩
+
+    theorem resolve_scan_conditions (schema : Schema) (session : Session) (root : Selection)
+        (query : Query) (h : resolve schema session root = .ok query) (role : session.role ≠ "admin") :
+        ∀ scan ∈ allScans query, ∃ condition,
+          roleCondition schema session scan.name = .ok condition ∧
+          (scan.conds = condition ∨ ∃ es, scan.conds = .and es ∧ condition ∈ es) := by
+      intro scan member
+      exact scanPermitted_condition schema session scan
+        (List.all_eq_true.mp (resolve_permissions schema session root query h).1 scan member) role
+
+    theorem resolve_columns_checked (schema : Schema) (session : Session) (root : Selection)
+        (query : Query) (h : resolve schema session root = .ok query) (_role : session.role ≠ "admin") :
+        ∀ read ∈ queryReads query, columnPermitted schema session read.1 read.2 = true := by
+      exact List.all_eq_true.mp (resolve_permissions schema session root query h).2
+
+    theorem resolve_tables_checked (schema : Schema) (session : Session) (root : Selection)
+        (query : Query) (h : resolve schema session root = .ok query) (role : session.role ≠ "admin") :
+        ∀ scan ∈ allScans query, (findPermission schema session.role scan.name).isSome = true := by
+      intro scan member
+      obtain ⟨condition, hc, _⟩ := resolve_scan_conditions schema session root query h role scan member
+      simp only [roleCondition, bind, Except.bind] at hc
+      repeat' first | split at hc | cases hc
+      all_goals simp_all
+    def roleValues (schema : Schema) (session : Session) (name : String) : List Value :=
+      match roleCondition schema session name with
+      | .ok condition => predicateValues condition
+      | .error _ => []
+
+    mutual
+    def guardedPredicateValues (schema : Schema) (session : Session) : Predicate → List Value
+      | .compare _ _ v => [v]
+      | .member _ _ vs => vs
+      | .isNull _ _ => []
+      | .and es | .or es => guardedPredicatesValues schema session es
+      | .not e => guardedPredicateValues schema session e
+      | .exists scan _ _ => guardedScanValues schema session scan
+    def guardedPredicatesValues (schema : Schema) (session : Session) : List Predicate → List Value
+      | [] => []
+      | e :: es => guardedPredicateValues schema session e ++ guardedPredicatesValues schema session es
+    def guardedScanValues (schema : Schema) (session : Session) : Scan → List Value
+      | .mk name _ _ e _ _ _ => guardedPredicateValues schema session e ++ roleValues schema session name
+    end
+
+    mutual
+    def guardedNodeValues (schema : Schema) (session : Session) : Node → List Value
+      | .column _ _ => []
+      | .group _ ns | .nodes _ _ ns => guardedNodesValues schema session ns
+      | .relation _ _ scan _ _ ns => guardedScanValues schema session scan ++ guardedNodesValues schema session ns
+    def guardedNodesValues (schema : Schema) (session : Session) : List Node → List Value
+      | [] => []
+      | n :: ns => guardedNodeValues schema session n ++ guardedNodesValues schema session ns
+    end
+
+    def guardedQueryValues (schema : Schema) (session : Session) (query : Query) : List Value :=
+      guardedScanValues schema session query.scan ++ guardedNodesValues schema session query.children
+
+    def documentValues (schema : Schema) (session : Session) (root : Selection) : List Value :=
+      if session.role == "admin" then selectionValues root else
+      match resolveSelection (visibleSchema schema session.role) root with
+      | .ok query => guardedQueryValues schema session query
+      | .error _ => []
+
+    theorem addPermission_values (schema : Schema) (session : Session) (scan out : Scan)
+        (h : addPermission schema session scan = .ok out) :
+        scanValues out = scanValues scan ++ roleValues schema session scan.name := by
+      simp only [addPermission, bind, Except.bind] at h
+      split at h
+      · cases h
+      · cases h
+        simp_all [appendCondition, scanValues, Scan.conds, roleValues, predicateValues, predicatesValues]
+
+    mutual
+    theorem guardPredicate_values (schema : Schema) (session : Session) (e out : Predicate)
+        (h : guardPredicate schema session e = .ok out) :
+        predicateValues out = guardedPredicateValues schema session e := by
+      cases e <;> simp only [guardPredicate, Except.map] at h
+      all_goals repeat' first | split at h | cases h
+      all_goals simp only [predicateValues, guardedPredicateValues]
+      all_goals try change scanValues _ = guardedScanValues _ _ _
+      all_goals first
+        | rfl
+        | exact guardPredicates_values _ _ _ _ (by assumption)
+        | exact guardPredicate_values _ _ _ _ (by assumption)
+        | (rename_i scan ps cs out heq; cases out; exact guardScan_values _ _ _ _ heq)
+    theorem guardPredicates_values (schema : Schema) (session : Session) (es out : List Predicate)
+        (h : guardPredicates schema session es = .ok out) :
+        predicatesValues out = guardedPredicatesValues schema session es := by
+      cases es <;> simp only [guardPredicates, bind, Except.bind, pure, Except.pure] at h
+      all_goals repeat' first | split at h | cases h
+      all_goals simp only [predicatesValues, guardedPredicatesValues]
+      all_goals first
+        | rfl
+        | rw [guardPredicate_values _ _ _ _ (by assumption), guardPredicates_values _ _ _ _ (by assumption)]
+    theorem guardScan_values (schema : Schema) (session : Session) (scan out : Scan)
+        (h : guardScan schema session scan = .ok out) :
+        scanValues out = guardedScanValues schema session scan := by
+      cases scan
+      simp only [guardScan, bind, Except.bind] at h
+      split at h
+      · cases h
+      · rw [addPermission_values _ _ _ _ h]
+        simp only [scanValues, Scan.conds, Scan.name, guardedScanValues]
+        rw [guardPredicate_values _ _ _ _ (by assumption)]
+    end
+
+    mutual
+    theorem guardNode_values (schema : Schema) (session : Session) (n out : Node)
+        (h : guardNode schema session n = .ok out) :
+        nodeValues out = guardedNodeValues schema session n := by
+      cases n <;> simp only [guardNode, Except.map, bind, Except.bind, pure, Except.pure] at h
+      all_goals repeat' first | split at h | cases h
+      all_goals simp only [nodeValues, guardedNodeValues]
+      all_goals first
+        | rfl
+        | exact guardNodes_values _ _ _ _ (by assumption)
+        | rw [guardScan_values _ _ _ _ (by assumption), guardNodes_values _ _ _ _ (by assumption)]
+    theorem guardNodes_values (schema : Schema) (session : Session) (ns out : List Node)
+        (h : guardNodes schema session ns = .ok out) :
+        nodesValues out = guardedNodesValues schema session ns := by
+      cases ns <;> simp only [guardNodes, bind, Except.bind, pure, Except.pure] at h
+      all_goals repeat' first | split at h | cases h
+      all_goals simp only [nodesValues, guardedNodesValues]
+      all_goals first
+        | rfl
+        | rw [guardNode_values _ _ _ _ (by assumption), guardNodes_values _ _ _ _ (by assumption)]
+    end
+
+    theorem guardQuery_values (schema : Schema) (session : Session) (query out : Query)
+        (h : guardQuery schema session query = .ok out) :
+        queryValues out = guardedQueryValues schema session query := by
+      simp only [guardQuery, bind, Except.bind, pure, Except.pure] at h
+      repeat' first | split at h | cases h
+      simp only [queryValues, guardedQueryValues]
+      rw [guardScan_values _ _ _ _ (by assumption), guardNodes_values _ _ _ _ (by assumption)]
+
+    theorem resolve_values (schema : Schema) (session : Session) (root : Selection) :
+        match resolve schema session root with
+        | .ok query => queryValues query = documentValues schema session root
+        | .error _ => True := by
+      split
+      · rename_i query h
+        simp only [resolve, bind, Except.bind] at h
+        repeat' first | split at h | cases h
+        all_goals simp only [documentValues]
+        all_goals split
+        all_goals first
+          | (simpa [*] using resolveSelection_values (visibleSchema schema session.role) root)
+          | (simp_all <;> exact guardQuery_values _ _ _ _ (by assumption))
+      · trivial
+
+    theorem run_params (schema : Schema) (session : Session) (root : Selection) :
+        match run schema session root with
+        | .ok compiled => compiled.params = documentValues schema session root
+        | .error _ => True := by
+      have h := resolve_values schema session root
+      simp only [run]
+      split at h
+      · rename_i query hq
+        simp [hq, Except.map, compile_params, h]
+      · rename_i e hq
+        simp [hq, Except.map]
+
+    theorem resolve_declared (schema : Schema) (session : Session) (root : Selection)
+        (query : Query) (h : resolve schema session root = .ok query) :
+        ∀ scan ∈ allScans query, ∃ table ∈ schema.tables,
+          table.name = scan.name ∧ table.schema = scan.schema ∧ table.table = scan.table := by
+      intro scan member
+      have permitted := List.all_eq_true.mp (resolve_permissions schema session root query h).1 scan member
+      simp only [scanPermitted] at permitted
+      split at permitted
+      · cases permitted
+      · rename_i table found
+        have mem := List.mem_of_find?_eq_some found
+        have name := List.find?_some found
+        simp only [Bool.and_eq_true, beq_iff_eq] at permitted
+        exact ⟨table, mem, by simpa using name, permitted.1.1, permitted.1.2⟩
+
+    theorem columnPermitted_origin (schema : Schema) (session : Session) (name column : String)
+        (h : columnPermitted schema session name column = true) (role : session.role ≠ "admin") :
+        ∃ table ∈ schema.tables, table.name = name ∧
+          ∃ permission ∈ schema.permissions, permission.role = session.role ∧ permission.target = name ∧
+            ∃ field ∈ table.columns, field.field ∈ permission.columns ∧ field.column = column := by
+      simp only [columnPermitted] at h
+      split at h
+      · cases h
+      · rename_i visible found
+        have member := List.mem_of_find?_eq_some found
+        have named := List.find?_some found
+        simp only [visibleSchema, beq_iff_eq, role, ite_false] at member
+        obtain ⟨table, tableMember, mapped⟩ := List.mem_filterMap.mp member
+        cases granted : findPermission schema session.role table.name with
+        | none => simp [granted] at mapped
+        | some permission =>
+          simp only [granted, Option.map_some, Option.some.injEq] at mapped
+          cases mapped
+          have grantMember := List.mem_of_find?_eq_some granted
+          have grantNames := List.find?_some granted
+          simp only [Bool.and_eq_true, beq_iff_eq] at grantNames
+          obtain ⟨field, fieldMember, columnName⟩ := List.any_eq_true.mp h
+          simp only [List.mem_filter, List.contains_iff_mem, beq_iff_eq] at fieldMember columnName
+          exact ⟨table, tableMember, by simpa using named, permission, grantMember, grantNames.1,
+            by simpa using grantNames.2.trans (by simpa using named), field, fieldMember.1, fieldMember.2, columnName⟩
+
+    theorem resolve_columns (schema : Schema) (session : Session) (root : Selection)
+        (query : Query) (h : resolve schema session root = .ok query) (role : session.role ≠ "admin") :
+        ∀ read ∈ queryReads query, ∃ table ∈ schema.tables, table.name = read.1 ∧
+          ∃ permission ∈ schema.permissions, permission.role = session.role ∧ permission.target = read.1 ∧
+            ∃ field ∈ table.columns, field.field ∈ permission.columns ∧ field.column = read.2 := by
+      intro read member
+      exact columnPermitted_origin schema session read.1 read.2
+        (resolve_columns_checked schema session root query h role read member) role
+
+    theorem resolve_tables (schema : Schema) (session : Session) (root : Selection)
+        (query : Query) (h : resolve schema session root = .ok query) (role : session.role ≠ "admin") :
+        ∀ scan ∈ allScans query, ∃ permission ∈ schema.permissions,
+          permission.role = session.role ∧ permission.target = scan.name := by
+      intro scan member
+      have granted := resolve_tables_checked schema session root query h role scan member
+      cases found : findPermission schema session.role scan.name with
+      | none => simp [found] at granted
+      | some permission =>
+        have names := List.find?_some found
+        exact ⟨permission, List.mem_of_find?_eq_some found, by simpa [Bool.and_eq_true] using names⟩
     "#
 }

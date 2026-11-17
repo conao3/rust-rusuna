@@ -1,0 +1,202 @@
+{
+  "version": 3,
+  "sources": [
+    {
+      "name": "default",
+      "kind": "postgres",
+      "tables": [
+        {
+          "table": {
+            "name": "article",
+            "schema": "public"
+          },
+          "object_relationships": [
+            {
+              "name": "author",
+              "using": {
+                "foreign_key_constraint_on": "author_id"
+              }
+            }
+          ],
+          "array_relationships": [
+            {
+              "name": "comments",
+              "using": {
+                "foreign_key_constraint_on": {
+                  "column": "article_id",
+                  "table": {
+                    "name": "comment",
+                    "schema": "public"
+                  }
+                }
+              }
+            },
+            {
+              "name": "revisions",
+              "using": {
+                "manual_configuration": {
+                  "column_mapping": {
+                    "author_id": "author_id",
+                    "id": "article_id"
+                  },
+                  "insertion_order": null,
+                  "remote_table": {
+                    "name": "revision",
+                    "schema": "public"
+                  }
+                }
+              }
+            }
+          ],
+          "select_permissions": [
+            {
+              "role": "reviewer",
+              "permission": {
+                "columns": [
+                  "id",
+                  "title"
+                ],
+                "filter": {
+                  "id": {
+                    "_lte": 5
+                  }
+                },
+                "allow_aggregations": true
+              }
+            },
+            {
+              "role": "user",
+              "permission": {
+                "columns": [
+                  "id",
+                  "author_id",
+                  "title",
+                  "published_at"
+                ],
+                "filter": {
+                  "author_id": {
+                    "_eq": "X-Hasura-User-Id"
+                  }
+                },
+                "allow_aggregations": true
+              }
+            }
+          ]
+        },
+        {
+          "table": {
+            "name": "author",
+            "schema": "public"
+          },
+          "array_relationships": [
+            {
+              "name": "articles",
+              "using": {
+                "foreign_key_constraint_on": {
+                  "column": "author_id",
+                  "table": {
+                    "name": "article",
+                    "schema": "public"
+                  }
+                }
+              }
+            }
+          ],
+          "select_permissions": [
+            {
+              "role": "reviewer",
+              "permission": {
+                "columns": [
+                  "id"
+                ],
+                "filter": {
+                  "id": {
+                    "_gte": 3
+                  }
+                }
+              }
+            },
+            {
+              "role": "user",
+              "permission": {
+                "columns": [
+                  "id",
+                  "name"
+                ],
+                "filter": {},
+                "allow_aggregations": true
+              }
+            }
+          ]
+        },
+        {
+          "table": {
+            "name": "comment",
+            "schema": "public"
+          },
+          "object_relationships": [
+            {
+              "name": "article",
+              "using": {
+                "foreign_key_constraint_on": "article_id"
+              }
+            }
+          ],
+          "select_permissions": [
+            {
+              "role": "user",
+              "permission": {
+                "columns": [
+                  "id",
+                  "article_id",
+                  "body"
+                ],
+                "filter": {
+                  "article": {
+                    "author_id": {
+                      "_eq": "X-Hasura-User-Id"
+                    }
+                  }
+                },
+                "allow_aggregations": true
+              }
+            }
+          ]
+        },
+        {
+          "table": {
+            "name": "revision",
+            "schema": "public"
+          },
+          "object_relationships": [
+            {
+              "name": "article",
+              "using": {
+                "manual_configuration": {
+                  "column_mapping": {
+                    "article_id": "id",
+                    "author_id": "author_id"
+                  },
+                  "insertion_order": null,
+                  "remote_table": {
+                    "name": "article",
+                    "schema": "public"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "configuration": {
+        "connection_info": {
+          "database_url": {
+            "from_env": "PG_DATABASE_URL"
+          },
+          "isolation_level": "read-committed",
+          "use_prepared_statements": false
+        }
+      }
+    }
+  ]
+}

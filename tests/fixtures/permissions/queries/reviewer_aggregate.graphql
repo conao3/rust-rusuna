@@ -1,0 +1,1 @@
+{ article_aggregate { aggregate { count sum { id } } nodes { id title } } }

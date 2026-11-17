@@ -1,0 +1,1 @@
+{ comment(order_by: {id: asc}) { id article { id author { id } } } }
