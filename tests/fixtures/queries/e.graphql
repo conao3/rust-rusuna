@@ -1,0 +1,1 @@
+query E { author(order_by: {id: asc}) { name articles(order_by: {published_at: desc}) { title comments(limit: 1, order_by: {id: desc}) { body } author { name } } } }

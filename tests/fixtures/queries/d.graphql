@@ -1,0 +1,1 @@
+query D { article(where: {author_id: {_eq: 3}}, order_by: {id: desc}) { id title comments(where: {article_id: {_eq: 9}}) { id body } author { id name articles(limit: 2, order_by: {id: asc}) { id } } } }

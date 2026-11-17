@@ -1,0 +1,22 @@
+[workspace]
+members = ["."]
+exclude = ["bench"]
+
+[package]
+name = "rusuna"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "A Hasura-style GraphQL engine as a Rust library: compiles a query to one SQL statement"
+repository = "https://github.com/conao3/rust-rusuna"
+include = ["/src", "/build.rs", "/.leanfran/cache", "/LICENSE", "/README.md"]
+
+[dependencies]
+leanfran = { version = "=0.6.0", default-features = false }
+
+[build-dependencies]
+leanfran-build = "=0.6.0"
+
+[dev-dependencies]
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+serde_json = "1"

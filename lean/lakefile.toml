@@ -1,0 +1,6 @@
+name = "rusuna"
+defaultTargets = ["LeanRustGen"]
+
+[[lean_lib]]
+name = "LeanRustGen"
+globs = ["LeanRustGen.+"]

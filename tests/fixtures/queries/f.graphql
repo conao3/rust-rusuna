@@ -1,0 +1,1 @@
+query F { comment(where: {body: {_eq: "it's \"quoted\""}}, order_by: {id: asc}, limit: 3) { id text: body article { headline: title author { name } } } }
