@@ -1,28 +1,29 @@
-//! Compiles a GraphQL selection over tables and relationships into one PostgreSQL statement
-//! that returns the response as a single JSON value.
+//! Compiles GraphQL documents to one PostgreSQL statement per root field.
 //!
 //! ```
-//! use rusuna::{RootField, RootKind, Column, Direction, Kind, Relation, Schema, Selection, Table};
+//! use rusuna::Schema;
 //!
-//! let schema = Schema::new(vec![
-//!     Table::new("author", "public", "author").column("id", "id").column("name", "name"),
-//!     Table::new("article", "public", "article")
-//!         .column("id", "id")
-//!         .column("title", "title")
-//!         .relation(Relation::new("author", Kind::Object, "author", ["author_id"], ["id"])),
-//! ], vec![RootField::new("article", "article", RootKind::List)]);
-//! let query = Selection::new("article")
-//!     .order_by("id", Direction::Asc)
-//!     .limit(10)
-//!     .field(Selection::new("title"))
-//!     .field(Selection::new("author").field(Selection::new("name")));
-//! let compiled = schema.compile(&query).unwrap();
-//! assert!(compiled.sql.starts_with("WITH"));
-//! assert!(compiled.params.is_empty());
-//! # let _ = Column::new("id", "id");
+//! let schema = Schema::from_sdl(r#"
+//!     type Author @table(name: "author") {
+//!         id: Int!
+//!         name: String!
+//!     }
+//!     type Query { authors: [Author!]! @list }
+//! "#).unwrap();
+//! let fields = schema.compile(
+//!     "query Authors($limit: Int = 10) { authors(limit: $limit) { id name } }",
+//!     &serde_json::json!({}),
+//!     Some("Authors"),
+//! ).unwrap();
+//! assert_eq!(fields[0].response_key, "authors");
+//! assert!(fields[0].compiled.sql.starts_with("WITH"));
+//! assert!(fields[0].compiled.params.is_empty());
 //! ```
 
 mod compiler;
+mod graphql;
+
+pub use graphql::{CompiledField, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_DEPTH};
 
 use compiler::model;
 use std::fmt;
@@ -269,6 +270,11 @@ pub struct Compiled {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    Document {
+        message: String,
+        line: usize,
+        column: usize,
+    },
     /// No table has this name.
     UnknownType {
         name: String,
@@ -309,6 +315,11 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Document {
+                message,
+                line,
+                column,
+            } => write!(f, "{line}:{column}: {message}"),
             Self::UnknownRoot { name } => write!(f, "no root field is named `{name}`"),
             Self::UnknownType { name } => write!(f, "no table is named `{name}`"),
             Self::UnknownField { table, field } => write!(f, "`{table}` has no field `{field}`"),
@@ -383,11 +394,13 @@ impl RootField {
 #[derive(Debug, Clone)]
 pub struct Schema {
     model: model::Schema,
+    document: Option<graphql::DocumentSchema>,
 }
 
 impl Schema {
     pub fn new(tables: Vec<Table>, roots: Vec<RootField>) -> Self {
         Self {
+            document: None,
             model: model::Schema {
                 tables: tables.into_iter().map(table_model).collect(),
                 roots: roots
@@ -406,7 +419,7 @@ impl Schema {
     }
 
     /// Compiles the root field `root` into one statement.
-    pub fn compile(&self, root: &Selection) -> Result<Compiled, Error> {
+    pub fn compile_selection(&self, root: &Selection) -> Result<Compiled, Error> {
         let root = selection_model(root, 0)?;
         match model::run(self.model.clone(), root) {
             Ok(compiled) => Ok(Compiled {

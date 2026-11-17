@@ -1,0 +1,49 @@
+scalar DateTime
+
+type author @table(name: "author") {
+  id: Int!
+  name: String!
+  nickname: String
+  rating: Float
+  articles: [article!]! @relation(columns: ["id"], references: ["author_id"])
+  articles_aggregate: article_aggregate! @aggregate(target: "article") @relation(columns: ["id"], references: ["author_id"])
+}
+
+type article @table(name: "article") {
+  id: Int!
+  author_id: Int!
+  title: String!
+  published_at: DateTime!
+  author: author! @relation(columns: ["author_id"], references: ["id"])
+  comments: [comment!]! @relation(columns: ["id"], references: ["article_id"])
+  comments_aggregate: comment_aggregate! @aggregate(target: "comment") @relation(columns: ["id"], references: ["article_id"])
+  revisions: [revision!]! @relation(columns: ["id", "author_id"], references: ["article_id", "author_id"])
+  revisions_aggregate: revision_aggregate! @aggregate(target: "revision") @relation(columns: ["id", "author_id"], references: ["article_id", "author_id"])
+}
+
+type comment @table(name: "comment") {
+  id: Int!
+  article_id: Int!
+  body: String!
+  article: article! @relation(columns: ["article_id"], references: ["id"])
+}
+
+type revision @table(name: "revision") {
+  article_id: Int!
+  author_id: Int!
+  note: String!
+  article: article! @relation(columns: ["article_id", "author_id"], references: ["id", "author_id"])
+}
+
+type Query {
+  author: [author!]! @list
+  author_aggregate: author_aggregate! @aggregate(target: "author")
+  article: [article!]! @list
+  article_aggregate: article_aggregate! @aggregate(target: "article")
+  comment: [comment!]! @list
+  comment_aggregate: comment_aggregate! @aggregate(target: "comment")
+  revision: [revision!]! @list
+  revision_aggregate: revision_aggregate! @aggregate(target: "revision")
+  people: [author!]! @list
+  people_stats: author_aggregate! @aggregate(target: "author")
+}

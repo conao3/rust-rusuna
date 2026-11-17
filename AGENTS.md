@@ -15,6 +15,9 @@ commit the workflow and `actions.lock` together.
 
 - `src/compiler.rs`: the `lean!` block `model`, the whole compiler core.
 - `src/lib.rs`: the public Rust types and their conversion to and from `model`.
+- `src/graphql.rs` and `src/graphql/`: SDL loading, deterministic expansion, typed GraphQL
+  parsing with async-graphql-parser 7 and conversion to `Selection`.
+- `crates/rusuna-cli/`: the clap CLI `rusuna`.
 - `lean/` and `.leanfran/cache/`: the extracted Lean and the generated Rust. A build in
   the dev shell rewrites them when the block changes; commit them with the source.
 - `audit/Audit/`: the leanassay audit `make check` runs. `audit/Survey/`: the tables of
@@ -23,7 +26,8 @@ commit the workflow and `actions.lock` together.
   Hasura v2.51.6 generates for them (`hasura/`, from `POST /v1/graphql/explain`) and the
   statements rusuna generates (`expected/`; rewrite them with
   `RUSUNA_UPDATE_EXPECTED=1`).
-- `tests/common/mod.rs`: the schema and the queries as Rust values, shared with `bench/`.
+- `tests/common/mod.rs`: SDL schema loading and reference selections. Tests compare the
+  parsed fixtures with those values; `bench/` compiles the fixture text.
 - `bench/`: a crate outside the workspace that measures the statements on the full data
   set (`make bench`).
 - `tools/with-postgres.sh`: runs a command with a throwaway PostgreSQL cluster and
@@ -37,8 +41,11 @@ plan, the SQL tokens, quoting identifiers and numbering placeholders. Rust calls
 generated `run` and converts its arguments and result. Do not reimplement these in Rust.
 
 Rust owns the public types, the depth check that bounds the recursion of the conversion,
-and everything with I/O: tests, the database client and the benchmark. Parsing GraphQL
-and SDL, executing statements and the server integrations will be Rust as well.
+and everything with I/O: tests, the database client and the benchmark. Rust also parses SDL and GraphQL, expands fragments and variables, and checks values
+against the generated GraphQL type graph. SQL types and database execution remain caller
+responsibilities. `Schema::from_sdl` builds the schema; `Schema::compile` accepts text,
+JSON variables and an optional operation name. `compile_selection` is the lower-level
+entry to Lean. Keep selection acceptance rules and SQL generation in Lean.
 
 The block has three parts.
 
@@ -146,11 +153,14 @@ again.
 
 ## Tests
 
-- `tests/differential.rs` runs each query of `tests/common/mod.rs` and the statement of
+- `tests/differential.rs` parses all 43 GraphQL fixtures with the SDL schema and runs the statement of
   Hasura for it on the data of `tests/fixtures/seed.sql` and compares the JSON. Lists
   without `order_by` are compared as multisets. The seed has nullable text and floating-point columns, an author without articles,
   articles without comments, and a table with a two-column relationship. A new query gets its GraphQL text, the statement from
-  Hasura's Explain API and an entry in `cases`.
+  Hasura's Explain API and a reference selection in `cases`.
+- `tests/graphql.rs` checks SDL positions, typed inputs, fragment and variable expansion,
+  input bounds and the committed expanded SDL. `crates/rusuna-cli/tests/` checks CLI
+  output, help and exit codes. `make check` and the Nix package test the whole workspace.
 - `tests/compile.rs` holds the expected statements, the parameters and their order, the
   rejected selections, the largest query on a small stack and compiling from several
   threads.

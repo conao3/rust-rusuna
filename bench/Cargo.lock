@@ -1008,8 +1008,11 @@ dependencies = [
 name = "rusuna"
 version = "0.1.0"
 dependencies = [
+ "async-graphql-parser",
+ "async-graphql-value",
  "leanfran",
  "leanfran-build",
+ "serde_json",
 ]
 
 [[package]]

@@ -10,12 +10,12 @@ Rust by [leanfran](https://github.com/conao3/lean-leanfran).
 
 ## Status
 
-rusuna compiles queries today. The schema and the query are passed as Rust values.
+rusuna loads a mapping schema from SDL and compiles GraphQL query documents to SQL.
 
 | Feature | State |
 |---|---|
 | Lists, relationships, recursive filters, pagination, null ordering, aggregates and row `__typename` | available |
-| SDL with directives, GraphQL text parsing and a CLI | planned |
+| SDL with directives, typed GraphQL text parsing, expanded SDL and a CLI | available |
 | Row and column permissions per role, with proofs | planned |
 | Mutations in one transaction | planned |
 | Parts for an `async-graphql` schema and `axum` routes | planned |
@@ -24,46 +24,125 @@ rusuna compiles queries today. The schema and the query are passed as Rust value
 ## Usage
 
 ```rust
-use rusuna::{Direction, Kind, Relation, RootField, RootKind, Schema, Selection, Table};
+use rusuna::Schema;
+use serde_json::json;
 
-let schema = Schema::new(vec![
-    Table::new("author", "public", "author").column("id", "id").column("name", "name"),
-    Table::new("article", "public", "article")
-        .column("id", "id")
-        .column("title", "title")
-        .column("published_at", "published_at")
-        .relation(Relation::new("author", Kind::Object, "author", ["author_id"], ["id"]))
-        .relation(Relation::new("comments", Kind::Array, "comment", ["id"], ["article_id"])),
-    Table::new("comment", "public", "comment").column("id", "id").column("body", "body"),
-], vec![RootField::new("article", "article", RootKind::List)]);
-
-// query { article(limit: 20, order_by: {published_at: desc}) {
-//   id title author { name } comments(limit: 5, order_by: {id: asc}) { body } } }
-let query = Selection::new("article")
-    .limit(20)
-    .order_by("published_at", Direction::Desc)
-    .field(Selection::new("id"))
-    .field(Selection::new("title"))
-    .field(Selection::new("author").field(Selection::new("name")))
-    .field(
-        Selection::new("comments")
-            .limit(5)
-            .order_by("id", Direction::Asc)
-            .field(Selection::new("body")),
-    );
-
-let compiled = schema.compile(&query)?;
-// compiled.sql: one statement returning one `json` value, the list of rows
-// compiled.params: the values of the query, for $1, $2, …
+let schema = Schema::from_sdl(r#"
+    type Author @table(name: "author") {
+        id: Int!
+        name: String!
+    }
+    type Article @table(name: "article") {
+        id: Int!
+        title: String!
+        author: Author! @relation(columns: ["author_id"], references: ["id"])
+    }
+    type Query { articles: [Article!]! @list }
+"#)?;
+let fields = schema.compile(
+    "query Articles($limit: Int = 20) { articles(limit: $limit) { id title author { name } } }",
+    &json!({}),
+    Some("Articles"),
+)?;
+for field in fields {
+    println!("{}: {} {:?}", field.response_key, field.compiled.sql, field.compiled.params);
+}
 ```
 
-Run `compiled.sql` with any PostgreSQL client and put the returned JSON under the name of
-the root field in the `data` of the response. `tests/differential.rs` does this with the
-`postgres` crate.
+Execute each `CompiledField.compiled` with a PostgreSQL client and put its JSON result
+under `CompiledField.response_key` in the response's `data` object. Compilation performs
+no I/O. `Schema::parse_query(query, &variables, operation_name)` returns the expanded
+`Vec<Selection>`; `Schema::compile` additionally calls the Lean compiler for each root.
+`variables` is a JSON object; `operation_name: Option<&str>` is required when a document
+has multiple operations. `Error::Document { message, line, column }` reports syntax and
+type errors with one-based positions. The existing `Error` variants report Lean
+selection errors.
+
+## Mapping SDL
+
+```graphql
+scalar DateTime
+
+type Author @table(name: "author", schema: "public") {
+  id: Int!
+  name: String!
+}
+type Comment @table(name: "comment") {
+  id: Int!
+  body: String!
+}
+type Article @table(name: "article") {
+  id: Int!
+  title: String!
+  publishedAt: DateTime! @column(name: "published_at")
+  author: Author! @relation(columns: ["author_id"], references: ["id"])
+  comments: [Comment!]! @relation(columns: ["id"], references: ["article_id"])
+  commentsAggregate: Comment_aggregate! @aggregate(target: "Comment") @relation(columns: ["id"], references: ["article_id"])
+}
+type Query {
+  articles: [Article!]! @list
+  articleStats: Article_aggregate! @aggregate(target: "Article")
+}
+```
+
+`@table(name: String!, schema: String)` maps a row type to a SQL table; `schema` defaults
+to `public`. Scalar fields use their own names as SQL columns, or
+`@column(name: String!)`. `@relation(columns: [String!]!, references: [String!]!)` uses
+SQL column names, including columns hidden from GraphQL. A list type selects an array
+relationship; a named row type selects an object relationship. Both key lists must be
+nonempty, distinct and equally long.
+
+`@list` declares a list root. `@aggregate(target: String!)` requires the generated
+non-list type `<target>_aggregate` and can be combined with `@relation` on row fields.
+The generated aggregate types are referenced but not declared in the mapping SDL.
+A `schema { query: Root }` definition selects a custom query root type.
+
+`Schema::expanded_sdl()` returns deterministic SDL with `where`, `order_by`, `limit`
+and `offset` arguments on list and aggregate fields. Object relationships have no
+arguments. The output includes `<Type>_bool_exp`, `<Type>_order_by`, scalar comparison
+inputs, `order_by`, and aggregate output types. This same expanded type graph validates
+query values and aggregate operators. `tests/fixtures/schema.graphql` and
+`tests/fixtures/schema.expanded.graphql` are checked for equality by `make check`.
+
+Supported scalars are `Int` (signed 32-bit GraphQL input), `Float`, `String`, `Boolean`,
+`ID` and the declared string-valued `DateTime`. The database is responsible for validating
+DateTime syntax and SQL column compatibility. Table types need at least one scalar
+column. Interfaces, unions, enums, custom input definitions, extensions, custom scalar
+coercion and custom directives are outside this mapping format.
+
+Queries support variables and defaults, aliases, named and inline fragments,
+`@skip` and `@include`, Hasura v2 filters and ordering (single object or list), pagination,
+aggregates and row `__typename`. Repeated compatible fields are merged in first-appearance
+order. Conflicting fields, fragment cycles, mutation, subscription and introspection
+produce errors. `__typename` on the query root and generated aggregate containers is
+unsupported. A row selection emptied by conditional directives is rejected by the Lean
+selection rules; a skipped root emits no statement.
+
+Documents and variables are bounded to 1 MiB, document nesting to 128 levels and fragment
+expansion to 100,000 visited selections, before the core's tighter selection limits.
+The parser is [async-graphql-parser](https://docs.rs/async-graphql-parser/7.2.1/async_graphql_parser/)
+7.2.1 with async-graphql-value 7.2.1. Permissions and database execution belong to later
+integration layers; every declared table and column is currently accessible.
+
+## CLI
+
+```sh
+nix run . -- schema expand-sdl --schema file://tests/fixtures/schema.graphql --output text
+nix run . -- query compile-sql --schema file://tests/fixtures/schema.graphql --query file://tests/fixtures/queries/a.graphql
+```
+
+`rusuna-cli` installs the binary `rusuna`. Values beginning with `file://` are read from
+files, including `file:///dev/stdin`. `query compile-sql` accepts `--operation-name` and
+`--variables` (a JSON object or file). Global options are `--output json|text|table`
+(default `json`), `--debug`, `--no-debug` and `--version`. Each command level has `help`.
+JSON keys are `Sdl`, or `Fields` containing `ResponseKey`, `Sql` and `Params`. Text
+expansion is raw SDL; query text is tab-separated and table output adds column names.
+Exit codes are 0 for success, 252 for command syntax or parameter errors, 254 for SDL or
+query errors, and 255 for other failures. Diagnostics go to stderr.
 
 ## Schema and selection values
 
-`Schema::new(tables: Vec<Table>, roots: Vec<RootField>)` declares root fields explicitly.
+The lower-level `Schema::new(tables: Vec<Table>, roots: Vec<RootField>)` declares root fields explicitly. `Schema::compile_selection(&Selection)` invokes the Lean core directly; typed text compilation requires `Schema::from_sdl`.
 `RootField::new(field, target, RootKind::List | RootKind::Aggregate)` targets a table's
 GraphQL type name. `Table::name` is the row's `__typename`; it is independent of the root
 field and SQL table names. Each `Relation` declares its field, target, column mapping and
@@ -112,9 +191,7 @@ first for descending.
 float bits as `UInt64`, preserving decidable equality and finite values exactly.
 Comparisons reject null, including null membership elements, as in
 [Hasura v2](https://hasura.io/docs/2.0/queries/postgres/filters/index/).
-Nonfinite floats are rejected. Test nullness with `Filter::IsNull`. Column SQL types are
-not part of this schema: the parser or caller must supply values and aggregate operators
-compatible with the database column types.
+Nonfinite floats are rejected. Test nullness with `Filter::IsNull`. The lower-level schema has no column SQL types. SDL compilation checks values and aggregate operators against GraphQL types; callers of `compile_selection` supply compatible values themselves.
 
 Aggregate roots and relationships use ordinary selections for
 `aggregate { count sum { column } avg { column } min { column } max { column } }` and
@@ -218,16 +295,15 @@ for the same query (`tests/fixtures/hasura/`).
 `make bench` loads 10,000 authors, 200,000 articles and 1,000,000 comments and runs, on
 one connection, the statement of rusuna, of [viat-gql](https://crates.io/crates/viat-gql)
 1.0.1, of Hasura v2.51.6 and a hand-written one in turn, 15 times each. Milliseconds on a
-6-core x86-64 Linux machine with PostgreSQL 17.12, median (minimum to maximum),
-with proof checking running concurrently:
+6-core x86-64 Linux machine with PostgreSQL 17.12, median (minimum to maximum):
 
 | Query | rusuna | viat-gql | Hasura | hand-written |
 |---|---|---|---|---|
-| A: 20 articles, their author and 5 comments each | 3.2 (0.6–7.2) | 1.1 (0.6–6.3) | 2.3 (0.6–7.3) | 2.0 (0.6–5.6) |
-| B: 50,000 articles and their author | 279.3 (135.4–474.3) | 362.8 (205.9–693.9) | 258.1 (130.8–450.7) | 240.7 (163.5–559.2) |
-| C: 2,000 authors, all their articles and all their comments | 1715.4 (799.2–2542.1) | 1774.1 (1009.7–3034.6) | 1924.6 (1355.9–3400.4) | 1565.0 (1041.8–3716.8) |
+| A: 20 articles, their author and 5 comments each | 0.6 (0.6–4.7) | 0.6 (0.5–1.4) | 0.6 (0.5–3.4) | 0.6 (0.5–1.6) |
+| B: 50,000 articles and their author | 204.9 (128.7–330.9) | 263.9 (181.0–399.7) | 222.3 (121.8–405.8) | 308.6 (166.0–673.0) |
+| C: 2,000 authors, all their articles and all their comments | 613.5 (488.0–1387.2) | 756.7 (575.5–1151.3) | 671.1 (568.9–916.0) | 675.5 (508.7–1126.5) |
 
-All three speed goals pass in this run. Compiling these queries takes 113 to 255 µs.
+All three speed goals pass in this run. Compiling these GraphQL documents, including parsing and type checking, takes 93 to 376 µs.
 All four implementations return equal results on the benchmark data. The differential
 test covers 43 queries, including empty results, nested aggregates, custom root names,
 nullable columns, composite relationship predicates and every supported comparison.

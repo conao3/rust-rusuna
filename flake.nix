@@ -53,7 +53,8 @@
             cargoLock.lockFile = ./Cargo.lock;
             nativeCheckInputs = [ pkgs.postgresql_17 ];
             LEANFRAN_OFFLINE = "1";
-            checkPhase = "bash tools/with-postgres.sh tests/fixtures/schema.sql tests/fixtures/seed.sql -- cargo test";
+            checkPhase = "bash tools/with-postgres.sh tests/fixtures/schema.sql tests/fixtures/seed.sql -- cargo test --workspace";
+            meta.mainProgram = "rusuna";
             meta.license = pkgs.lib.licenses.asl20;
           };
         };

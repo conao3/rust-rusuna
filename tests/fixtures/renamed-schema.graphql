@@ -1,0 +1,22 @@
+scalar DateTime
+
+type Author @table(name: "author") {
+  name: String!
+}
+
+type Comment @table(name: "comment") {
+  id: Int!
+  body: String!
+}
+
+type Article @table(name: "article") {
+  id: Int!
+  title: String!
+  publishedAt: DateTime! @column(name: "published_at")
+  author: Author! @relation(columns: ["author_id"], references: ["id"])
+  comments: [Comment!]! @relation(columns: ["id"], references: ["article_id"])
+}
+
+type Query {
+  articles: [Article!]! @list
+}

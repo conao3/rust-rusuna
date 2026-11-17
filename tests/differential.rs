@@ -79,7 +79,18 @@ fn results_equal_the_results_of_the_statements_hasura_generates() {
         {
             assert!(!rows.is_empty(), "query {} selects no seed rows", case.name);
         }
-        let compiled = schema.compile(&case.query).unwrap();
+        let query = std::fs::read_to_string(
+            fixtures
+                .parent()
+                .unwrap()
+                .join(format!("queries/{}.graphql", case.name)),
+        )
+        .unwrap();
+        let compiled = schema
+            .compile(&query, &serde_json::json!({}), None)
+            .unwrap()
+            .remove(0)
+            .compiled;
         let params: Vec<Param> = compiled.params.iter().map(Param).collect();
         let params: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as _).collect();
         let actual: Json = client
@@ -93,4 +104,42 @@ fn results_equal_the_results_of_the_statements_hasura_generates() {
             case.name
         );
     }
+}
+
+#[test]
+fn renamed_sdl_and_expanded_queries_match_hasura() {
+    let config = std::env::var("RUSUNA_POSTGRES").expect("run the tests with make check");
+    let mut client = Client::connect(&config, NoTls).unwrap();
+    let schema = rusuna::Schema::from_sdl(include_str!("fixtures/renamed-schema.graphql")).unwrap();
+    let expected: Json = client
+        .query_one(include_str!("fixtures/hasura/a.sql"), &[])
+        .unwrap()
+        .get(0);
+    let literal = "{ articles(limit: 20, order_by: {publishedAt: desc}) { id title author { name } comments(limit: 5, order_by: {id: asc}) { body } } }";
+    let expanded = "query A($limit: Int = 20, $show: Boolean! = true) { articles(limit: $limit, order_by: {publishedAt: desc}) { ...Fields comments(limit: 5, order_by: {id: asc}) @include(if: $show) { ... on Comment { body } } ignored: id @skip(if: true) } } fragment Fields on Article { id title author { name } }";
+    for (query, variables) in [
+        (literal, serde_json::json!({})),
+        (expanded, serde_json::json!({})),
+        (expanded, serde_json::json!({"limit":20,"show":true})),
+    ] {
+        let compiled = schema
+            .compile(query, &variables, None)
+            .unwrap()
+            .remove(0)
+            .compiled;
+        let actual: Json = client.query_one(&compiled.sql, &[]).unwrap().get(0);
+        assert_eq!(actual, expected);
+    }
+    let compiled = schema
+        .compile(
+            "{ articles(limit: 1, order_by: {id: asc}) { __typename publishedAt } }",
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap()
+        .remove(0)
+        .compiled;
+    let actual: Json = client.query_one(&compiled.sql, &[]).unwrap().get(0);
+    let expected: Json = client.query_one("SELECT json_agg(row_to_json(x)) FROM (SELECT 'Article' AS \"__typename\", published_at AS \"publishedAt\" FROM article ORDER BY id LIMIT 1) x", &[]).unwrap().get(0);
+    assert_eq!(actual, expected);
 }

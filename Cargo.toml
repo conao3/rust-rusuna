@@ -1,5 +1,6 @@
 [workspace]
-members = ["."]
+members = [".", "crates/rusuna-cli"]
+default-members = [".", "crates/rusuna-cli"]
 exclude = ["bench"]
 
 [package]
@@ -12,6 +13,9 @@ repository = "https://github.com/conao3/rust-rusuna"
 include = ["/src", "/build.rs", "/.leanfran/cache", "/LICENSE", "/README.md"]
 
 [dependencies]
+async-graphql-parser = "7"
+async-graphql-value = "7"
+serde_json = { version = "1", features = ["preserve_order"] }
 leanfran = { version = "=0.6.0", default-features = false }
 
 [build-dependencies]
@@ -19,4 +23,3 @@ leanfran-build = "=0.6.0"
 
 [dev-dependencies]
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
-serde_json = "1"

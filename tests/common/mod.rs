@@ -1,7 +1,4 @@
-use rusuna::{
-    Comparison, Direction, Filter, Kind, Relation, RootField, RootKind, Schema, Selection, Table,
-    Value,
-};
+use rusuna::{Comparison, Direction, Filter, Schema, Selection, Value};
 
 #[allow(dead_code)]
 pub struct Case {
@@ -12,104 +9,7 @@ pub struct Case {
 }
 
 pub fn schema() -> Schema {
-    Schema::new(
-        vec![
-            Table::new("author", "public", "author")
-                .column("id", "id")
-                .column("name", "name")
-                .column("nickname", "nickname")
-                .column("rating", "rating")
-                .relation(Relation::new(
-                    "articles",
-                    Kind::Array,
-                    "article",
-                    ["id"],
-                    ["author_id"],
-                ))
-                .relation(Relation::new(
-                    "articles_aggregate",
-                    Kind::Aggregate,
-                    "article",
-                    ["id"],
-                    ["author_id"],
-                )),
-            Table::new("article", "public", "article")
-                .column("id", "id")
-                .column("author_id", "author_id")
-                .column("title", "title")
-                .column("published_at", "published_at")
-                .relation(Relation::new(
-                    "author",
-                    Kind::Object,
-                    "author",
-                    ["author_id"],
-                    ["id"],
-                ))
-                .relation(Relation::new(
-                    "comments",
-                    Kind::Array,
-                    "comment",
-                    ["id"],
-                    ["article_id"],
-                ))
-                .relation(Relation::new(
-                    "comments_aggregate",
-                    Kind::Aggregate,
-                    "comment",
-                    ["id"],
-                    ["article_id"],
-                ))
-                .relation(Relation::new(
-                    "revisions",
-                    Kind::Array,
-                    "revision",
-                    ["id", "author_id"],
-                    ["article_id", "author_id"],
-                ))
-                .relation(Relation::new(
-                    "revisions_aggregate",
-                    Kind::Aggregate,
-                    "revision",
-                    ["id", "author_id"],
-                    ["article_id", "author_id"],
-                )),
-            Table::new("comment", "public", "comment")
-                .column("id", "id")
-                .column("article_id", "article_id")
-                .column("body", "body")
-                .relation(Relation::new(
-                    "article",
-                    Kind::Object,
-                    "article",
-                    ["article_id"],
-                    ["id"],
-                )),
-            Table::new("revision", "public", "revision")
-                .column("article_id", "article_id")
-                .column("author_id", "author_id")
-                .column("note", "note")
-                .relation(Relation::new(
-                    "article",
-                    Kind::Object,
-                    "article",
-                    ["article_id", "author_id"],
-                    ["id", "author_id"],
-                )),
-        ],
-        ["author", "article", "comment", "revision"]
-            .into_iter()
-            .flat_map(|name| {
-                [
-                    RootField::new(name, name, RootKind::List),
-                    RootField::new(format!("{name}_aggregate"), name, RootKind::Aggregate),
-                ]
-            })
-            .chain([
-                RootField::new("people", "author", RootKind::List),
-                RootField::new("people_stats", "author", RootKind::Aggregate),
-            ])
-            .collect(),
-    )
+    Schema::from_sdl(include_str!("../fixtures/schema.graphql")).unwrap()
 }
 
 fn f(name: &str) -> Selection {

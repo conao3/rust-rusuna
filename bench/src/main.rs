@@ -84,12 +84,18 @@ async fn main() -> anyhow::Result<()> {
     let mut verdicts = Vec::new();
     for case in common::cases().into_iter().take(3) {
         let name = case.name;
+        let query = std::fs::read_to_string(
+            root.join(format!("../tests/fixtures/queries/{name}.graphql")),
+        )?;
         let start = Instant::now();
         for _ in 0..1000 {
-            std::hint::black_box(schema.compile(&case.query)?);
+            std::hint::black_box(schema.compile(&query, &serde_json::json!({}), None)?);
         }
         let compile_us = start.elapsed().as_secs_f64() * 1000.0;
-        let compiled = schema.compile(&case.query)?;
+        let compiled = schema
+            .compile(&query, &serde_json::json!({}), None)?
+            .remove(0)
+            .compiled;
         anyhow::ensure!(compiled.params.is_empty(), "query {name} has parameters");
         let hasura =
             std::fs::read_to_string(root.join(format!("../tests/fixtures/hasura/{name}.sql")))?;

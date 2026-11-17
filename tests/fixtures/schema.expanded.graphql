@@ -1,0 +1,343 @@
+schema { query: Query }
+
+input Boolean_comparison_exp {
+  _eq: Boolean
+  _neq: Boolean
+  _gt: Boolean
+  _gte: Boolean
+  _lt: Boolean
+  _lte: Boolean
+  _in: [Boolean!]
+  _nin: [Boolean!]
+  _is_null: Boolean
+}
+
+scalar DateTime
+
+input DateTime_comparison_exp {
+  _eq: DateTime
+  _neq: DateTime
+  _gt: DateTime
+  _gte: DateTime
+  _lt: DateTime
+  _lte: DateTime
+  _in: [DateTime!]
+  _nin: [DateTime!]
+  _is_null: Boolean
+}
+
+input Float_comparison_exp {
+  _eq: Float
+  _neq: Float
+  _gt: Float
+  _gte: Float
+  _lt: Float
+  _lte: Float
+  _in: [Float!]
+  _nin: [Float!]
+  _is_null: Boolean
+}
+
+input ID_comparison_exp {
+  _eq: ID
+  _neq: ID
+  _gt: ID
+  _gte: ID
+  _lt: ID
+  _lte: ID
+  _in: [ID!]
+  _nin: [ID!]
+  _is_null: Boolean
+}
+
+input Int_comparison_exp {
+  _eq: Int
+  _neq: Int
+  _gt: Int
+  _gte: Int
+  _lt: Int
+  _lte: Int
+  _in: [Int!]
+  _nin: [Int!]
+  _is_null: Boolean
+}
+
+type Query {
+  author(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): [author!]!
+  author_aggregate(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): author_aggregate!
+  article(where: article_bool_exp, order_by: [article_order_by!], limit: Int, offset: Int): [article!]!
+  article_aggregate(where: article_bool_exp, order_by: [article_order_by!], limit: Int, offset: Int): article_aggregate!
+  comment(where: comment_bool_exp, order_by: [comment_order_by!], limit: Int, offset: Int): [comment!]!
+  comment_aggregate(where: comment_bool_exp, order_by: [comment_order_by!], limit: Int, offset: Int): comment_aggregate!
+  revision(where: revision_bool_exp, order_by: [revision_order_by!], limit: Int, offset: Int): [revision!]!
+  revision_aggregate(where: revision_bool_exp, order_by: [revision_order_by!], limit: Int, offset: Int): revision_aggregate!
+  people(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): [author!]!
+  people_stats(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): author_aggregate!
+}
+
+input String_comparison_exp {
+  _eq: String
+  _neq: String
+  _gt: String
+  _gte: String
+  _lt: String
+  _lte: String
+  _in: [String!]
+  _nin: [String!]
+  _is_null: Boolean
+  _like: String
+  _nlike: String
+  _ilike: String
+  _nilike: String
+}
+
+type article {
+  id: Int!
+  author_id: Int!
+  title: String!
+  published_at: DateTime!
+  author: author!
+  comments(where: comment_bool_exp, order_by: [comment_order_by!], limit: Int, offset: Int): [comment!]!
+  comments_aggregate(where: comment_bool_exp, order_by: [comment_order_by!], limit: Int, offset: Int): comment_aggregate!
+  revisions(where: revision_bool_exp, order_by: [revision_order_by!], limit: Int, offset: Int): [revision!]!
+  revisions_aggregate(where: revision_bool_exp, order_by: [revision_order_by!], limit: Int, offset: Int): revision_aggregate!
+}
+
+type article_aggregate {
+  aggregate: article_aggregate_fields
+  nodes: [article!]!
+}
+
+type article_aggregate_fields {
+  count: Int!
+  sum: article_sum_fields
+  avg: article_avg_fields
+  min: article_min_fields
+  max: article_max_fields
+}
+
+type article_avg_fields {
+  id: Float
+  author_id: Float
+}
+
+input article_bool_exp {
+  _and: [article_bool_exp!]
+  _or: [article_bool_exp!]
+  _not: article_bool_exp
+  id: Int_comparison_exp
+  author_id: Int_comparison_exp
+  title: String_comparison_exp
+  published_at: DateTime_comparison_exp
+  author: author_bool_exp
+  comments: comment_bool_exp
+  revisions: revision_bool_exp
+}
+
+type article_max_fields {
+  id: Int
+  author_id: Int
+  title: String
+  published_at: DateTime
+}
+
+type article_min_fields {
+  id: Int
+  author_id: Int
+  title: String
+  published_at: DateTime
+}
+
+input article_order_by {
+  id: order_by
+  author_id: order_by
+  title: order_by
+  published_at: order_by
+}
+
+type article_sum_fields {
+  id: Int
+  author_id: Int
+}
+
+type author {
+  id: Int!
+  name: String!
+  nickname: String
+  rating: Float
+  articles(where: article_bool_exp, order_by: [article_order_by!], limit: Int, offset: Int): [article!]!
+  articles_aggregate(where: article_bool_exp, order_by: [article_order_by!], limit: Int, offset: Int): article_aggregate!
+}
+
+type author_aggregate {
+  aggregate: author_aggregate_fields
+  nodes: [author!]!
+}
+
+type author_aggregate_fields {
+  count: Int!
+  sum: author_sum_fields
+  avg: author_avg_fields
+  min: author_min_fields
+  max: author_max_fields
+}
+
+type author_avg_fields {
+  id: Float
+  rating: Float
+}
+
+input author_bool_exp {
+  _and: [author_bool_exp!]
+  _or: [author_bool_exp!]
+  _not: author_bool_exp
+  id: Int_comparison_exp
+  name: String_comparison_exp
+  nickname: String_comparison_exp
+  rating: Float_comparison_exp
+  articles: article_bool_exp
+}
+
+type author_max_fields {
+  id: Int
+  name: String
+  nickname: String
+  rating: Float
+}
+
+type author_min_fields {
+  id: Int
+  name: String
+  nickname: String
+  rating: Float
+}
+
+input author_order_by {
+  id: order_by
+  name: order_by
+  nickname: order_by
+  rating: order_by
+}
+
+type author_sum_fields {
+  id: Int
+  rating: Float
+}
+
+type comment {
+  id: Int!
+  article_id: Int!
+  body: String!
+  article: article!
+}
+
+type comment_aggregate {
+  aggregate: comment_aggregate_fields
+  nodes: [comment!]!
+}
+
+type comment_aggregate_fields {
+  count: Int!
+  sum: comment_sum_fields
+  avg: comment_avg_fields
+  min: comment_min_fields
+  max: comment_max_fields
+}
+
+type comment_avg_fields {
+  id: Float
+  article_id: Float
+}
+
+input comment_bool_exp {
+  _and: [comment_bool_exp!]
+  _or: [comment_bool_exp!]
+  _not: comment_bool_exp
+  id: Int_comparison_exp
+  article_id: Int_comparison_exp
+  body: String_comparison_exp
+  article: article_bool_exp
+}
+
+type comment_max_fields {
+  id: Int
+  article_id: Int
+  body: String
+}
+
+type comment_min_fields {
+  id: Int
+  article_id: Int
+  body: String
+}
+
+input comment_order_by {
+  id: order_by
+  article_id: order_by
+  body: order_by
+}
+
+type comment_sum_fields {
+  id: Int
+  article_id: Int
+}
+
+enum order_by { asc asc_nulls_first asc_nulls_last desc desc_nulls_first desc_nulls_last }
+
+type revision {
+  article_id: Int!
+  author_id: Int!
+  note: String!
+  article: article!
+}
+
+type revision_aggregate {
+  aggregate: revision_aggregate_fields
+  nodes: [revision!]!
+}
+
+type revision_aggregate_fields {
+  count: Int!
+  sum: revision_sum_fields
+  avg: revision_avg_fields
+  min: revision_min_fields
+  max: revision_max_fields
+}
+
+type revision_avg_fields {
+  article_id: Float
+  author_id: Float
+}
+
+input revision_bool_exp {
+  _and: [revision_bool_exp!]
+  _or: [revision_bool_exp!]
+  _not: revision_bool_exp
+  article_id: Int_comparison_exp
+  author_id: Int_comparison_exp
+  note: String_comparison_exp
+  article: article_bool_exp
+}
+
+type revision_max_fields {
+  article_id: Int
+  author_id: Int
+  note: String
+}
+
+type revision_min_fields {
+  article_id: Int
+  author_id: Int
+  note: String
+}
+
+input revision_order_by {
+  article_id: order_by
+  author_id: order_by
+  note: order_by
+}
+
+type revision_sum_fields {
+  article_id: Int
+  author_id: Int
+}
