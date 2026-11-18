@@ -47,6 +47,7 @@ pub struct Events {
 }
 
 impl Events {
+    /// No triggers and no deliveries.
     pub fn new() -> Self {
         Self::default()
     }
@@ -224,6 +225,7 @@ struct Shared {
 pub struct WorkerMonitor(Arc<Counters>);
 
 impl WorkerMonitor {
+    /// The counters at this moment.
     pub fn stats(&self) -> WorkerStats {
         let s = &self.0;
         WorkerStats {
@@ -455,24 +457,36 @@ impl Worker {
             .collect()
     }
 
-    fn event(claimed: Claimed, retry: &Retry) -> Event {
-        let scheduled_at = claimed.scheduled_at.unwrap_or(claimed.created_at);
+    fn event(claimed: Claimed, retry: &Retry) -> Result<Event, String> {
+        let invalid = |what: &str| format!("the event row has {what}");
+        let scheduled_at = || {
+            claimed
+                .scheduled_at
+                .ok_or_else(|| invalid("no scheduled_at"))
+        };
         let cause = match claimed.kind.as_str() {
-            "cron" => Cause::Cron { scheduled_at },
-            "scheduled" => Cause::Scheduled { scheduled_at },
-            _ => Cause::Row {
-                schema: claimed.schema_name.unwrap_or_default(),
-                table: claimed.table_name.unwrap_or_default(),
+            "cron" => Cause::Cron {
+                scheduled_at: scheduled_at()?,
+            },
+            "scheduled" => Cause::Scheduled {
+                scheduled_at: scheduled_at()?,
+            },
+            "row" => Cause::Row {
+                schema: claimed
+                    .schema_name
+                    .ok_or_else(|| invalid("no schema_name"))?,
+                table: claimed.table_name.ok_or_else(|| invalid("no table_name"))?,
                 op: claimed
                     .operation
                     .as_deref()
                     .and_then(Operation::parse)
-                    .unwrap_or(Operation::Insert),
+                    .ok_or_else(|| invalid("no operation"))?,
                 old: claimed.old,
                 new: claimed.new,
             },
+            kind => return Err(invalid(&format!("the unknown kind {kind:?}"))),
         };
-        Event {
+        Ok(Event {
             id: claimed.id,
             trigger: claimed.trigger_name,
             cause,
@@ -480,19 +494,12 @@ impl Worker {
             created_at: claimed.created_at,
             attempt: claimed.tries.max(1) as u32,
             max_retries: retry.max_retries,
-        }
+        })
     }
 
-    async fn deliver(shared: Arc<Shared>, claimed: Claimed) {
-        let Some(delivery) = shared.deliveries.get(&claimed.trigger_name) else {
-            return;
-        };
-        let tries = claimed.tries;
-        let event = Self::event(claimed, &delivery.retry);
-        let id = event.id.clone();
-        let started = shared.clock.now();
+    async fn attempt(shared: &Shared, delivery: &Delivery, event: Event) -> Response {
         let timeout = delivery.retry.timeout;
-        let response = match &delivery.target {
+        match &delivery.target {
             Target::Handler(handler) => {
                 let mut task = JoinSet::new();
                 let handler = handler.clone();
@@ -527,6 +534,22 @@ impl Worker {
                     },
                 }
             }
+        }
+    }
+
+    async fn deliver(shared: Arc<Shared>, claimed: Claimed) {
+        let Some(delivery) = shared.deliveries.get(&claimed.trigger_name) else {
+            return;
+        };
+        let tries = claimed.tries;
+        let id = claimed.id.clone();
+        let started = shared.clock.now();
+        let response = match Self::event(claimed, &delivery.retry) {
+            Ok(event) => Self::attempt(&shared, delivery, event).await,
+            Err(error) => Response {
+                status: None,
+                error: Some(error),
+            },
         };
         let finished = shared.clock.now();
         let succeeded = response.error.is_none();

@@ -166,7 +166,9 @@ async fn receive(receiver: &mut mpsc::UnboundedReceiver<Event>) -> Event {
         .unwrap()
 }
 
-fn row(event: &Event) -> (Operation, Option<Json>, Option<Json>) {
+type Change = (Operation, Option<Json>, Option<Json>);
+
+fn row(event: &Event) -> Change {
     match &event.cause {
         Cause::Row {
             schema,
@@ -194,6 +196,21 @@ type ev_article @table(name: "ev_article") @primary_key(columns: ["id"]) {
 type Query { ev_article: [ev_article!]! @list }
 "#;
 
+async fn mutate(pool: &PgPool, mutation: &str) {
+    let schema = rusuna::Schema::from_sdl(ARTICLE_SDL).unwrap();
+    let fields = schema
+        .compile(mutation, &json!({}), None, &rusuna::Session::new("admin"))
+        .unwrap();
+    rusuna_sqlx::execute(pool, &fields).await.unwrap();
+}
+
+async fn plain(pool: &PgPool, statement: &str) {
+    sqlx::raw_sql(sqlx::AssertSqlSafe(statement.to_string()))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn row_changes_through_rusuna_and_plain_sql_reach_the_handler() {
     let (events, mut received) = channel_handler(
@@ -203,69 +220,64 @@ async fn row_changes_through_rusuna_and_plain_sql_reach_the_handler() {
     );
     let pool = database("rusuna_events_rows", &events, ARTICLE).await;
     let worker = start(&events, &pool, fast(), None);
-
-    let schema = rusuna::Schema::from_sdl(ARTICLE_SDL).unwrap();
-    let fields = schema
-        .compile(
-            r#"mutation { insert_ev_article_one(object: {id: 1, title: "first", body: "x"}) { id } }"#,
-            &json!({}),
-            None,
-            &rusuna::Session::new("admin"),
-        )
-        .unwrap();
-    rusuna_sqlx::execute(&pool, &fields).await.unwrap();
-    let event = receive(&mut received).await;
-    assert_eq!(
-        row(&event),
+    let a = |title: &str| json!({"id": 1, "title": title, "body": "x"});
+    let b = |title: &str| json!({"id": 2, "title": title, "body": "y"});
+    let steps: Vec<(bool, &str, Change)> = vec![
         (
-            Operation::Insert,
-            None,
-            Some(json!({"id": 1, "title": "first", "body": "x"}))
-        )
-    );
-    assert_eq!(event.attempt, 1);
-    assert_eq!(event.body()["event"]["op"], "INSERT");
-    assert_eq!(event.body()["trigger"]["name"], "ev_article_changed");
+            true,
+            r#"mutation { insert_ev_article_one(object: {id: 1, title: "first", body: "x"}) { id } }"#,
+            (Operation::Insert, None, Some(a("first"))),
+        ),
+        (
+            false,
+            "INSERT INTO ev_article VALUES (2, 'second', 'y')",
+            (Operation::Insert, None, Some(b("second"))),
+        ),
+        (
+            true,
+            r#"mutation { update_ev_article_by_pk(pk_columns: {id: 1}, _set: {title: "renamed"}) { id } }"#,
+            (Operation::Update, Some(a("first")), Some(a("renamed"))),
+        ),
+        (
+            false,
+            "UPDATE ev_article SET title = 'edited' WHERE id = 2",
+            (Operation::Update, Some(b("second")), Some(b("edited"))),
+        ),
+        (
+            true,
+            "mutation { delete_ev_article_by_pk(id: 1) { id } }",
+            (Operation::Delete, Some(a("renamed")), None),
+        ),
+        (
+            false,
+            "DELETE FROM ev_article WHERE id = 2",
+            (Operation::Delete, Some(b("edited")), None),
+        ),
+    ];
+    for (through_rusuna, statement, expected) in steps {
+        if through_rusuna {
+            mutate(&pool, statement).await;
+        } else {
+            plain(&pool, statement).await;
+        }
+        let event = receive(&mut received).await;
+        assert_eq!(row(&event), expected, "{statement}");
+        assert_eq!(event.attempt, 1);
+        assert_eq!(event.body()["event"]["op"], expected.0.as_str());
+        assert_eq!(event.body()["trigger"]["name"], "ev_article_changed");
+    }
 
     let mut transaction = pool.begin().await.unwrap();
-    sqlx::query("INSERT INTO ev_article VALUES (2, 'rolled back', 'y')")
+    sqlx::query("INSERT INTO ev_article VALUES (3, 'rolled back', 'z')")
         .execute(&mut *transaction)
         .await
         .unwrap();
     transaction.rollback().await.unwrap();
 
-    sqlx::query("UPDATE ev_article SET title = 'second' WHERE id = 1")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let event = receive(&mut received).await;
-    assert_eq!(
-        row(&event),
-        (
-            Operation::Update,
-            Some(json!({"id": 1, "title": "first", "body": "x"})),
-            Some(json!({"id": 1, "title": "second", "body": "x"}))
-        )
-    );
-
-    sqlx::query("DELETE FROM ev_article WHERE id = 1")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let event = receive(&mut received).await;
-    assert_eq!(
-        row(&event),
-        (
-            Operation::Delete,
-            Some(json!({"id": 1, "title": "second", "body": "x"})),
-            None
-        )
-    );
-
     worker.stop().await;
     assert_eq!(
         scalar(&pool, "SELECT count(*) FROM rusuna.event_log").await,
-        3
+        6
     );
     assert_eq!(
         scalar(
@@ -273,9 +285,83 @@ async fn row_changes_through_rusuna_and_plain_sql_reach_the_handler() {
             "SELECT count(*) FROM rusuna.event_log WHERE status = 'delivered' AND tries = 1"
         )
         .await,
-        3
+        6
     );
     assert!(received.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn writers_need_only_table_privileges_and_the_worker_needs_the_rusuna_tables() {
+    let events = Events::new()
+        .trigger(EventTrigger::new("ev_roles", "ev_article").operations([Operation::Insert]));
+    let pool = database("rusuna_events_roles", &Events::new(), "").await;
+    sqlx::raw_sql(
+        "DO $$ BEGIN
+           CREATE ROLE rusuna_events_owner LOGIN;
+           CREATE ROLE rusuna_events_writer LOGIN;
+           CREATE ROLE rusuna_events_worker LOGIN;
+         EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+         DROP SCHEMA rusuna CASCADE;
+         GRANT CREATE ON DATABASE rusuna_events_roles TO rusuna_events_owner;
+         GRANT CREATE ON SCHEMA public TO rusuna_events_owner;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let connect = |role: &str| {
+        PgPoolOptions::new()
+            .max_connections(5)
+            .connect_with(options("rusuna_events_roles").username(role))
+    };
+    let owner = connect("rusuna_events_owner").await.unwrap();
+    plain(&owner, ARTICLE).await;
+    events.migrate(&owner).await.unwrap();
+    plain(
+        &owner,
+        "GRANT INSERT ON ev_article TO rusuna_events_writer;
+         GRANT USAGE ON SCHEMA rusuna TO rusuna_events_worker;
+         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA rusuna TO rusuna_events_worker;",
+    )
+    .await;
+    assert!(
+        scalar(
+            &owner,
+            "SELECT count(*) FROM pg_roles WHERE rolname = current_user AND NOT rolsuper"
+        )
+        .await
+            == 1
+    );
+    let writer = connect("rusuna_events_writer").await.unwrap();
+    plain(&writer, "INSERT INTO ev_article VALUES (1, 'a', 'x')").await;
+    assert!(
+        sqlx::raw_sql("SELECT * FROM rusuna.event_log")
+            .execute(&writer)
+            .await
+            .is_err()
+    );
+    let worker_pool = connect("rusuna_events_worker").await.unwrap();
+    let (events, mut received) = channel_handler(events, "ev_roles", Retry::default());
+    let worker = start(&events, &worker_pool, fast(), None);
+    let event = receive(&mut received).await;
+    assert_eq!(row(&event).0, Operation::Insert);
+    until("the recorded delivery", || async {
+        scalar(
+            &owner,
+            "SELECT count(*) FROM rusuna.event_invocation WHERE succeeded",
+        )
+        .await
+            == 1
+    })
+    .await;
+    let monitor = worker.monitor.clone();
+    worker.stop().await;
+    assert_eq!(monitor.stats().errors, 0);
+    rusuna_events::schedule(&worker_pool, "ev_roles", Utc::now(), Json::Null)
+        .await
+        .unwrap();
+    rusuna_events::cleanup(&worker_pool, Utc::now())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

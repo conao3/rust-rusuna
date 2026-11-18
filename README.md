@@ -624,8 +624,8 @@ The script creates:
 - the schema `rusuna` and the tables `rusuna.event_log` and `rusuna.event_invocation`
   (below), with `CREATE … IF NOT EXISTS`;
 - the trigger function `rusuna.capture_event()` (`CREATE OR REPLACE FUNCTION`, PL/pgSQL,
-  `SECURITY DEFINER` with a fixed `search_path`, so the roles that write your tables need
-  no privilege on `rusuna`);
+  `SECURITY DEFINER` with a fixed `search_path`, owned by the role that applies the
+  migration);
 - one `AFTER … FOR EACH ROW` trigger `rusuna_event_<name>` per declaration
   (`CREATE OR REPLACE TRIGGER`), for example
 
@@ -638,6 +638,18 @@ and Aurora. It requires PostgreSQL 14 or later (`CREATE OR REPLACE TRIGGER`;
 `gen_random_uuid()` is built in from 13). The script has no transaction statements, so a
 migration tool can wrap it in its own.
 
+Privileges: the role that applies the migration needs `CREATE` on the database (for the
+schema `rusuna`) and must own the tables that get triggers. The roles that write your
+tables need no privilege on `rusuna`, since the function runs as its owner. The worker's
+role needs
+
+```sql
+GRANT USAGE ON SCHEMA rusuna TO worker_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA rusuna TO worker_role;
+```
+
+(`INSERT` and `DELETE` for cron occurrences, `schedule` and `cleanup`).
+
 The script is idempotent: applying it again changes nothing, and applying it with changed
 declarations replaces the trigger of each declared name on its table. It does not drop
 anything. When you remove a declaration or move it to another table, drop the old trigger
@@ -645,9 +657,12 @@ in your migration: `DROP TRIGGER IF EXISTS "rusuna_event_<name>" ON <table>;`. T
 layout belongs to this version of the crate.
 
 The function writes `to_jsonb(OLD)` and `to_jsonb(NEW)`, keyed by SQL column names, and
-sends `NOTIFY rusuna_events`. It runs in the transaction of the change, so every write
-records its event, whether it came through rusuna, another client or `psql`, and a
-rolled-back change records nothing. An update trigger with columns fires when the update
+sends `NOTIFY rusuna_events`. It runs in the transaction of the change, so every
+`INSERT`, `UPDATE`, `DELETE` and `COPY` records its event, whether it came through rusuna,
+another client or `psql`, and a rolled-back change records nothing. As with every
+ordinary row trigger, `TRUNCATE` records nothing, and a session with
+`session_replication_role = replica` (logical replication apply, some bulk loads)
+records nothing. An update trigger with columns fires when the update
 lists one of the columns (`UPDATE OF`) and one of their values changes (`IS DISTINCT FROM`
 on the JSON values); a column changed only by another `BEFORE` trigger does not count.
 
@@ -743,16 +758,19 @@ claim that another worker has since taken over cannot overwrite the newer result
   as an attempt; the event is claimed again even past `max_retries`, since no result was
   recorded.
 - **Waiting.** A worker polls every `poll_interval` (default one second). With `listen`
-  (default true) it also `LISTEN`s on `rusuna_events` on a connection of its own and
-  polls at once when the trigger function notifies; polling alone is enough for
-  correctness, including behind poolers that do not support `LISTEN`. When a poll fills
+  (default true) it also `LISTEN`s on `rusuna_events` and polls at once when the trigger
+  function notifies. The listener (sqlx `PgListener`) keeps one connection of the pool for
+  the worker's lifetime; size the pool for it. Polling alone is enough for correctness,
+  including behind poolers that do not support `LISTEN`. When a poll fills
   every free slot, the worker polls again as soon as a delivery finishes.
 - **Shutdown.** When the `shutdown` future completes, the worker stops claiming and
   waits for its deliveries in progress, at most their timeouts, to record their results.
 - **Clock.** `Worker::clock(Arc<dyn Clock>)` replaces the system clock. The clock decides
   which events are due, the leases, the retry times and the cron occurrences, so tests
   move time without waiting. Events recorded by triggers have a null `next_attempt_at`,
-  so they are due under any clock.
+  so they are due under any clock. A lease set by one worker is compared with the clock of
+  the worker that claims next, so the clocks of hosts that share a database must agree
+  within `lease_margin`.
 - **Counters.** `Worker::monitor()` returns a handle whose `stats()` reports polls,
   claimed events, delivered and failed attempts, and database errors. A database error
   does not stop the worker; it tries again at the next poll.
@@ -1129,9 +1147,11 @@ keeps its value. A subscription whose statement fails, at subscription or later,
 the error alone while its group keeps sending the other results.
 
 The event tests in `crates/rusuna-events/tests/events.rs` each create their own database.
-An insert through a rusuna mutation, a plain SQL update and a delete reach the handler
-once each with the right `old` and `new`; a rolled-back insert records no event; update
-columns and operations select the changes that record events. A handler that fails twice
+Inserts, updates and deletes, each once through a rusuna mutation and once in plain SQL,
+reach the handler with the right `old` and `new`; a rolled-back insert records no event;
+update columns and operations select the changes that record events. A non-superuser
+applies the migration, a role with only `INSERT` on the table records an event without
+reading `rusuna`, and a worker with the grants above delivers it. A handler that fails twice
 gets its third attempt, each one at least the retry interval after the previous; a webhook
 served by an axum server in the test answers 503 twice and 200 once and receives the
 payload, the header and `delivery_info` each time. An error, a timeout and a panic each

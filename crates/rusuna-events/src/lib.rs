@@ -64,8 +64,11 @@ pub type HandlerError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Operation {
+    /// `INSERT`: the event has `new` only.
     Insert,
+    /// `UPDATE`: the event has `old` and `new`.
     Update,
+    /// `DELETE`: the event has `old` only.
     Delete,
 }
 
@@ -173,16 +176,27 @@ impl Default for Retry {
 pub enum Cause {
     /// A row change recorded by an event trigger.
     Row {
+        /// The SQL schema of the table.
         schema: String,
+        /// The SQL table.
         table: String,
+        /// The operation.
         op: Operation,
+        /// The row before the change, keyed by SQL column names.
         old: Option<Json>,
+        /// The row after the change, keyed by SQL column names.
         new: Option<Json>,
     },
     /// An occurrence of a cron trigger.
-    Cron { scheduled_at: DateTime<Utc> },
+    Cron {
+        /// The occurrence.
+        scheduled_at: DateTime<Utc>,
+    },
     /// A one-off event created by [`schedule`].
-    Scheduled { scheduled_at: DateTime<Utc> },
+    Scheduled {
+        /// The time the event was due.
+        scheduled_at: DateTime<Utc>,
+    },
 }
 
 /// One delivery attempt of an event, as a handler receives it.
@@ -249,6 +263,7 @@ impl Event {
 /// Every comparison with a due time, a retry time or a lease uses this clock, and cron
 /// occurrences are computed from it.
 pub trait Clock: Send + Sync + 'static {
+    /// The current time.
     fn now(&self) -> DateTime<Utc>;
 }
 
