@@ -163,8 +163,10 @@ completed groups can be reused independently.
   role comparison in `resolve` changes acceptance while preserving successful
   outputs' parameters.
 - The write emission group is `writeBodyToks` and `emitWrite` with `emitWrite_slots`,
-  which fixes placeholder numbering only. Its 73 holes change SQL text; the committed
-  SQL fixtures, the Hasura comparison and the concurrent-transaction tests pin it. The
+  which fixes placeholder numbering only. No write statement corresponds to
+  `compile_params`, so its 73 holes change SQL text or drop and reorder parameters; the
+  committed SQL fixtures, the Hasura comparison and the concurrent-transaction tests
+  pin both. The
   `WritePlan` generator mixes primary-key lists with returning relationships that
   read the modified table again.
 - The write resolution group is `resolveWriteRaw`, `resolveWrite` and `runWrite` with

@@ -472,8 +472,9 @@ A manual mutation failed both the insertion and parameter-preservation proofs.
 The survey uses 1000 samples and a 30-second deadline per mutation. Timeouts are
 unresolved and depend on machine load. Equivalent means equal outputs on the sampled
 inputs; untested means an output comparison could not be performed. Stillborn
-mutations do not typecheck. The holes concern SQL text and acceptance rules outside
-the properties proved above; the tests cover these by example.
+mutations do not typecheck. The holes concern SQL text, acceptance rules and the
+parameters of write statements, which are outside the properties proved above; the
+tests cover these by example.
 
 Outside the proofs:
 

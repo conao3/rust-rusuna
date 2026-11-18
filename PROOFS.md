@@ -428,7 +428,8 @@ The strict audit targets twenty-four functions: 154 mutations, 103 killed, zero 
 The survey uses 1000 samples and a 30-second deadline per mutation. Equivalence is sampled output equality, not a proved equivalence.
 
 The write emission group (`writeBodyToks`, `emitWrite`) is checked by `emitWrite_slots`,
-which fixes placeholder numbering only; its 73 holes change SQL text. The write
+which fixes placeholder numbering only. No write statement corresponds to
+`compile_params`, so its 73 holes change SQL text or drop and reorder parameters. The write
 resolution group (`resolveWriteRaw`, `resolveWrite`, `runWrite`) is checked by
 `resolveWrite_secure` and `runWrite_accepts`; its 19 holes change which inputs are
 accepted, because these statements constrain successful plans rather than write
