@@ -1,0 +1,33 @@
+type view_author @table(name: "view_author") @primary_key(columns: ["id"])
+  @permission(role: "user", columns: ["id", "name"], where: {}) {
+  id: Int!
+  name: String!
+  published: [view_published!]! @relation(columns: ["id"], references: ["author_id"])
+  published_aggregate: view_published_aggregate! @aggregate(target: "view_published") @relation(columns: ["id"], references: ["author_id"])
+  stats: view_author_stats @relation(columns: ["id"], references: ["author_id"])
+}
+
+type view_published @table(name: "view_published", read_only: true)
+  @permission(role: "user", columns: ["id", "author_id", "title", "score"], where: {author_id: {_eq: "$user_id"}}, allow_aggregations: true) {
+  id: Int!
+  author_id: Int!
+  title: String!
+  score: Int!
+  author: view_author! @relation(columns: ["author_id"], references: ["id"])
+}
+
+type view_author_stats @table(name: "view_author_stats", read_only: true) @primary_key(columns: ["author_id"])
+  @permission(role: "user", columns: ["author_id", "articles", "total"], where: {total: {_gt: 8}}, allow_aggregations: true) {
+  author_id: Int!
+  articles: Int!
+  total: Int!
+  author: view_author! @relation(columns: ["author_id"], references: ["id"])
+}
+
+type Query {
+  view_author: [view_author!]! @list
+  view_published: [view_published!]! @list
+  view_published_aggregate: view_published_aggregate! @aggregate(target: "view_published")
+  view_author_stats: [view_author_stats!]! @list
+  view_author_stats_aggregate: view_author_stats_aggregate! @aggregate(target: "view_author_stats")
+}

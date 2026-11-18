@@ -18,7 +18,7 @@ pub(super) fn directives<'a>(
             ));
         }
         let args: &[&str] = match name.as_str() {
-            "table" => &["name", "schema"],
+            "table" => &["name", "schema", "read_only"],
             "primary_key" => &["columns", "constraint"],
             "insert_permission" => &["role", "columns", "check", "set"],
             "update_permission" => &["role", "columns", "where", "check", "set"],
@@ -226,6 +226,16 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                 string(mapping, "name")?,
             )
         };
+        if let Some(mapping) = d.get("table") {
+            match mapping.get_argument("read_only") {
+                None => {}
+                Some(Positioned {
+                    node: ConstValue::Boolean(b),
+                    ..
+                }) => table.read_only = *b,
+                Some(value) => return Err(error(value.pos, "read_only must be a boolean")),
+            }
+        }
         if let Some(key) = d.get("primary_key") {
             table.primary_key = Some(crate::PrimaryKey {
                 columns: strings(key, "columns")?,

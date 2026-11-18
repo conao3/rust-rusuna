@@ -19,6 +19,30 @@ pub(super) fn definitions(
     for table in tables {
         let t = &table.name;
         let columns = &fields[t];
+        let entries = table
+            .primary_key
+            .as_ref()
+            .map(|key| key_entries(&key.columns, columns))
+            .transpose()?;
+        if let Some(entries) = &entries {
+            let name = format!("{t}_by_pk");
+            let q = defs.get_mut(query).unwrap();
+            if q.lines().any(|line| {
+                line.trim_start().starts_with(&format!("{name}("))
+                    || line.trim_start().starts_with(&format!("{name}:"))
+            }) {
+                return Err(error(
+                    Pos::default(),
+                    "primary key root collides with a declared field",
+                ));
+            }
+            let end = q.rfind('}').unwrap();
+            q.insert_str(end, &format!("  {name}({}): {t}\n", entries.join(", ")));
+            primary.insert(name, t.clone());
+        }
+        if table.read_only {
+            continue;
+        }
         for suffix in ["insert_input", "set_input", "inc_input"] {
             let entries = columns
                 .iter()
@@ -115,24 +139,7 @@ pub(super) fn definitions(
             false,
             format!("where: {t}_bool_exp!"),
         );
-        if let Some(key) = &table.primary_key {
-            if key.columns.is_empty()
-                || key.columns.iter().collect::<BTreeSet<_>>().len() != key.columns.len()
-                || key
-                    .columns
-                    .iter()
-                    .any(|f| !columns.iter().any(|(c, _)| c == f))
-            {
-                return Err(error(
-                    Pos::default(),
-                    "primary key columns must be distinct scalar fields",
-                ));
-            }
-            let entries = key
-                .columns
-                .iter()
-                .map(|f| format!("{f}: {}!", columns.iter().find(|(c, _)| c == f).unwrap().1))
-                .collect::<Vec<_>>();
+        if let Some(entries) = entries {
             insert(
                 defs,
                 format!("{t}_pk_columns_input"),
@@ -155,25 +162,30 @@ pub(super) fn definitions(
                 true,
                 entries.join(", "),
             );
-            let name = format!("{t}_by_pk");
-            let q = defs.get_mut(query).unwrap();
-            if q.lines().any(|line| {
-                line.trim_start().starts_with(&format!("{name}("))
-                    || line.trim_start().starts_with(&format!("{name}:"))
-            }) {
-                return Err(error(
-                    Pos::default(),
-                    "primary key root collides with a declared field",
-                ));
-            }
-            let end = q.rfind('}').unwrap();
-            q.insert_str(end, &format!("  {name}({}): {t}\n", entries.join(", ")));
-            primary.insert(name, t.clone());
         }
     }
     mutation.push_str("}\n");
+    if roots.is_empty() {
+        mutation = "type Mutation\n".into();
+    }
     insert(defs, "Mutation".into(), mutation, Pos::default())?;
     Ok((roots, primary))
+}
+
+fn key_entries(keys: &[String], columns: &[(String, String)]) -> Result<Vec<String>, Error> {
+    if keys.is_empty()
+        || keys.iter().collect::<BTreeSet<_>>().len() != keys.len()
+        || keys.iter().any(|f| !columns.iter().any(|(c, _)| c == f))
+    {
+        return Err(error(
+            Pos::default(),
+            "primary key columns must be distinct scalar fields",
+        ));
+    }
+    Ok(keys
+        .iter()
+        .map(|f| format!("{f}: {}!", columns.iter().find(|(c, _)| c == f).unwrap().1))
+        .collect())
 }
 
 pub(super) fn permissions(
@@ -190,6 +202,9 @@ pub(super) fn permissions(
                 "delete_permission" => WriteKind::Delete,
                 _ => continue,
             };
+            if table.read_only {
+                return Err(error(d.pos, "a read-only table has no write permissions"));
+            }
             directives(std::slice::from_ref(d), &[d.node.name.node.as_str()])?;
             let role = string(&d.node, "role")?;
             if role == "admin" || !seen.insert((role.clone(), d.node.name.node.to_string())) {

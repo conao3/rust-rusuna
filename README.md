@@ -19,6 +19,7 @@ documents to SQL. `rusuna-events` runs event triggers and cron triggers beside i
 | SDL with directives, typed GraphQL text parsing, expanded SDL and a CLI | available |
 | Row and column read permissions per role, with plan invariants | available |
 | Insert, update, delete, primary-key roots and write permissions | available |
+| Views and materialized views as read-only tables | available |
 | Execution with sqlx, parts for an `async-graphql` schema and `axum` routes | available |
 | Subscriptions over WebSocket, polled with one statement per group of subscriptions | available |
 | Event triggers, cron triggers and scheduled events, delivered to Rust handlers and webhooks | available |
@@ -99,8 +100,10 @@ type Query {
 }
 ```
 
-`@table(name: String!, schema: String)` maps a row type to a SQL table; `schema` defaults
-to `public`. Scalar fields use their own names as SQL columns, or
+`@table(name: String!, schema: String, read_only: Boolean)` maps a row type to a SQL
+table, view or materialized view; `schema` defaults to `public`. `read_only: true` (default
+false) removes the type's mutation roots and their input types for every role, `admin`
+included; a write permission on such a type is an error (next sections). Scalar fields use their own names as SQL columns, or
 `@column(name: String!)`. `@relation(columns: [String!]!, references: [String!]!)` uses
 SQL column names, including columns hidden from GraphQL. A list type selects an array
 relationship; a named row type selects an object relationship. Both key lists must be
@@ -141,6 +144,37 @@ expansion to 100,000 visited selections, before the core's tighter selection lim
 The parser is [async-graphql-parser](https://docs.rs/async-graphql-parser/7.2.1/async_graphql_parser/)
 7.2.1 with async-graphql-value 7.2.1. `Schema::roles()` lists `admin` and every role
 named by a read or write permission.
+
+### Views and materialized views
+
+A view or a materialized view is mapped like a table, and reads it the same way:
+relationships in both directions, filters, ordering, aggregates, read permissions and
+subscriptions. rusuna does not read the database catalog, so it does not know that a
+relation is a view; declare `read_only: true` for one that is not updatable, which every
+materialized view is. A simple view that PostgreSQL can update may stay writable. Hasura
+reads from the catalog whether a view is insertable and updatable; rusuna takes the
+declaration.
+
+```graphql
+type author_stats @table(name: "author_stats", read_only: true) @primary_key(columns: ["author_id"])
+  @permission(role: "user", columns: ["author_id", "articles"], where: {}) {
+  author_id: Int!
+  articles: Int!
+  author: author! @relation(columns: ["author_id"], references: ["id"])
+}
+```
+
+- A view has no primary key in PostgreSQL. Without `@primary_key` it has no `<t>_by_pk`
+  root; with one, it has the `<t>_by_pk` query and subscription root, which reads the row
+  whose declared columns equal the arguments. The declaration is the caller's promise that
+  these columns are unique.
+- A read-only type has no `insert_<t>`, `update_<t>`, `delete_<t>` or `_by_pk` mutation
+  roots and none of their input types (`<t>_insert_input`, `<t>_on_conflict`, …).
+  `Schema::compile_mutation` on it returns `Error::ReadOnly`.
+- A subscription to a materialized view sends a new result after `REFRESH MATERIALIZED
+  VIEW` changes it; changes of its base tables do not reach it before.
+
+The lower-level API sets `Table::read_only` (`Table::new(…).read_only()`).
 
 ## Read permissions
 
@@ -1129,6 +1163,14 @@ that rolls back the first two, variables with defaults, omitted variables, enum 
 `@skip`, hidden types and root fields per role, and introspection against the expanded
 SDL of 12 role and schema pairs. `crates/rusuna-sqlx/tests` binds every supported
 parameter type and checks the mutation transaction without async-graphql.
+
+`crates/rusuna-http-tests/tests/views.rs` maps a view and a materialized view
+(`tests/fixtures/views.sql` and `views.graphql`): relationships from and to them, nested
+and root aggregates and `<t>_by_pk` on the materialized view return the rows of the views;
+a role sees only the rows and columns its permissions grant on them; and introspection, the
+expanded SDL, a mutation request and `compile_mutation` show that read-only types have no
+mutation. A subscription to the view receives the change of a base table, and one to the
+materialized view receives the change after `REFRESH MATERIALIZED VIEW`.
 
 The subscription tests in `crates/rusuna-http-tests/tests/subscriptions.rs` run over
 WebSocket. A subscription receives its first result, then the results changed by a

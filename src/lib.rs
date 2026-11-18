@@ -119,6 +119,9 @@ pub struct Table {
     pub permissions: Vec<Permission>,
     pub write_permissions: Vec<WritePermission>,
     pub primary_key: Option<PrimaryKey>,
+    /// A table that is only read, such as a view or a materialized view: it has no
+    /// mutation roots and no write permissions.
+    pub read_only: bool,
 }
 
 impl Table {
@@ -136,7 +139,14 @@ impl Table {
             permissions: Vec::new(),
             write_permissions: Vec::new(),
             primary_key: None,
+            read_only: false,
         }
+    }
+
+    /// Marks the table as read-only.
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
     }
 
     pub fn column(mut self, field: impl Into<String>, column: impl Into<String>) -> Self {
@@ -404,6 +414,10 @@ pub enum Error {
     InvalidPermission {
         name: String,
     },
+    /// The table is read-only and cannot be the target of a mutation or a write permission.
+    ReadOnly {
+        table: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -418,6 +432,7 @@ impl fmt::Display for Error {
             Self::InvalidPermission { name } => {
                 write!(f, "permission requirements for `{name}` are not satisfied")
             }
+            Self::ReadOnly { table } => write!(f, "`{table}` is read-only"),
             Self::UnknownRoot { name } => write!(f, "no root field is named `{name}`"),
             Self::UnknownType { name } => write!(f, "no table is named `{name}`"),
             Self::UnknownField { table, field } => write!(f, "`{table}` has no field `{field}`"),
@@ -493,6 +508,7 @@ impl RootField {
 pub struct Schema {
     model: model::Schema,
     writes: model::WriteCatalog,
+    read_only: std::collections::BTreeSet<String>,
     document: Option<graphql::DocumentSchema>,
 }
 
@@ -511,9 +527,22 @@ impl Schema {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        if let Some(table) = tables
+            .iter()
+            .find(|t| t.read_only && !t.write_permissions.is_empty())
+        {
+            return Err(Error::ReadOnly {
+                table: table.name.clone(),
+            });
+        }
         let writes = mutation::catalog(&tables)?;
         Ok(Self {
             writes,
+            read_only: tables
+                .iter()
+                .filter(|t| t.read_only)
+                .map(|t| t.name.clone())
+                .collect(),
             document: None,
             model: model::Schema {
                 permissions,

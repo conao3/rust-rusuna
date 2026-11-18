@@ -283,7 +283,9 @@ again.
 
 `MutationArguments` and `OnConflict` carry typed input data to `runWrite`. The
 `WriteCatalog` holds primary keys and operation-specific permissions independently of
-the read schema. SDL declares `@primary_key`, `@insert_permission`,
+the read schema. Read-only tables (`@table(read_only: true)`, views) are a Rust check:
+the SDL emits no mutation roots for them, `Schema::new` rejects their write permissions
+and `compile_mutation` rejects them as targets before calling Lean. SDL declares `@primary_key`, `@insert_permission`,
 `@update_permission` and `@delete_permission`. The parser uses the expanded mutation
 input types, and Lean resolves columns, presets, sessions, filters and returning nodes.
 
@@ -378,6 +380,9 @@ are also tested in autocommit mode without a caller rollback.
   response keys, hand-written fields in both directions,
   hidden roles and introspection with the expanded SDL of each role. Pruned empty types
   are listed by hand in `tests/introspection.rs`.
+- `crates/rusuna-http-tests/tests/views.rs` reads a view and a materialized view
+  (`tests/fixtures/views.sql`, `views.graphql`) with relationships, permissions and
+  aggregates, and checks that read-only types have no mutations.
 - `crates/rusuna-http-tests/tests/subscriptions.rs` subscribes over WebSocket with
   `tokio-tungstenite`, waits on the counters of `Subscriptions::stats()` instead of on
   time, and compares them with the `calls` of `pg_stat_statements` in the test database.

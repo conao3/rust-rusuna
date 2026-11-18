@@ -636,3 +636,52 @@ async fn primary_key_and_aggregate_roots_are_subscribed() {
         json!({"article_aggregate": {"aggregate": {"count": 5}}})
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn views_and_materialized_views_are_subscribed() {
+    let pool = database("http_subscription_views", &["views.sql"]).await;
+    let sdl = fixture("views.graphql");
+    let subscriptions = Subscriptions::new(pool.clone(), options());
+    let address = serve_ws(role_schemas(&sdl, &pool, &subscriptions)).await;
+    let mut client =
+        Client::connect(address, json!({"role": "user", "session": {"user_id": 1}})).await;
+    client
+        .subscribe(
+            "published",
+            "subscription { view_published(order_by: {id: asc}) { id title } }",
+            json!({}),
+        )
+        .await;
+    assert_eq!(
+        client.data("published").await,
+        json!({"view_published": [{"id": 1, "title": "first"}]})
+    );
+    client
+        .subscribe(
+            "stats",
+            "subscription { view_author_stats_aggregate { aggregate { count sum { total } } } }",
+            json!({}),
+        )
+        .await;
+    assert_eq!(
+        client.data("stats").await,
+        json!({"view_author_stats_aggregate": {"aggregate": {"count": 1, "sum": {"total": 9}}}})
+    );
+
+    sqlx::query("UPDATE view_article SET published = true, score = 10 WHERE id = 2")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.data("published").await,
+        json!({"view_published": [{"id": 1, "title": "first"}, {"id": 2, "title": "draft"}]})
+    );
+    sqlx::query("REFRESH MATERIALIZED VIEW view_author_stats")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.data("stats").await,
+        json!({"view_author_stats_aggregate": {"aggregate": {"count": 2, "sum": {"total": 22}}}})
+    );
+}

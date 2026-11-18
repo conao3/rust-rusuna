@@ -133,6 +133,11 @@ impl Schema {
         returning: &[Selection],
         session: &Session,
     ) -> Result<Compiled, Error> {
+        if self.read_only.contains(&input.target) {
+            return Err(Error::ReadOnly {
+                table: input.target.clone(),
+            });
+        }
         let input = model::WriteInput {
             target: input.target.clone(),
             conflict: input
