@@ -11,7 +11,7 @@ Rust by [leanfran](https://github.com/conao3/lean-leanfran).
 ## Status
 
 rusuna loads a mapping schema from SDL and compiles GraphQL query, mutation and subscription
-documents to SQL.
+documents to SQL. `rusuna-events` runs event triggers and cron triggers beside it.
 
 | Feature | State |
 |---|---|
@@ -21,7 +21,7 @@ documents to SQL.
 | Insert, update, delete, primary-key roots and write permissions | available |
 | Execution with sqlx, parts for an `async-graphql` schema and `axum` routes | available |
 | Subscriptions over WebSocket, polled with one statement per group of subscriptions | available |
-| Event triggers | planned |
+| Event triggers, cron triggers and scheduled events, delivered to Rust handlers and webhooks | available |
 
 The workspace has these crates:
 
@@ -31,6 +31,7 @@ The workspace has these crates:
 | `rusuna-sqlx` | Runs compiled statements on PostgreSQL with sqlx 0.9 and returns the `data` JSON; polls subscriptions. |
 | `rusuna-async-graphql` | Builds an async-graphql 7 dynamic schema for one role, beside hand-written fields. |
 | `rusuna-axum` | axum 0.8 routes (`POST` and WebSocket) that pick the role's schema and execute the request. |
+| `rusuna-events` | Records row changes with PostgreSQL triggers and delivers them, cron occurrences and scheduled events to Rust handlers and webhooks. |
 | `rusuna-cli` | The `rusuna` command (not published). |
 
 ## Usage
@@ -560,6 +561,243 @@ Differences from Hasura v2 live queries:
 Lists without `order_by` follow PostgreSQL's row order, which can differ between runs
 and then sends a result with the same rows in another order.
 
+## Event triggers and cron triggers
+
+`rusuna-events` calls your code when rows change and at the times of cron expressions.
+A PostgreSQL row trigger records each change in a table; a worker inside your process
+delivers the recorded events to async Rust handlers or webhooks, and retries failed
+deliveries.
+
+```rust
+use rusuna_events::{Cause, CronTrigger, Event, EventTrigger, Events, Operation, Retry, Webhook, WorkerOptions};
+use std::time::Duration;
+
+let events = Events::new()
+    .trigger(EventTrigger::new("article_created", "article").operations([Operation::Insert]))
+    .trigger(
+        EventTrigger::new("article_renamed", "article")
+            .operations([Operation::Update])
+            .columns(["title"]),
+    )
+    .cron(CronTrigger::new("nightly_report", "0 3 * * *", serde_json::json!({"kind": "daily"}))?)
+    .handler("article_created", Retry::default(), |event: Event| async move {
+        if let Cause::Row { new: Some(row), .. } = &event.cause {
+            send_welcome_mail(&row["author_id"]).await?;
+        }
+        Ok(())
+    })
+    .webhook(
+        "article_renamed",
+        Retry { max_retries: 5, interval: Duration::from_secs(30), timeout: Duration::from_secs(10) },
+        Webhook::new("https://search.example.com/reindex")?.header("authorization", &token)?,
+    )
+    .handler("nightly_report", Retry::default(), |_event: Event| async move { report().await });
+
+events.migrate(&pool).await?;
+let worker = events.worker(pool.clone(), WorkerOptions::default())?;
+let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+let worker = tokio::spawn(worker.run(async { let _ = stopped.await; }));
+// ... serve requests ...
+let _ = stop.send(());
+worker.await?;
+```
+
+### Declaring triggers and the migration
+
+An `EventTrigger` names a trigger and declares its SQL table (`schema` defaults to
+`public`), the operations that record an event (all three by default) and, for updates,
+the SQL columns an update must change (`columns`; empty means every update). Trigger
+names are 1 to 42 ASCII letters, digits, `_` or `-`. Declarations live in Rust, next to
+the handlers. The same declaration has a JSON form with the keys `Name`, `Table`,
+`Schema`, `Operations` (`"INSERT"`, `"UPDATE"`, `"DELETE"`) and `Columns`, which
+`EventTrigger` deserializes with serde and the CLI reads:
+
+```sh
+rusuna events generate-migration --triggers file://events.json --output text > migrations/0005_events.sql
+```
+
+`rusuna_events::migration(&triggers)` (and `Events::migration`) returns the same SQL.
+Add it to your own migrations, or apply it with `rusuna_events::migrate(&pool,
+&triggers)` (`Events::migrate`), which runs it in one transaction under an advisory lock.
+The script creates:
+
+- the schema `rusuna` and the tables `rusuna.event_log` and `rusuna.event_invocation`
+  (below), with `CREATE … IF NOT EXISTS`;
+- the trigger function `rusuna.capture_event()` (`CREATE OR REPLACE FUNCTION`, PL/pgSQL,
+  `SECURITY DEFINER` with a fixed `search_path`, so the roles that write your tables need
+  no privilege on `rusuna`);
+- one `AFTER … FOR EACH ROW` trigger `rusuna_event_<name>` per declaration
+  (`CREATE OR REPLACE TRIGGER`), for example
+
+```sql
+CREATE OR REPLACE TRIGGER "rusuna_event_article_renamed" AFTER UPDATE OF "title" ON "public"."article" FOR EACH ROW EXECUTE FUNCTION rusuna.capture_event('article_renamed', 'title');
+```
+
+It uses only standard PostgreSQL: no extension and no superuser, so it runs on Amazon RDS
+and Aurora. It requires PostgreSQL 14 or later (`CREATE OR REPLACE TRIGGER`;
+`gen_random_uuid()` is built in from 13). The script has no transaction statements, so a
+migration tool can wrap it in its own.
+
+The script is idempotent: applying it again changes nothing, and applying it with changed
+declarations replaces the trigger of each declared name on its table. It does not drop
+anything. When you remove a declaration or move it to another table, drop the old trigger
+in your migration: `DROP TRIGGER IF EXISTS "rusuna_event_<name>" ON <table>;`. The table
+layout belongs to this version of the crate.
+
+The function writes `to_jsonb(OLD)` and `to_jsonb(NEW)`, keyed by SQL column names, and
+sends `NOTIFY rusuna_events`. It runs in the transaction of the change, so every write
+records its event, whether it came through rusuna, another client or `psql`, and a
+rolled-back change records nothing. An update trigger with columns fires when the update
+lists one of the columns (`UPDATE OF`) and one of their values changes (`IS DISTINCT FROM`
+on the JSON values); a column changed only by another `BEFORE` trigger does not count.
+
+### The event table
+
+`rusuna.event_log` has one row per event:
+
+| Column | Meaning |
+|---|---|
+| `id uuid` | `gen_random_uuid()`. |
+| `kind text` | `row`, `cron` or `scheduled`. |
+| `trigger_name text` | The trigger name; deliveries are looked up by it. |
+| `schema_name`, `table_name text` | The changed table (row events). |
+| `operation text` | `INSERT`, `UPDATE` or `DELETE` (row events). |
+| `old`, `new jsonb` | The row before and after the change; null for an insert's `old` and a delete's `new`. |
+| `payload jsonb` | The payload of a cron or scheduled event. |
+| `scheduled_at timestamptz` | The occurrence of a cron event, the due time of a scheduled event. |
+| `created_at timestamptz` | When the event was recorded (`now()` of the recording transaction). |
+| `status text` | `pending`, `delivered` or `failed`. |
+| `tries integer` | Attempts started. |
+| `next_attempt_at timestamptz` | When the next attempt is due; null means at once. |
+| `locked_until timestamptz` | The lease of the current claim. |
+| `completed_at timestamptz` | When the event became `delivered` or `failed`. |
+
+`rusuna.event_invocation` keeps one row per recorded attempt: `event_id`, `attempt`,
+`succeeded`, the HTTP `status` of a webhook, the `error` text (a handler's error, the first
+1000 characters of a webhook's response, a timeout or a panic), `started_at` and
+`finished_at`. Rows are deleted with their event.
+
+### Delivery
+
+`Events::handler(name, retry, f)` delivers the events of `name` to an async function
+`Fn(Event) -> impl Future<Output = Result<(), HandlerError>>`. `Events::webhook(name,
+retry, webhook)` sends them as an HTTP `POST` with `content-type: application/json` and the
+headers of the `Webhook`; a 2xx status is a success. A name has one delivery. The client is
+hyper 1 with rustls (the ring provider and the webpki root certificates), so it builds
+without OpenSSL or CMake.
+
+`Event` has the event's `id`, `trigger`, `cause` (`Cause::Row { schema, table, op, old,
+new }`, `Cause::Cron { scheduled_at }` or `Cause::Scheduled { scheduled_at }`), `payload`,
+`created_at`, `attempt` (from 1) and `max_retries`. `Event::body()` is the JSON a webhook
+receives. For a row event it has the shape of a Hasura v2 event trigger payload:
+
+```json
+{
+  "id": "6c1f…",
+  "created_at": "2026-01-01T00:00:00.000000Z",
+  "trigger": {"name": "article_created"},
+  "table": {"schema": "public", "name": "article"},
+  "event": {"op": "INSERT", "data": {"old": null, "new": {"id": 100, "title": "Ships and software"}}},
+  "delivery_info": {"max_retries": 0, "current_retry": 0}
+}
+```
+
+A cron or scheduled event sends `{"id", "name", "scheduled_time", "payload"}`.
+
+`Retry` sets per name the retries after the first attempt (`max_retries`, default 0), the
+time between a failed attempt and the next one (`interval`, default 10 seconds) and the
+time an attempt may take (`timeout`, default 60 seconds). An error, a handler panic, a
+non-2xx status, a connection error or the timeout fails the attempt; at the timeout the
+handler's future is dropped. An event whose attempts reach `max_retries + 1` without a
+success stays in the table as `failed` and is not tried again.
+`rusuna_events::redeliver(executor, id)` makes a failed event pending again with its
+attempts counted from zero.
+
+**Delivery is at least once.** A handler or webhook can receive an event again: when the
+worker stops after the delivery succeeded but before it recorded the result, or when an
+attempt outlives its lease. Write handlers to be idempotent, for example keyed by
+`Event::id`. Events are delivered concurrently and in no guaranteed order.
+
+### The worker
+
+`Events::worker(pool, options)` checks the definitions and returns a `Worker`;
+`worker.run(shutdown)` is the future to spawn. Each poll records due cron occurrences, then
+claims up to `concurrency` pending events of the names this worker delivers, oldest first:
+
+```sql
+… SELECT … FROM rusuna.event_log … WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= $now)
+  AND (locked_until IS NULL OR locked_until <= $now) ORDER BY created_at, id LIMIT $n FOR UPDATE OF e SKIP LOCKED
+```
+
+and in the same statement increments `tries` and sets `locked_until` to now plus the name's
+`timeout` plus `WorkerOptions::lease_margin` (default 30 seconds). Deliveries run outside
+that transaction, so no connection or lock is held while a handler runs. The result is
+recorded only if `tries` still equals the claimed attempt and the event is pending, so a
+claim that another worker has since taken over cannot overwrite the newer result.
+
+- **Several workers.** Workers in one process or in many claim different rows:
+  `SKIP LOCKED` skips the rows another claim is taking, and a claimed row has a lease.
+- **A worker that stops in the middle.** Aborting the worker's task drops its deliveries
+  in progress; a crashed process loses them too. Their events stay pending with a lease,
+  and any worker claims them again when the lease expires. The interrupted attempt counts
+  as an attempt; the event is claimed again even past `max_retries`, since no result was
+  recorded.
+- **Waiting.** A worker polls every `poll_interval` (default one second). With `listen`
+  (default true) it also `LISTEN`s on `rusuna_events` on a connection of its own and
+  polls at once when the trigger function notifies; polling alone is enough for
+  correctness, including behind poolers that do not support `LISTEN`. When a poll fills
+  every free slot, the worker polls again as soon as a delivery finishes.
+- **Shutdown.** When the `shutdown` future completes, the worker stops claiming and
+  waits for its deliveries in progress, at most their timeouts, to record their results.
+- **Clock.** `Worker::clock(Arc<dyn Clock>)` replaces the system clock. The clock decides
+  which events are due, the leases, the retry times and the cron occurrences, so tests
+  move time without waiting. Events recorded by triggers have a null `next_attempt_at`,
+  so they are due under any clock.
+- **Counters.** `Worker::monitor()` returns a handle whose `stats()` reports polls,
+  claimed events, delivered and failed attempts, and database errors. A database error
+  does not stop the worker; it tries again at the next poll.
+
+`rusuna_events::cleanup(executor, before)` deletes delivered events completed before
+`before`, with their invocations, and keeps the latest occurrence of each cron trigger.
+Run it on a schedule of your own, for example from a cron trigger. Failed and pending
+events stay.
+
+### Cron triggers and scheduled events
+
+`CronTrigger::new(name, expression, payload)` takes a five-field expression (minute,
+hour, day of month, month, day of week), evaluated in UTC with
+[croner](https://docs.rs/croner/4.0.3/croner/) 4.0.3. A seconds field and a year field
+are rejected. A cron trigger needs a handler or webhook of the same name.
+
+On each poll a worker inserts the occurrences that are due since its last poll as
+`kind = 'cron'` events with `INSERT … ON CONFLICT (trigger_name, scheduled_at) WHERE kind
+= 'cron' DO NOTHING`. A unique index on the trigger name and the occurrence time makes the
+first insert win, so an occurrence becomes one event however many workers run, and
+it is delivered like every other event.
+
+Missed occurrences: a starting worker reads the latest recorded occurrence of each cron
+trigger. If there is one, it records the occurrences after it that are not older than the
+trigger's `tolerance` (default six hours, `CronTrigger::tolerance`), at most 1000 per poll;
+older ones are skipped. A cron trigger with no recorded occurrence starts with the next
+occurrence after the worker starts. `cleanup` keeps the latest occurrence for this reason.
+
+`rusuna_events::schedule(executor, name, at, payload)` records a one-off event of `name`
+due at `at` and returns its id. Pass a transaction to record it only if the transaction
+commits. It is delivered to the handler or webhook of `name`.
+
+### Differences from Hasura
+
+- Triggers and deliveries are declared in Rust (or JSON for the CLI), not in metadata, and
+  their SQL is a migration you apply.
+- The payload has no `event.session_variables` and no `trace_context`: the trigger
+  function does not read a session from the database. There is no `MANUAL` operation.
+- Failures are retried at a fixed interval; a webhook's `Retry-After` header is not read.
+- A worker runs in your process; there is no separate event delivery service.
+- Cron triggers are declared in code, and their payload shape is rusuna's own.
+
+Outside this crate: a console for events, request and response transforms, per-trigger
+column selections for the payload, and dropping triggers of removed declarations.
+
 ## Example server
 
 `crates/rusuna-axum/examples/blog.rs` serves `blog.graphql` with roles `reader` and
@@ -607,20 +845,34 @@ curl -s http://127.0.0.1:3000/api/graphql -H 'content-type: application/json' -H
 
 Send `{"id":"1","type":"complete"}` to end the subscription.
 
+The example also declares the event trigger `article_created` on inserts into `article`,
+applies its migration at startup and runs a worker beside the server. Each inserted
+article, such as the one of the `insert_article_one` request above, makes the server
+print a line from the handler:
+
+```
+article 100 created: Ships and software
+```
+
+Ctrl-C stops the server, then the worker after its deliveries in progress.
+
 ## CLI
 
 ```sh
 nix run . -- schema expand-sdl --role admin --schema file://tests/fixtures/schema.graphql --output text
 nix run . -- query compile-sql --role admin --schema file://tests/fixtures/schema.graphql --query file://tests/fixtures/queries/a.graphql
 nix run . -- query compile-sql --role user --session '{"user_id":3}' --schema file://tests/fixtures/permissions.graphql --query '{ article { id } }'
+nix run . -- events generate-migration --triggers file://crates/rusuna-cli/tests/fixtures/events.json --output text
 ```
 
 `rusuna-cli` installs the binary `rusuna`. Values beginning with `file://` are read from
 files, including `file:///dev/stdin`. `query compile-sql` accepts `--operation-name` and
-`--variables` and `--session` (JSON objects or files). Both commands require `--role`. Global options are `--output json|text|table`
+`--variables` and `--session` (JSON objects or files). `schema expand-sdl` and
+`query compile-sql` require `--role`. `events generate-migration` takes `--triggers`, a
+JSON array of event triggers (default `[]`, the tables and the function only). Global options are `--output json|text|table`
 (default `json`), `--debug`, `--no-debug` and `--version`. Each command level has `help`.
-JSON keys are `Sdl`, or `Fields` containing `ResponseKey`, `Sql` and `Params`. Text
-expansion is raw SDL; query text is tab-separated and table output adds column names.
+JSON keys are `Sdl`, `Sql` (the migration), or `Fields` containing `ResponseKey`, `Sql` and `Params`. Text
+expansion and the migration are raw text; query text is tab-separated and table output adds column names.
 Exit codes are 0 for success, 252 for command syntax or parameter errors, 254 for SDL or
 query errors, and 255 for other failures. Diagnostics go to stderr.
 
@@ -814,6 +1066,8 @@ Outside the proofs:
   SQL text in Rust; `placeholders_numbered` fixes what it expects, and a test runs the
   rewritten statement of every admin and permission fixture against its single statements.
 - `unquoteChars` as a description of PostgreSQL's reader.
+- `rusuna-events`: the trigger function, the claim and lease statements, cron occurrences
+  and webhook delivery. The tests in `crates/rusuna-events/tests` cover them on PostgreSQL.
 
 ## Results and speed
 
@@ -874,6 +1128,26 @@ plans, returns the result of each single statement, and every supported paramete
 keeps its value. A subscription whose statement fails, at subscription or later, gets
 the error alone while its group keeps sending the other results.
 
+The event tests in `crates/rusuna-events/tests/events.rs` each create their own database.
+An insert through a rusuna mutation, a plain SQL update and a delete reach the handler
+once each with the right `old` and `new`; a rolled-back insert records no event; update
+columns and operations select the changes that record events. A handler that fails twice
+gets its third attempt, each one at least the retry interval after the previous; a webhook
+served by an axum server in the test answers 503 twice and 200 once and receives the
+payload, the header and `delivery_info` each time. An error, a timeout and a panic each
+fail an attempt; after the retry limit the event is `failed` and ten more polls try
+nothing, until `redeliver`. Two workers deliver 200 events, each exactly once. A worker
+aborted during a delivery leaves the event to another worker, which claims it only after
+the lease has expired on an injected clock. Two workers record one event per cron
+occurrence on an injected clock; a starting worker records the missed occurrences within
+the tolerance and skips older ones; a scheduled event waits for its time and a
+rolled-back one is not recorded. Shutdown waits for a delivery in progress; the migration
+applies twice and replaces a changed trigger; `cleanup` keeps the latest cron
+occurrence. Time-dependent tests move an injected clock and wait on the poll counters of
+`Worker::monitor()`, never on a fixed sleep; the retry test only bounds the interval from
+below. `crates/rusuna-cli/tests` compares the generated migration with
+`crates/rusuna-cli/tests/fixtures/events.sql`.
+
 ## Development
 
 ```
@@ -891,8 +1165,8 @@ Each test that loads its own tables creates its own database in the cluster.
 ## Publishing
 
 `cargo package --workspace --exclude rusuna-cli --exclude rusuna-http-tests` builds the
-four published crates; their dependencies on each other carry `version = "0.1.0"`, so
-they are published in the order `rusuna`, `rusuna-sqlx`, `rusuna-async-graphql`,
+five published crates; their dependencies on each other carry `version = "0.1.0"`, so
+they are published in the order `rusuna`, `rusuna-sqlx`, `rusuna-events`, `rusuna-async-graphql`,
 `rusuna-axum`. The `rusuna` package contains `src/` and `.leanfran/cache/`, the Rust
 leanfran generated from the `lean!` block. Its build script copies the cached module and
 needs neither Lean nor Lake, so a crate that depends on the published `rusuna`

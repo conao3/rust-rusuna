@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 rusuna-async-graphql = { workspace = true }
+rusuna-events = { workspace = true }
 rusuna-sqlx = { workspace = true }
 sqlx = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }

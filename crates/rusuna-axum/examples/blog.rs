@@ -3,6 +3,7 @@ use async_graphql::dynamic::{Field, FieldFuture, FieldValue, Object, Schema, Typ
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::IntoResponse;
+use rusuna_events::{Cause, Event, EventTrigger, Events, Operation, Retry, WorkerOptions};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -102,9 +103,37 @@ async fn main() {
             },
         )),
     );
+    let events = Events::new()
+        .trigger(EventTrigger::new("article_created", "article").operations([Operation::Insert]))
+        .handler(
+            "article_created",
+            Retry::default(),
+            |event: Event| async move {
+                if let Cause::Row { new: Some(row), .. } = &event.cause {
+                    let title = row["title"].as_str().unwrap_or_default();
+                    println!("article {} created: {title}", row["id"]);
+                }
+                Ok(())
+            },
+        );
+    events.migrate(&pool).await.unwrap();
+    let worker = events
+        .worker(pool.clone(), WorkerOptions::default())
+        .unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let worker = tokio::spawn(worker.run(async {
+        let _ = stopped.await;
+    }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
         .unwrap();
     println!("listening on http://127.0.0.1:3000/api/graphql");
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+        .unwrap();
+    let _ = stop.send(());
+    worker.await.unwrap();
 }

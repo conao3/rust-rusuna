@@ -17,7 +17,8 @@ commit the workflow and `actions.lock` together.
 - `src/lib.rs`: the public Rust types and their conversion to and from `model`.
 - `src/graphql.rs` and `src/graphql/`: SDL loading, deterministic expansion, typed GraphQL
   parsing with async-graphql-parser 7 and conversion to `Selection`.
-- `crates/rusuna-cli/`: the clap CLI `rusuna` (not published).
+- `crates/rusuna-cli/`: the clap CLI `rusuna` (not published): `schema expand-sdl`,
+  `query compile-sql` and `events generate-migration`.
 - `crates/rusuna-sqlx/`: `fetch` and `execute` with sqlx 0.9. Parameters are encoded
   for the types PostgreSQL infers when sqlx prepares the statement. `src/subscription.rs`
   holds `Multiplexed`, the statement that runs one compiled statement for many parameter
@@ -26,7 +27,17 @@ commit the workflow and `actions.lock` together.
   schema of one role, the root resolvers (query, mutation and subscription), hand-written
   fields and the transaction extension.
 - `crates/rusuna-axum/`: the axum 0.8 routes `graphql` (`POST`) and `graphql_ws`
-  (WebSocket, `graphql-transport-ws`) and the example `blog`.
+  (WebSocket, `graphql-transport-ws`) and the example `blog`, which also runs an event
+  worker.
+- `crates/rusuna-events/`: event triggers, cron triggers and scheduled events, all in
+  Rust; the Lean core is not involved. `src/migration.rs` generates the idempotent
+  migration (tables `rusuna.event_log` and `rusuna.event_invocation`, the function
+  `rusuna.capture_event()` and one `rusuna_event_<name>` trigger per declaration),
+  `src/worker.rs` holds `Events` and `Worker` (claims with `FOR UPDATE SKIP LOCKED`, a
+  lease, results fenced by `tries`, `LISTEN rusuna_events` beside polling),
+  `src/cron.rs` the five-field cron triggers (croner 4) and `src/webhook.rs` the hyper 1
+  client with rustls on ring. Every worker query takes the time from the injected
+  `Clock`.
 - `crates/rusuna-http-tests/`: unpublished; HTTP tests against the Hasura fixtures and
   the introspection comparison. Each test creates its own database.
 - Workspace dependencies and package metadata are in the root `Cargo.toml`
@@ -60,7 +71,7 @@ outside quoted text are `$1` to `$n` in order.
 Rust owns the public types, the depth check that bounds the recursion of the conversion,
 and everything with I/O: tests, the database client and the benchmark. Rust also parses SDL and GraphQL, expands fragments and variables, and checks values
 against the generated GraphQL type graph. The `rusuna` crate performs no I/O; the other
-crates execute statements, build the async-graphql schema and serve HTTP. SQL column
+crates execute statements, build the async-graphql schema, serve HTTP and deliver events. SQL column
 types remain the caller's database schema.
 
 The async-graphql resolvers hand a root field to the core as GraphQL text: the alias, the
@@ -377,6 +388,11 @@ are also tested in autocommit mode without a caller rollback.
   contain `$1`.
 - `RUSUNA_POSTGRES` is a required input of the database tests and the benchmark;
   `tools/with-postgres.sh` sets it and `DATABASE_URL`, which the example reads.
+- `crates/rusuna-events/tests/events.rs` creates a database per test. Tests that depend
+  on time inject a `Clock` and wait on `Worker::monitor()` poll counters instead of
+  sleeping; the retry test asserts only a lower bound on the interval. A webhook test
+  serves axum on `127.0.0.1:0`. `crates/rusuna-cli/tests/fixtures/events.sql` is the
+  expected migration of `events.json`; rewrite it with `RUSUNA_UPDATE_EXPECTED=1`.
 - `cargo package --workspace --exclude rusuna-cli --exclude rusuna-http-tests` packages
   the published crates. A build of the `rusuna` package needs only `.leanfran/cache/`.
 
