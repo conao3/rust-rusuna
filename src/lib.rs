@@ -533,6 +533,16 @@ impl Schema {
         })
     }
 
+    pub fn roles(&self) -> Vec<String> {
+        let mut roles: Vec<String> = std::iter::once("admin".to_string())
+            .chain(self.model.permissions.iter().map(|p| p.role.clone()))
+            .chain(self.writes.permissions.iter().map(|p| p.role.clone()))
+            .collect();
+        roles.sort();
+        roles.dedup();
+        roles
+    }
+
     /// Compiles the root field `root` into one statement.
     pub fn compile_selection(
         &self,

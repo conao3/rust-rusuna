@@ -12,6 +12,7 @@ pub const MAX_DOCUMENT_DEPTH: usize = 128;
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledField {
     pub response_key: String,
+    pub mutation: bool,
     pub compiled: Compiled,
 }
 
@@ -67,6 +68,7 @@ impl Schema {
             .map(|selection| {
                 Ok(CompiledField {
                     response_key: selection.alias.clone(),
+                    mutation: selection.mutation.is_some(),
                     compiled: self.compile_selection(&selection, session)?,
                 })
             })
