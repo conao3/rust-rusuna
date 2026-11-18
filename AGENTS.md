@@ -131,19 +131,22 @@ A function added to the block gets a theorem and an `#assay` line in the same ch
 an entry below. `maxDepth`, `maxFields`, `maxFilterDepth`, `maxInValues` and `rowAlias` are constants
 and are not audited.
 
-Three groups, targeting thirteen functions, stay outside the audit. `make survey` prints their tables with hand-written
+Five groups, targeting eighteen functions, stay outside the audit. `make survey` prints their tables with hand-written
 generators shared in `audit/Audit/Generators.lean`. These choose names from a small
 vocabulary so the sampled schemas and selections exercise successful resolution.
-The pinned leanassay revision also supports size-bounded generators for recursive types. The library builds seven
-independent survey modules so their automatically derived instances stay separate and
+The pinned leanassay revision also supports size-bounded generators for recursive types. The library builds eight
+independent survey modules beside `Survey.Compiler`, which imports the shared
+generators, so their automatically derived instances stay separate and
 completed groups can be reused independently.
 
 | Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
 |---|---|---|---|---|---|---|---|---|
 | SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
-| Selection resolution | 2 | 136 | 25 | 3 | 2 | 0 | 52 | 54 |
+| Selection resolution | 2 | 136 | 40 | 3 | 14 | 0 | 25 | 54 |
 | Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
-| Total | 13 | 313 | 48 | 104 | 4 | 0 | 52 | 105 |
+| Write emission | 2 | 87 | 0 | 73 | 10 | 0 | 0 | 4 |
+| Write resolution | 3 | 56 | 1 | 19 | 32 | 0 | 0 | 4 |
+| Total | 18 | 456 | 64 | 196 | 58 | 0 | 25 | 113 |
 
 - The SQL emission group is `paramToks`, `expressionToks`, `expressionsToks`,
   `scanToks`, `joinToks`, `joinsToks`, `emit` and `compile`. Parameter preservation,
@@ -154,11 +157,20 @@ completed groups can be reused independently.
   `resolveExpression` has three holes: predicate constructor choices and different
   error variants can change output without changing success or parameters. These
   require output properties beyond success equivalence. `resolveNode` has no
-  observed hole, but forty timed-out mutations leave its audit unresolved.
+  observed hole, but twenty-five timed-out mutations leave its audit unresolved.
   Rejection and differential tests exercise the input rules and emitted statements.
 - `guardQuery`, `resolve` and `run` use `resolve_values` and `run_params`. The changed
   role comparison in `resolve` changes acceptance while preserving successful
   outputs' parameters.
+- The write emission group is `writeBodyToks` and `emitWrite` with `emitWrite_slots`,
+  which fixes placeholder numbering only. Its 73 holes change SQL text; the committed
+  SQL fixtures, the Hasura comparison and the concurrent-transaction tests pin it. The
+  `WritePlan` generator mixes primary-key lists with returning relationships that
+  read the modified table again.
+- The write resolution group is `resolveWriteRaw`, `resolveWrite` and `runWrite` with
+  `resolveWrite_secure` and `runWrite_accepts`. Its 19 holes in `resolveWriteRaw` and
+  `resolveWrite` change which inputs are accepted, including a constant error; the
+  statements constrain successful plans, not write acceptance.
 
 The survey uses 1000 samples and a 30-second deadline per mutation. Timeouts are
 unresolved measurements under concurrent machine load.

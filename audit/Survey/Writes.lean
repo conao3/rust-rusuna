@@ -28,10 +28,14 @@ local instance : Arbitrary WritePlan := ⟨do
   let value ← Arbitrary.arbitrary
   let conds ← genPredicate 2
   let check ← genPredicate 2
+  let keys ← (fun k => if k.isEmpty then [] else k.splitOn ",") <$> genOf ["", "a", "a,b"]
+  let scan ← genScan 1
   let assignment : Assignment := ⟨"a", "a", value, false, false⟩
-  pure { (default : WritePlan) with target := "t", schema := "public", table := "t", kind, conds
+  pure { (default : WritePlan) with
+    target := "t", schema := "public", table := "t", keys, kind, conds
     objects := [[assignment], []], assignments := [assignment], check := .abort check
-    outputs := [.count "affected_rows", .rows "returning" [.column "a" (.column "a")]] }⟩
+    outputs := [.count "affected_rows", .rows "returning" [.column "a" (.column "a"),
+      .relation "same" .array scan ["a"] ["a"] [.column "a" (.column "a")]]] }⟩
 
 #assay writeBodyToks emitWrite using emitWrite_slots
 #assay resolveWriteRaw resolveWrite runWrite using resolveWrite_secure runWrite_accepts

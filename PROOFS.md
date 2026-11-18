@@ -419,11 +419,20 @@ The strict audit targets twenty-four functions: 154 mutations, 103 killed, zero 
 | Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
 |---|---|---|---|---|---|---|---|---|
 | SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
-| Selection resolution | 2 | 136 | 25 | 3 | 2 | 0 | 52 | 54 |
+| Selection resolution | 2 | 136 | 40 | 3 | 14 | 0 | 25 | 54 |
 | Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
-| Total | 13 | 313 | 48 | 104 | 4 | 0 | 52 | 105 |
+| Write emission | 2 | 87 | 0 | 73 | 10 | 0 | 0 | 4 |
+| Write resolution | 3 | 56 | 1 | 19 | 32 | 0 | 0 | 4 |
+| Total | 18 | 456 | 64 | 196 | 58 | 0 | 25 | 113 |
 
 The survey uses 1000 samples and a 30-second deadline per mutation. Equivalence is sampled output equality, not a proved equivalence.
+
+The write emission group (`writeBodyToks`, `emitWrite`) is checked by `emitWrite_slots`,
+which fixes placeholder numbering only; its 73 holes change SQL text. The write
+resolution group (`resolveWriteRaw`, `resolveWrite`, `runWrite`) is checked by
+`resolveWrite_secure` and `runWrite_accepts`; its 19 holes change which inputs are
+accepted, because these statements constrain successful plans rather than write
+acceptance. `runWrite := fun _ _ _ _ => default` is killed by `runWrite_accepts`.
 
 The write insertion audit targets `applyWriteCondition`, `applyWriteCheck` and
 `applyWritePermission`: ten mutations, all killed, with no hole, untested mutation,

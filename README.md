@@ -463,9 +463,11 @@ A manual mutation failed both the insertion and parameter-preservation proofs.
 | Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
 |---|---|---|---|---|---|---|---|---|
 | SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
-| Selection resolution | 2 | 136 | 25 | 3 | 2 | 0 | 52 | 54 |
+| Selection resolution | 2 | 136 | 40 | 3 | 14 | 0 | 25 | 54 |
 | Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
-| Total | 13 | 313 | 48 | 104 | 4 | 0 | 52 | 105 |
+| Write emission | 2 | 87 | 0 | 73 | 10 | 0 | 0 | 4 |
+| Write resolution | 3 | 56 | 1 | 19 | 32 | 0 | 0 | 4 |
+| Total | 18 | 456 | 64 | 196 | 58 | 0 | 25 | 113 |
 
 The survey uses 1000 samples and a 30-second deadline per mutation. Timeouts are
 unresolved and depend on machine load. Equivalent means equal outputs on the sampled
