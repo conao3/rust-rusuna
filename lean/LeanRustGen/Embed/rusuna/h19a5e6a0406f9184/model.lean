@@ -2026,6 +2026,7 @@ structure WritePlan where
   schema : String
   table : String
   defaultColumn : String
+  keys : List String
   conflict : Option ConflictPlan
   kind : WriteKind
   single : Bool
@@ -2140,6 +2141,13 @@ def keyCondition (catalog : WriteCatalog) (target : String) (values : List (Stri
       !key.columns.all (fun c => values.any (fun v => v.1 == c && v.2 != .null)) then .error .invalidFilter
   else return .and (values.map fun v => .compare v.1 .eq v.2)
 
+def keyColumns (catalog : WriteCatalog) (table : Table) : List String :=
+  match catalog.keys.find? (·.target == table.name) with
+  | none => []
+  | some key =>
+    let columns := key.columns.filterMap (findColumn table)
+    if columns.length == key.columns.length then columns else []
+
 def resolveWriteRows (table : Table) (presets : List (String × Value)) : List (List (String × Value)) → Except Error (List (List Assignment))
   | [] => .ok []
   | row :: rest => do
@@ -2208,7 +2216,7 @@ def resolveWriteRaw (schema : Schema) (catalog : WriteCatalog) (session : Sessio
   let conflict ← match input.conflict with
     | none => .ok none
     | some conflict => (resolveConflict schema catalog session table conflict).map some
-  let plan : WritePlan := ⟨table.name, table.schema, table.table, (table.columns.headD ⟨"", ""⟩).column, conflict, input.kind, input.single,
+  let plan : WritePlan := ⟨table.name, table.schema, table.table, (table.columns.headD ⟨"", ""⟩).column, keyColumns catalog table, conflict, input.kind, input.single,
     objects, assignments ++ increments, conds, .unchecked, outputs⟩
   match permission with
   | none => .ok plan
@@ -2400,11 +2408,19 @@ def revisitsTarget (plan : WritePlan) : Bool :=
     | .count _ => false
     | .rows _ children => ((nodesScans children).flatMap scanTree).any (·.name == plan.target)
 
+def snapshotJoinLex (schema table : String) (keys : List String) : List Lex :=
+  [.col schema table, .raw "AS", .ident "b0", .raw "WHERE"] ++ (match keys with
+    | [] => [.col "s" "ctid", .raw "=", .col "b0" "ctid"]
+    | key :: rest => [.col "s" key, .raw "=", .col "b0" key] ++ rest.flatMap fun c => [.raw "AND", .col "s" c, .raw "=", .col "b0" c]) ++
+    [.raw "AND ("]
+
 def writeBodyToks (plan : WritePlan) : List Tok :=
   let overlay := revisitsTarget plan
+  let joined := overlay && (plan.kind == .update || !plan.keys.isEmpty)
+  let join := lift (snapshotJoinLex plan.schema plan.table plan.keys)
   let table := lift [.col plan.schema plan.table, .raw "AS", .ident "s"]
   let returning := lift [.raw "RETURNING", .ident "s", .raw "AS", .ident "t0", .raw ","] ++
-    lift [if plan.kind == .insert then .raw "NULL::tid" else if plan.kind == .update then (if overlay then .col "b0" "ctid" else .raw "NULL::tid") else .col "s" "ctid",
+    lift [if plan.kind == .insert then .raw "NULL::tid" else if joined then .col "b0" "ctid" else if plan.kind == .update then .raw "NULL::tid" else .col "s" "ctid",
       .raw "AS", .ident "k0"] ++ (match plan.conflict with
     | some conflict => if conflict.assignments.isEmpty then writeCheckToks plan.check else conflictCheckToks plan.check conflict.check
     | none => writeCheckToks plan.check)
@@ -2423,9 +2439,11 @@ def writeBodyToks (plan : WritePlan) : List Tok :=
   | .update =>
     if plan.assignments.isEmpty then lift [.raw "SELECT", .ident "s", .raw "AS", .ident "t0", .raw ",", .col "s" "ctid", .raw "AS", .ident "k0", .raw "FROM"] ++ table ++ lift [.raw "WHERE false"] else
     lift [.raw "UPDATE"] ++ table ++ lift [.raw "SET"] ++ tokenCommas (plan.assignments.map assignmentToks) ++
-      (if overlay then lift [.raw "FROM", .col plan.schema plan.table, .raw "AS", .ident "b0", .raw "WHERE", .col "s" "ctid", .raw "=", .col "b0" "ctid", .raw "AND ("] ++ expressionToks 0 "s" plan.conds ++ lift [.raw ")"]
+      (if joined then lift [.raw "FROM"] ++ join ++ expressionToks 0 "s" plan.conds ++ lift [.raw ")"]
         else lift [.raw "WHERE"] ++ expressionToks 0 "s" plan.conds) ++ returning
-  | .delete => lift [.raw "DELETE FROM"] ++ table ++ lift [.raw "WHERE"] ++ expressionToks 0 "s" plan.conds ++ returning
+  | .delete => lift [.raw "DELETE FROM"] ++ table ++
+    (if joined then lift [.raw "USING"] ++ join ++ expressionToks 0 "s" plan.conds ++ lift [.raw ")"]
+      else lift [.raw "WHERE"] ++ expressionToks 0 "s" plan.conds) ++ returning
 
 def returningToks (single : Bool) (children : List Node) : List Tok :=
   lift ([.raw "(SELECT"] ++ (if single then rowLex 0 true children else

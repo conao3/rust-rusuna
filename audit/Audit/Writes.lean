@@ -14,7 +14,7 @@ instance : Inhabited WriteCheck := ⟨.unchecked⟩
 
 #assay applyWriteCondition applyWriteCheck using applyWriteCondition_exact applyWriteCheck_exact
 
-instance : Inhabited WritePlan := ⟨⟨"", "public", "", "id", none, .insert, false, [], [], .and [], .unchecked, []⟩⟩
+instance : Inhabited WritePlan := ⟨⟨"", "public", "", "id", [], none, .insert, false, [], [], .and [], .unchecked, []⟩⟩
 
 instance : Arbitrary WritePlan := ⟨do
   let kind ← Arbitrary.arbitrary

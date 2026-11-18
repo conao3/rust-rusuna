@@ -400,9 +400,10 @@ and their predicate scans. Top-level projected columns remain checked by
 SQL lowering redirects returning scans of the modified target to a post-operation
 snapshot CTE. The validated plan retains its declared table names and role predicates;
 `snapshotNode` and `snapshotPredicate` lower these sources for execution. This lowering,
-including the use of original tuple identifiers for updates and deletes and primary keys
-for conflicts, is outside the read-scan theorem. Differential fixtures cover relationships
-that return to the modified table after insert, update, delete and conflict update.
+including the primary-key self-join that keeps original tuple identifiers for updates and
+deletes and the primary keys for conflicts, is outside the read-scan theorem.
+Differential fixtures cover relationships that return to the modified table after insert,
+update, delete and conflict update; concurrent-transaction tests cover update and delete.
 
 `resolveWrite_validated`, `resolveWrite_secure` and `resolveWrite_conflict` expose the
 final validators for the audit. `runWrite_accepts` restates success through a map over

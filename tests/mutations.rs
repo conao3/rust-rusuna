@@ -312,32 +312,22 @@ fn write_permission_directives_reject_unknown_names_and_root_placements() {
     }
 }
 
-#[test]
-fn an_update_applies_to_a_row_changed_by_a_concurrent_transaction() {
+fn run_after_concurrent_update(
+    setup: &str,
+    pending: &str,
+    sdl: &str,
+    mutation: &str,
+) -> (String, Json) {
     let url = std::env::var("RUSUNA_POSTGRES").expect("run make check");
     let mut first = Client::connect(&url, NoTls).unwrap();
-    first
-        .batch_execute(
-            "CREATE TABLE concurrent_counter (id integer PRIMARY KEY, score integer NOT NULL);
-             INSERT INTO concurrent_counter VALUES (1, 1);",
-        )
-        .unwrap();
-    first
-        .batch_execute("BEGIN; UPDATE concurrent_counter SET score = score + 1 WHERE id = 1;")
-        .unwrap();
-    let schema = Schema::from_sdl(
-        "type counter @table(name: \"concurrent_counter\") @primary_key(columns: [\"id\"]) { id: Int! score: Int! } type Query { counter: [counter!]! @list }",
-    )
-    .unwrap();
+    first.batch_execute(setup).unwrap();
+    first.batch_execute(&format!("BEGIN; {pending}")).unwrap();
+    let schema = Schema::from_sdl(sdl).unwrap();
     let fields = schema
-        .compile(
-            "mutation { update_counter(where: {id: {_eq: 1}}, _inc: {score: 10}) { affected_rows returning { score } } }",
-            &json!({}),
-            None,
-            &Session::new("admin"),
-        )
+        .compile(mutation, &json!({}), None, &Session::new("admin"))
         .unwrap();
     let compiled = fields[0].compiled.clone();
+    let sql = compiled.sql.clone();
     let second = std::thread::spawn(move || {
         let mut client = Client::connect(&url, NoTls).unwrap();
         let params: Vec<_> = compiled.params.iter().map(Param).collect();
@@ -347,8 +337,119 @@ fn an_update_applies_to_a_row_changed_by_a_concurrent_transaction() {
     });
     std::thread::sleep(std::time::Duration::from_millis(500));
     first.batch_execute("COMMIT").unwrap();
+    (sql, second.join().unwrap())
+}
+
+#[test]
+fn an_update_applies_to_a_row_changed_by_a_concurrent_transaction() {
+    let (sql, result) = run_after_concurrent_update(
+        "CREATE TABLE concurrent_counter (id integer PRIMARY KEY, score integer NOT NULL);
+         INSERT INTO concurrent_counter VALUES (1, 1);",
+        "UPDATE concurrent_counter SET score = score + 1 WHERE id = 1;",
+        "type counter @table(name: \"concurrent_counter\") @primary_key(columns: [\"id\"]) { id: Int! score: Int! } type Query { counter: [counter!]! @list }",
+        "mutation { update_counter(where: {id: {_eq: 1}}, _inc: {score: 10}) { affected_rows returning { score } } }",
+    );
+    assert!(!sql.contains("\"b0\""));
     assert_eq!(
-        second.join().unwrap(),
+        result,
         json!({"affected_rows": 1, "returning": [{"score": 12}]})
     );
+}
+
+fn concurrent_item_sdl(table: &str, key: &str) -> String {
+    format!(
+        r#"
+        type owner @table(name: "{table}_owner") @primary_key(columns: ["id"]) {{
+          id: Int!
+          items: [item!]! @relation(columns: ["id"], references: ["owner_id"])
+          items_aggregate: item_aggregate! @aggregate(target: "item") @relation(columns: ["id"], references: ["owner_id"])
+        }}
+        type item @table(name: "{table}") {key} {{
+          id: Int!
+          owner_id: Int!
+          a: Int!
+          b: Int!
+          owner: owner! @relation(columns: ["owner_id"], references: ["id"])
+        }}
+        type Query {{ owner: [owner!]! @list item: [item!]! @list }}
+        "#
+    )
+}
+
+fn concurrent_item_setup(table: &str) -> String {
+    format!(
+        "CREATE TABLE {table}_owner (id integer PRIMARY KEY);
+         INSERT INTO {table}_owner VALUES (1);
+         CREATE TABLE {table} (id integer PRIMARY KEY, owner_id integer NOT NULL, a integer NOT NULL, b integer NOT NULL);
+         INSERT INTO {table} VALUES (1, 1, 1, 1), (2, 1, 5, 5);"
+    )
+}
+
+#[test]
+fn an_update_returning_the_modified_table_applies_to_a_row_changed_by_a_concurrent_transaction() {
+    let table = "concurrent_updated_item";
+    let (sql, result) = run_after_concurrent_update(
+        &concurrent_item_setup(table),
+        &format!("UPDATE {table} SET a = a + 1 WHERE id = 1;"),
+        &concurrent_item_sdl(table, "@primary_key(columns: [\"id\"])"),
+        "mutation { update_item(where: {id: {_eq: 1}}, _inc: {b: 10}) { affected_rows returning { a b owner { items(order_by: {id: asc}) { id a b } items_aggregate { aggregate { count sum { a b } } } } } } }",
+    );
+    assert!(sql.contains("\"w0\""));
+    assert_eq!(
+        result,
+        json!({"affected_rows": 1, "returning": [{"a": 2, "b": 11, "owner": {
+            "items": [{"id": 1, "a": 2, "b": 11}, {"id": 2, "a": 5, "b": 5}],
+            "items_aggregate": {"aggregate": {"count": 2, "sum": {"a": 7, "b": 16}}}
+        }}]})
+    );
+}
+
+#[test]
+fn a_delete_returning_the_modified_table_omits_a_row_changed_by_a_concurrent_transaction() {
+    let table = "concurrent_deleted_item";
+    let (sql, result) = run_after_concurrent_update(
+        &concurrent_item_setup(table),
+        &format!("UPDATE {table} SET a = a + 1 WHERE id = 1;"),
+        &concurrent_item_sdl(table, "@primary_key(columns: [\"id\"])"),
+        "mutation { delete_item(where: {id: {_eq: 1}}) { affected_rows returning { a owner { items(order_by: {id: asc}) { id a } items_aggregate { aggregate { count } } } } } }",
+    );
+    assert!(sql.contains("\"w0\""));
+    assert_eq!(
+        result,
+        json!({"affected_rows": 1, "returning": [{"a": 2, "owner": {
+            "items": [{"id": 2, "a": 5}],
+            "items_aggregate": {"aggregate": {"count": 1}}
+        }}]})
+    );
+}
+
+#[test]
+fn returning_the_modified_table_joins_the_snapshot_by_primary_key_columns() {
+    let compile = |key: &str, mutation: &str| {
+        let schema = Schema::from_sdl(&format!(
+            r#"type pair @table(name: "pair") {key} {{ a: Int! b: Int! v: Int! same: [pair!]! @relation(columns: ["a"], references: ["a"]) }} type Query {{ pair: [pair!]! @list }}"#
+        ))
+        .unwrap();
+        schema
+            .compile(mutation, &json!({}), None, &Session::new("admin"))
+            .unwrap()[0]
+            .compiled
+            .sql
+            .clone()
+    };
+    let update =
+        "mutation { update_pair(where: {v: {_eq: 1}}, _set: {v: 2}) { returning { same { v } } } }";
+    let delete = "mutation { delete_pair(where: {v: {_eq: 1}}) { returning { same { v } } } }";
+    let composite = "@primary_key(columns: [\"a\", \"b\"])";
+    let join = r#""public"."pair" AS "b0" WHERE "s"."a" = "b0"."a" AND "s"."b" = "b0"."b" AND ("#;
+    assert!(compile(composite, update).contains(&format!("FROM {join}")));
+    assert!(compile(composite, delete).contains(&format!("USING {join}")));
+    assert!(compile(composite, delete).contains(r#""b0"."ctid" AS "k0""#));
+    assert!(
+        compile("", update)
+            .contains(r#"FROM "public"."pair" AS "b0" WHERE "s"."ctid" = "b0"."ctid" AND ("#)
+    );
+    let unkeyed_delete = compile("", delete);
+    assert!(!unkeyed_delete.contains(r#""b0""#));
+    assert!(unkeyed_delete.contains(r#""s"."ctid" AS "k0""#));
 }

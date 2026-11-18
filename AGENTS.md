@@ -241,7 +241,7 @@ conjunct. The plan's assignments must map to permitted columns or operation pres
 user-provided columns cannot override presets. `ConflictPlan` uses the update
 permission independently, including its condition, presets and aborting check.
 Conflict updates with primary-key presets are rejected because the returning snapshot
-requires stable conflict keys. Ordinary updates use tuple identifiers and can change keys.
+requires stable conflict keys. Ordinary updates can change keys.
 
 `applyWriteCondition`, `applyWriteCheck` and `applyWritePermission` are in
 `audit/Audit/Writes.lean` under `--wfail`: ten mutations, all killed. The first two
@@ -256,8 +256,10 @@ scope and copied theorem statements.
 Each mutation emits one statement: a data-modifying `m0` CTE, a changed-row `r0` CTE,
 a post-operation `w0` CTE and the JSON result. `RETURNING` emits a composite row and
 an original tuple identifier, keeping internal check columns out of the row data.
-Updates join the snapshot row to retain its original `ctid`; deletes return that
-identifier directly. Returning relationships of the modified target use `w0`, so cycles
+When `returning` reads the modified table again, updates and deletes join the
+snapshot row by the declared primary-key columns (`ctid` for an update of a table
+without one) to return its original `ctid`; other deletes return that identifier
+directly. Returning relationships of the modified target use `w0`, so cycles
 and aggregates observe changed rows. Insert conflicts exclude existing snapshot rows
 by their declared primary key. Aliases are fixed by depth and position. Query emission
 keeps its existing SQL snapshots byte-for-byte.
@@ -277,14 +279,14 @@ semantics theorems.
 The helper functions outside strict auditing are grouped by their use:
 
 - `sourceLex`, `tokenCommas`, `writeCheckToks`, `assignmentToks`, `conflictToks`,
-  `conflictCheckToks`, `returningToks` and `writeOutputToks` lower statements. The
-  emission survey and committed SQL and database-result fixtures cover their uses.
+  `conflictCheckToks`, `snapshotJoinLex`, `returningToks` and `writeOutputToks` lower
+  statements. The emission survey and committed SQL and database-result fixtures cover their uses.
 - `snapshotPredicate`, `snapshotPredicates`, `snapshotScan`, `snapshotNode` and
   `snapshotNodes` redirect returning references. Cyclic relationship fixtures exercise
   insert, update, delete and upsert.
 - `findWritePermission`, `writeVisible`, `resolveAssignments`, `bindPresets`,
   `writePolicy`, `resolveReturning`, `resolveWriteOutputs`, `keyCondition`,
-  `resolveWriteRows`, `resolveConflict` and `runPrimaryKey` resolve inputs. Their uses
+  `keyColumns`, `resolveWriteRows`, `resolveConflict` and `runPrimaryKey` resolve inputs. Their uses
   are exercised by the write-resolution survey and the differential/rejection tests.
 - `writeColumns`, `userWritesAllowed`, `writeColumnAllowed`, `writePermitted`,
   `returningPermitted`, `conflictAsWrite`, `userInputPermitted`, `writeOutputsPermitted`
