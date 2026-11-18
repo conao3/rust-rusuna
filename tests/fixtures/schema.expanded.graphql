@@ -1,4 +1,4 @@
-schema { query: Query }
+schema { query: Query mutation: Mutation }
 
 input Boolean_comparison_exp {
   _eq: Boolean
@@ -62,6 +62,33 @@ input Int_comparison_exp {
   _is_null: Boolean
 }
 
+type Mutation {
+  insert_article(objects: [article_insert_input!]!, on_conflict: article_on_conflict): article_mutation_response
+  insert_article_one(object: article_insert_input!, on_conflict: article_on_conflict): article
+  update_article(where: article_bool_exp!, _set: article_set_input, _inc: article_inc_input): article_mutation_response
+  delete_article(where: article_bool_exp!): article_mutation_response
+  update_article_by_pk(pk_columns: article_pk_columns_input!, _set: article_set_input, _inc: article_inc_input): article
+  delete_article_by_pk(id: Int!): article
+  insert_author(objects: [author_insert_input!]!, on_conflict: author_on_conflict): author_mutation_response
+  insert_author_one(object: author_insert_input!, on_conflict: author_on_conflict): author
+  update_author(where: author_bool_exp!, _set: author_set_input, _inc: author_inc_input): author_mutation_response
+  delete_author(where: author_bool_exp!): author_mutation_response
+  update_author_by_pk(pk_columns: author_pk_columns_input!, _set: author_set_input, _inc: author_inc_input): author
+  delete_author_by_pk(id: Int!): author
+  insert_comment(objects: [comment_insert_input!]!, on_conflict: comment_on_conflict): comment_mutation_response
+  insert_comment_one(object: comment_insert_input!, on_conflict: comment_on_conflict): comment
+  update_comment(where: comment_bool_exp!, _set: comment_set_input, _inc: comment_inc_input): comment_mutation_response
+  delete_comment(where: comment_bool_exp!): comment_mutation_response
+  update_comment_by_pk(pk_columns: comment_pk_columns_input!, _set: comment_set_input, _inc: comment_inc_input): comment
+  delete_comment_by_pk(id: Int!): comment
+  insert_revision(objects: [revision_insert_input!]!, on_conflict: revision_on_conflict): revision_mutation_response
+  insert_revision_one(object: revision_insert_input!, on_conflict: revision_on_conflict): revision
+  update_revision(where: revision_bool_exp!, _set: revision_set_input, _inc: revision_inc_input): revision_mutation_response
+  delete_revision(where: revision_bool_exp!): revision_mutation_response
+  update_revision_by_pk(pk_columns: revision_pk_columns_input!, _set: revision_set_input, _inc: revision_inc_input): revision
+  delete_revision_by_pk(article_id: Int!, author_id: Int!, note: String!): revision
+}
+
 type Query {
   author(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): [author!]!
   author_aggregate(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): author_aggregate!
@@ -73,6 +100,10 @@ type Query {
   revision_aggregate(where: revision_bool_exp, order_by: [revision_order_by!], limit: Int, offset: Int): revision_aggregate!
   people(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): [author!]!
   people_stats(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): author_aggregate!
+  article_by_pk(id: Int!): article
+  author_by_pk(id: Int!): author
+  comment_by_pk(id: Int!): comment
+  revision_by_pk(article_id: Int!, author_id: Int!, note: String!): revision
 }
 
 input String_comparison_exp {
@@ -134,6 +165,20 @@ input article_bool_exp {
   revisions: revision_bool_exp
 }
 
+enum article_constraint { article_pkey }
+
+input article_inc_input {
+  id: Int
+  author_id: Int
+}
+
+input article_insert_input {
+  id: Int
+  author_id: Int
+  title: String
+  published_at: DateTime
+}
+
 type article_max_fields {
   id: Int
   author_id: Int
@@ -148,6 +193,13 @@ type article_min_fields {
   published_at: DateTime
 }
 
+type article_mutation_response {
+  affected_rows: Int!
+  returning: [article!]!
+}
+
+input article_on_conflict { constraint: article_constraint! update_columns: [article_update_column!]! where: article_bool_exp }
+
 input article_order_by {
   id: order_by
   author_id: order_by
@@ -155,10 +207,21 @@ input article_order_by {
   published_at: order_by
 }
 
+input article_pk_columns_input { id: Int! }
+
+input article_set_input {
+  id: Int
+  author_id: Int
+  title: String
+  published_at: DateTime
+}
+
 type article_sum_fields {
   id: Int
   author_id: Int
 }
+
+enum article_update_column { id author_id title published_at }
 
 type author {
   id: Int!
@@ -198,6 +261,20 @@ input author_bool_exp {
   articles: article_bool_exp
 }
 
+enum author_constraint { author_pkey }
+
+input author_inc_input {
+  id: Int
+  rating: Float
+}
+
+input author_insert_input {
+  id: Int
+  name: String
+  nickname: String
+  rating: Float
+}
+
 type author_max_fields {
   id: Int
   name: String
@@ -212,6 +289,13 @@ type author_min_fields {
   rating: Float
 }
 
+type author_mutation_response {
+  affected_rows: Int!
+  returning: [author!]!
+}
+
+input author_on_conflict { constraint: author_constraint! update_columns: [author_update_column!]! where: author_bool_exp }
+
 input author_order_by {
   id: order_by
   name: order_by
@@ -219,10 +303,21 @@ input author_order_by {
   rating: order_by
 }
 
+input author_pk_columns_input { id: Int! }
+
+input author_set_input {
+  id: Int
+  name: String
+  nickname: String
+  rating: Float
+}
+
 type author_sum_fields {
   id: Int
   rating: Float
 }
+
+enum author_update_column { id name nickname rating }
 
 type comment {
   id: Int!
@@ -259,6 +354,19 @@ input comment_bool_exp {
   article: article_bool_exp
 }
 
+enum comment_constraint { comment_pkey }
+
+input comment_inc_input {
+  id: Int
+  article_id: Int
+}
+
+input comment_insert_input {
+  id: Int
+  article_id: Int
+  body: String
+}
+
 type comment_max_fields {
   id: Int
   article_id: Int
@@ -271,16 +379,33 @@ type comment_min_fields {
   body: String
 }
 
+type comment_mutation_response {
+  affected_rows: Int!
+  returning: [comment!]!
+}
+
+input comment_on_conflict { constraint: comment_constraint! update_columns: [comment_update_column!]! where: comment_bool_exp }
+
 input comment_order_by {
   id: order_by
   article_id: order_by
   body: order_by
 }
 
+input comment_pk_columns_input { id: Int! }
+
+input comment_set_input {
+  id: Int
+  article_id: Int
+  body: String
+}
+
 type comment_sum_fields {
   id: Int
   article_id: Int
 }
+
+enum comment_update_column { id article_id body }
 
 enum order_by { asc asc_nulls_first asc_nulls_last desc desc_nulls_first desc_nulls_last }
 
@@ -319,6 +444,19 @@ input revision_bool_exp {
   article: article_bool_exp
 }
 
+enum revision_constraint { revision_pkey }
+
+input revision_inc_input {
+  article_id: Int
+  author_id: Int
+}
+
+input revision_insert_input {
+  article_id: Int
+  author_id: Int
+  note: String
+}
+
 type revision_max_fields {
   article_id: Int
   author_id: Int
@@ -331,13 +469,30 @@ type revision_min_fields {
   note: String
 }
 
+type revision_mutation_response {
+  affected_rows: Int!
+  returning: [revision!]!
+}
+
+input revision_on_conflict { constraint: revision_constraint! update_columns: [revision_update_column!]! where: revision_bool_exp }
+
 input revision_order_by {
   article_id: order_by
   author_id: order_by
   note: order_by
 }
 
+input revision_pk_columns_input { article_id: Int! author_id: Int! note: String! }
+
+input revision_set_input {
+  article_id: Int
+  author_id: Int
+  note: String
+}
+
 type revision_sum_fields {
   article_id: Int
   author_id: Int
 }
+
+enum revision_update_column { article_id author_id note }

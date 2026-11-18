@@ -149,3 +149,33 @@ fn permissions_accept_session_json_and_require_the_selected_role() {
     let value: serde_json::Value = serde_json::from_slice(&compiled.stdout).unwrap();
     assert_eq!(value["Fields"][0]["Params"], serde_json::json!([3]));
 }
+
+#[test]
+fn mutations_compile_in_root_field_order() {
+    let output = run(&[
+        "query",
+        "compile-sql",
+        "--role",
+        "admin",
+        "--schema",
+        SDL,
+        "--query",
+        "mutation { first: insert_A_one(object: {id: 1}) { id } second: delete_A(where: {id: {_eq: 1}}) { affected_rows } }",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["Fields"][0]["ResponseKey"], "first");
+    assert_eq!(value["Fields"][1]["ResponseKey"], "second");
+    assert!(
+        value["Fields"][0]["Sql"]
+            .as_str()
+            .unwrap()
+            .contains("INSERT INTO")
+    );
+    assert!(
+        value["Fields"][1]["Sql"]
+            .as_str()
+            .unwrap()
+            .contains("DELETE FROM")
+    );
+}

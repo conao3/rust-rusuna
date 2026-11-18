@@ -102,7 +102,7 @@ broken versions. `lake -d audit build --wfail` fails when no broken version of a
 is refuted, when a broken version satisfies every theorem but changes the output (a
 hole), or when no input satisfies a theorem's hypotheses.
 
-The audit covers twenty-one functions: 144 broken versions, 93 refuted, 18 with the same output
+The audit covers twenty-four functions: 154 broken versions, 103 refuted, 18 with the same output
 on every input tried, 33 that do not typecheck, no hole, no untested version and no timeout.
 
 - Properties: `quoteChars` and `quoteStringChars` (`unquote_quote`, `unquote_quoteChars`: reading a quoted name
@@ -182,8 +182,8 @@ aggregate selection contexts; their uses are covered by the resolution survey an
 rejection tests. Value traversal, erasure and declared-reference helpers state and
 support the preservation theorems; they are not independent acceptance checks.
 
-The reported properties are nine independent properties, stated by fifteen boundary
-theorems; sixteen boundary conditions restated next to the implementation; and zero variable-free
+The reported properties are twelve independent properties, stated by twenty boundary
+theorems; nineteen boundary conditions restated next to the implementation; and zero variable-free
 checks. `PROOFS.md` lists every counted statement verbatim. Intermediate value,
 declaration and permission traversal lemmas support those properties and are not counted
 again. The permission guarantees are each non-admin scan's role condition and the
@@ -226,6 +226,77 @@ When a proof is written, check it in a file of its own before building: wrap the
 definitions in `namespace model` and run `lean` on the file. A build that fails in Lean
 leaves `lean/` behind the source; delete `lean/LeanRustGen` and `.leanfran` and build
 again.
+
+## Write plans
+
+`MutationArguments` and `OnConflict` carry typed input data to `runWrite`. The
+`WriteCatalog` holds primary keys and operation-specific permissions independently of
+the read schema. SDL declares `@primary_key`, `@insert_permission`,
+`@update_permission` and `@delete_permission`. The parser uses the expanded mutation
+input types, and Lean resolves columns, presets, sessions, filters and returning nodes.
+
+`resolveWrite` validates a `WritePlan`. Its check is `WriteCheck.abort` for permitted
+inserts and updates. Updates and deletes have the operation's row condition as a
+conjunct. The plan's assignments must map to permitted columns or operation presets;
+user-provided columns cannot override presets. `ConflictPlan` uses the update
+permission independently, including its condition, presets and aborting check.
+Conflict updates with primary-key presets are rejected because the returning snapshot
+requires stable conflict keys. Ordinary updates use tuple identifiers and can change keys.
+
+`applyWriteCondition`, `applyWriteCheck` and `applyWritePermission` are in
+`audit/Audit/Writes.lean` under `--wfail`: ten mutations, all killed. The first two
+exact equalities and the insertion function's two projections make omissions fail even
+when the final validator could otherwise turn the corrupted plan into an error.
+`resolveWrite_permissions`, `resolveWrite_user_columns`, `resolveWrite_declared`,
+`resolveWrite_tables` and `resolveWrite_returning_conditions` are the counted boundaries.
+Table-permission existence follows from the same operation-permission witness and is
+not an additional independent property. `PROOFS.md` states the
+scope and copied theorem statements.
+
+Each mutation emits one statement: a data-modifying `m0` CTE, a changed-row `r0` CTE,
+a post-operation `w0` CTE and the JSON result. `RETURNING` emits a composite row and
+an original tuple identifier, keeping internal check columns out of the row data.
+Updates join the snapshot row to retain its original `ctid`; deletes return that
+identifier directly. Returning relationships of the modified target use `w0`, so cycles
+and aggregates observe changed rows. Insert conflicts exclude existing snapshot rows
+by their declared primary key. Aliases are fixed by depth and position. Query emission
+keeps its existing SQL snapshots byte-for-byte.
+
+The top-level returning CTE has column permissions and no read row condition.
+`resolveReturning` and `writeOutputsPermitted` check relationships and their predicate
+scans with the existing `scanPermitted` and `columnPermitted` functions. Source rewriting
+for the post-operation snapshot happens during SQL emission; its database semantics
+are covered by differential tests rather than the scan-condition theorem.
+
+The write survey targets `writeBodyToks`, `emitWrite`, `resolveWriteRaw`, `resolveWrite`
+and `runWrite`. `emitWrite_slots` specializes placeholder numbering; `resolveWrite_secure`
+checks the final authorization validators; `runWrite_accepts` compares success with
+resolution. These are supporting statements rather than independent acceptance or SQL
+semantics theorems.
+
+The helper functions outside strict auditing are grouped by their use:
+
+- `sourceLex`, `tokenCommas`, `writeCheckToks`, `assignmentToks`, `conflictToks`,
+  `conflictCheckToks`, `returningToks` and `writeOutputToks` lower statements. The
+  emission survey and committed SQL and database-result fixtures cover their uses.
+- `snapshotPredicate`, `snapshotPredicates`, `snapshotScan`, `snapshotNode` and
+  `snapshotNodes` redirect returning references. Cyclic relationship fixtures exercise
+  insert, update, delete and upsert.
+- `findWritePermission`, `writeVisible`, `resolveAssignments`, `bindPresets`,
+  `writePolicy`, `resolveReturning`, `resolveWriteOutputs`, `keyCondition`,
+  `resolveWriteRows`, `resolveConflict` and `runPrimaryKey` resolve inputs. Their uses
+  are exercised by the write-resolution survey and the differential/rejection tests.
+- `writeColumns`, `userWritesAllowed`, `writeColumnAllowed`, `writePermitted`,
+  `returningPermitted`, `conflictAsWrite`, `userInputPermitted`, `writeOutputsPermitted`
+  and `conflictPermitted` and `writeDeclared` define the invariants used by the permission proofs. They are
+  not independent specifications of SQL execution or selection acceptance.
+
+The public error recognizer checks SQLSTATE `22P02` and the permission-check marker.
+Callers execute root statements in order inside one transaction and roll back on failure.
+Mutation fixtures store the actual Hasura v2.51.6 HTTP response, role, session, query
+and table state. The PostgreSQL tests reset data and identity sequences per fixture;
+checks run under both custom and generic plans, and single-statement permission failures
+are also tested in autocommit mode without a caller rollback.
 
 ## Tests
 

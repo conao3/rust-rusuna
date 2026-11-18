@@ -1,0 +1,74 @@
+{
+  "version": "v2.51.6",
+  "query": "mutation { insert_mutation_item_one(object: {id: 1, score: 5}, on_conflict: {constraint: mutation_item_pkey, update_columns: [score]}) { id owner { name items(order_by: {id: asc}) { id score } items_aggregate { aggregate { count sum { score } } } } } }",
+  "role": "admin",
+  "session": {
+    "user_id": 1
+  },
+  "response": {
+    "data": {
+      "insert_mutation_item_one": {
+        "id": 1,
+        "owner": {
+          "name": "Ada",
+          "items": [
+            {
+              "id": 1,
+              "score": 5
+            },
+            {
+              "id": 3,
+              "score": 20
+            }
+          ],
+          "items_aggregate": {
+            "aggregate": {
+              "count": 2,
+              "sum": {
+                "score": 25
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "tables": {
+    "mutation_author": [
+      {
+        "id": 1,
+        "name": "Ada"
+      },
+      {
+        "id": 2,
+        "name": "Bea"
+      }
+    ],
+    "mutation_item": [
+      {
+        "id": 1,
+        "owner_id": 1,
+        "title": "first",
+        "score": 5,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 2,
+        "owner_id": 2,
+        "title": "second",
+        "score": 2,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 3,
+        "owner_id": 1,
+        "title": "hidden",
+        "score": 20,
+        "note": null,
+        "secret": "private"
+      }
+    ]
+  }
+}

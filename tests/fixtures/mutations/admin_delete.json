@@ -1,0 +1,51 @@
+{
+  "version": "v2.51.6",
+  "query": "mutation { delete_mutation_item(where: {score: {_gte: 2}}) { affected_rows returning { id owner { name } } } }",
+  "role": "admin",
+  "session": {
+    "user_id": 1
+  },
+  "response": {
+    "data": {
+      "delete_mutation_item": {
+        "affected_rows": 2,
+        "returning": [
+          {
+            "id": 2,
+            "owner": {
+              "name": "Bea"
+            }
+          },
+          {
+            "id": 3,
+            "owner": {
+              "name": "Ada"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "tables": {
+    "mutation_author": [
+      {
+        "id": 1,
+        "name": "Ada"
+      },
+      {
+        "id": 2,
+        "name": "Bea"
+      }
+    ],
+    "mutation_item": [
+      {
+        "id": 1,
+        "owner_id": 1,
+        "title": "first",
+        "score": 1,
+        "note": null,
+        "secret": "private"
+      }
+    ]
+  }
+}

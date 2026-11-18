@@ -1,0 +1,106 @@
+{
+  "version": "v2.51.6",
+  "query": "mutation { update_mutation_item(where: {}, _set: {title: \"changed\"}, _inc: {score: 1}) { affected_rows returning { id title score note owner { name items_aggregate { aggregate { count sum { score } } } } } } }",
+  "role": "admin",
+  "session": {
+    "user_id": 1
+  },
+  "response": {
+    "data": {
+      "update_mutation_item": {
+        "affected_rows": 3,
+        "returning": [
+          {
+            "id": 1,
+            "title": "changed",
+            "score": 2,
+            "note": null,
+            "owner": {
+              "name": "Ada",
+              "items_aggregate": {
+                "aggregate": {
+                  "count": 2,
+                  "sum": {
+                    "score": 23
+                  }
+                }
+              }
+            }
+          },
+          {
+            "id": 2,
+            "title": "changed",
+            "score": 3,
+            "note": null,
+            "owner": {
+              "name": "Bea",
+              "items_aggregate": {
+                "aggregate": {
+                  "count": 1,
+                  "sum": {
+                    "score": 3
+                  }
+                }
+              }
+            }
+          },
+          {
+            "id": 3,
+            "title": "changed",
+            "score": 21,
+            "note": null,
+            "owner": {
+              "name": "Ada",
+              "items_aggregate": {
+                "aggregate": {
+                  "count": 2,
+                  "sum": {
+                    "score": 23
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "tables": {
+    "mutation_author": [
+      {
+        "id": 1,
+        "name": "Ada"
+      },
+      {
+        "id": 2,
+        "name": "Bea"
+      }
+    ],
+    "mutation_item": [
+      {
+        "id": 1,
+        "owner_id": 1,
+        "title": "changed",
+        "score": 2,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 2,
+        "owner_id": 2,
+        "title": "changed",
+        "score": 3,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 3,
+        "owner_id": 1,
+        "title": "changed",
+        "score": 21,
+        "note": null,
+        "secret": "private"
+      }
+    ]
+  }
+}

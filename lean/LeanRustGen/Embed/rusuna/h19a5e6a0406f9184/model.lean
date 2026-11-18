@@ -289,6 +289,9 @@ def paramToks : List Value → List Tok
   | [] => []
   | v :: vs => .param v :: vs.flatMap (fun x => [.lex (.raw ","), .param x])
 
+def sourceLex (schema table : String) : Lex :=
+  if schema == "" then .ident table else .col schema table
+
 mutual
 def expressionToks (depth : Nat) (qualifier : String) : Predicate → List Tok
   | .compare field op v => lift [.col qualifier field, .raw (comparisonText op)] ++ [.param v]
@@ -302,7 +305,7 @@ def expressionToks (depth : Nat) (qualifier : String) : Predicate → List Tok
   | .not e => lift [.raw "NOT ("] ++ expressionToks depth qualifier e ++ lift [.raw ")"]
   | .exists (.mk _ schema table e _ _ _) parent child =>
     let alias := "e" ++ toString depth
-    lift ([.raw "EXISTS (SELECT 1 FROM", .col schema table, .raw "AS", .ident alias,
+    lift ([.raw "EXISTS (SELECT 1 FROM", sourceLex schema table, .raw "AS", .ident alias,
       .raw "WHERE true"] ++ (parent.zip child).flatMap (fun pair =>
         [.raw "AND", .col alias pair.2, .raw "=", .col qualifier pair.1]) ++ [.raw "AND ("])
       ++ expressionToks (depth + 1) alias e ++ lift [.raw "))"]
@@ -417,7 +420,7 @@ def offsetLex : Option Nat → List Lex
   | some n => [.raw "OFFSET", .nat n]
 
 def scanToks (scan : Scan) (link : List Lex) : List Tok :=
-  lift ([.raw "SELECT \"s\".* FROM", .col scan.schema scan.table, .raw "AS \"s\" WHERE"] ++ link)
+  lift ([.raw "SELECT \"s\".* FROM", sourceLex scan.schema scan.table, .raw "AS \"s\" WHERE"] ++ link)
     ++ lift [.raw "AND ("] ++ expressionToks 0 "s" scan.conds ++ lift [.raw ")"]
     ++ lift (orderLex "s" scan.order ++ limitLex scan.limit ++ offsetLex scan.offset)
 
@@ -1947,5 +1950,531 @@ theorem resolve_tables (schema : Schema) (session : Session) (root : Selection)
   | some permission =>
     have names := List.find?_some found
     exact ⟨permission, List.mem_of_find?_eq_some found, by simpa [Bool.and_eq_true] using names⟩
+inductive WriteKind where
+  | insert | update | delete
+  deriving DecidableEq, Repr
+
+structure WritePermission where
+  target : String
+  role : String
+  kind : WriteKind
+  columns : List String
+  conds : Expression String Operand
+  check : Expression String Operand
+  presets : List (String × Operand)
+  deriving Repr
+
+structure PrimaryKey where
+  target : String
+  columns : List String
+  constraint : String
+  deriving DecidableEq, Repr
+
+structure WriteCatalog where
+  permissions : List WritePermission
+  keys : List PrimaryKey
+  deriving Repr
+
+structure ConflictInput where
+  constraint : String
+  columns : List String
+  conds : Option (Expression String Value)
+  deriving Repr
+
+structure WriteInput where
+  target : String
+  conflict : Option ConflictInput
+  kind : WriteKind
+  single : Bool
+  byKey : Bool
+  keys : List (String × Value)
+  objects : List (List (String × Value))
+  sets : List (String × Value)
+  increments : List (String × Value)
+  conds : Option (Expression String Value)
+  children : List Selection
+  deriving Repr
+
+structure Assignment where
+  field : String
+  column : String
+  value : Value
+  increment : Bool
+  excluded : Bool
+  deriving DecidableEq, Repr
+
+inductive WriteCheck where
+  | unchecked
+  | abort (condition : Predicate)
+  deriving Repr
+
+inductive WriteOutput where
+  | count (alias : String)
+  | rows (alias : String) (children : List Node)
+  deriving Repr
+
+structure ConflictPlan where
+  constraint : String
+  keys : List String
+  assignments : List Assignment
+  conds : Predicate
+  check : WriteCheck
+  deriving Repr
+
+structure WritePlan where
+  target : String
+  schema : String
+  table : String
+  defaultColumn : String
+  conflict : Option ConflictPlan
+  kind : WriteKind
+  single : Bool
+  objects : List (List Assignment)
+  assignments : List Assignment
+  conds : Predicate
+  check : WriteCheck
+  outputs : List WriteOutput
+  deriving Repr
+
+def findWritePermission (catalog : WriteCatalog) (role target : String) (kind : WriteKind) : Option WritePermission :=
+  catalog.permissions.find? fun p => p.role == role && p.target == target && p.kind == kind
+
+def writeVisible (catalog : WriteCatalog) (role target : String) (kind : WriteKind) : Bool :=
+  role == "admin" || (findWritePermission catalog role target kind).isSome
+
+def writeColumns (plan : WritePlan) : List Assignment := plan.objects.flatten ++ plan.assignments
+
+def applyWriteCondition (kind : WriteKind) (user condition : Predicate) : Predicate :=
+  if kind = .insert then user else .and [user, condition]
+
+def applyWriteCheck (kind : WriteKind) (check : Predicate) : WriteCheck :=
+  if kind = .delete then .unchecked else .abort check
+
+def applyWritePermission (plan : WritePlan) (condition check : Predicate) : WritePlan :=
+  { plan with conds := applyWriteCondition plan.kind plan.conds condition
+              check := applyWriteCheck plan.kind check }
+
+theorem applyWriteCondition_exact (kind : WriteKind) (user condition : Predicate) :
+    applyWriteCondition kind user condition = (if kind = .insert then user else .and [user, condition]) := rfl
+
+theorem applyWriteCheck_exact (kind : WriteKind) (check : Predicate) :
+    applyWriteCheck kind check = (if kind = .delete then .unchecked else .abort check) := rfl
+
+theorem applyWritePermission_conditions (plan : WritePlan) (condition check : Predicate) :
+    (applyWritePermission plan condition check).conds = (if plan.kind = .insert then plan.conds else .and [plan.conds, condition]) ∧
+    (applyWritePermission plan condition check).check = (if plan.kind = .delete then .unchecked else .abort check) := by
+  constructor <;> rfl
+
+def resolveAssignments (table : Table) (increment : Bool) : List (String × Value) → Except Error (List Assignment)
+  | [] => .ok []
+  | (field, value) :: rest => do
+    let column ← match findColumn table field with
+      | none => .error (.unknownField table.name field)
+      | some column => .ok column
+    if value != .null && !scalarValid value then .error .invalidFilter else
+    return ⟨field, column, value, increment, false⟩ :: (← resolveAssignments table increment rest)
+
+def bindPresets (session : Session) : List (String × Operand) → Except Error (List (String × Value))
+  | [] => .ok []
+  | (field, value) :: rest => do return (field, ← bindOperand session value) :: (← bindPresets session rest)
+
+def userWritesAllowed (permission : WritePermission) (values : List (String × Value)) : Bool :=
+  values.all fun v => permission.columns.contains v.1 && !(permission.presets.map (·.1)).contains v.1
+
+def writeColumnAllowed (schema : Schema) (permission : WritePermission) (assignment : Assignment) : Bool :=
+  match findTable schema permission.target with
+  | none => false
+  | some table => findColumn table assignment.field == some assignment.column &&
+    (permission.columns.contains assignment.field || (permission.presets.map (·.1)).contains assignment.field)
+
+def writePolicy (schema : Schema) (session : Session) (permission : WritePermission) : Except Error (Predicate × Predicate) := do
+  let table ← match findTable schema permission.target with
+    | none => .error (.unknownType permission.target)
+    | some table => .ok table
+  let condition ← resolveExpression schema table 0 (← bindExpression session 0 permission.conds)
+  let check ← resolveExpression schema table 0 (← bindExpression session 0 permission.check)
+  return (condition, check)
+
+def writePermitted (schema : Schema) (catalog : WriteCatalog) (session : Session) (plan : WritePlan) : Bool :=
+  session.role == "admin" || match findWritePermission catalog session.role plan.target plan.kind with
+    | none => false
+    | some permission => match writePolicy schema session permission with
+      | .error _ => false
+      | .ok (condition, check) =>
+        (plan.kind == .insert || hasConjunct condition plan.conds) &&
+        (plan.kind == .delete || match plan.check with
+          | .unchecked => false
+          | .abort actual => predicateEq actual check) &&
+        (writeColumns plan).all (writeColumnAllowed schema permission)
+
+def returningPermitted (schema : Schema) (session : Session) (target : String) (nodes : List Node) : Bool :=
+  ((nodesScans nodes).flatMap scanTree).all (scanPermitted schema session) &&
+    (nodesReads target nodes).all (fun c => columnPermitted schema session c.1 c.2)
+
+def resolveReturning (schema : Schema) (session : Session) (target : String) (children : List Selection) : Except Error (List Node) := do
+  let visible := visibleSchema schema session.role
+  let table ← match findTable visible target with
+    | none => .error (.unknownType target)
+    | some table => .ok table
+  if !selectionValid (children.map (·.alias)) then .error (.invalidSelection target) else
+  let nodes ← resolveNodes visible table 0 .row [] children
+  let nodes ← if session.role == "admin" then .ok nodes else guardNodes schema session nodes
+  if returningPermitted schema session target nodes then .ok nodes else .error (.invalidPermission target)
+
+def resolveWriteOutputs (schema : Schema) (session : Session) (target : String) : List Selection → Except Error (List WriteOutput)
+  | [] => .ok []
+  | selection :: rest => do
+    if !plain selection then .error (.invalidSelection target) else
+    let output ← if selection.name == "affected_rows" && selection.children.isEmpty then
+        .ok (.count selection.alias)
+      else if selection.name == "returning" then
+        (resolveReturning schema session target selection.children).map (.rows selection.alias)
+      else .error (.unknownField target selection.name)
+    return output :: (← resolveWriteOutputs schema session target rest)
+
+def keyCondition (catalog : WriteCatalog) (target : String) (values : List (String × Value)) : Except Error (Expression String Value) := do
+  let key ← match catalog.keys.find? (·.target == target) with
+    | none => .error (.unknownRoot target)
+    | some key => .ok key
+  if key.columns.isEmpty || !distinct (values.map (·.1)) || values.length != key.columns.length ||
+      !key.columns.all (fun c => values.any (fun v => v.1 == c && v.2 != .null)) then .error .invalidFilter
+  else return .and (values.map fun v => .compare v.1 .eq v.2)
+
+def resolveWriteRows (table : Table) (presets : List (String × Value)) : List (List (String × Value)) → Except Error (List (List Assignment))
+  | [] => .ok []
+  | row :: rest => do
+    if !distinct (row.map (·.1)) then .error .invalidFilter else
+    return (← resolveAssignments table false (row ++ presets)) :: (← resolveWriteRows table presets rest)
+
+def conflictAsWrite (plan : WritePlan) (conflict : ConflictPlan) : WritePlan :=
+  { plan with kind := .update, conflict := none, objects := [], assignments := conflict.assignments,
+              conds := conflict.conds, check := conflict.check }
+
+def resolveConflict (schema : Schema) (catalog : WriteCatalog) (session : Session) (table : Table)
+    (input : ConflictInput) : Except Error ConflictPlan := do
+  let key ← match catalog.keys.find? (·.target == table.name) with
+    | none => .error (.unknownRoot table.name)
+    | some key => .ok key
+  if key.constraint != input.constraint || !distinct input.columns then .error .invalidFilter else
+  let keys := key.columns.filterMap (findColumn table)
+  let values := input.columns.map fun c => (c, Value.null)
+  let permission := if session.role == "admin" then none else findWritePermission catalog session.role table.name .update
+  if session.role != "admin" && permission.isNone then .error (.unknownRoot table.name) else
+  let presets ← match permission with
+    | none => .ok []
+    | some p =>
+      if !input.columns.isEmpty && p.presets.any (fun preset => key.columns.contains preset.1) then
+        .error (.invalidPermission "conflict updates cannot preset primary-key columns")
+      else if !userWritesAllowed p values then .error (.unknownField table.name "conflict column")
+      else bindPresets session p.presets
+  let assignments ← resolveAssignments table false values
+  let defaults ← resolveAssignments table false presets
+  let conds ← resolveFilter (visibleSchema schema session.role) table input.conds
+  if !(predicateReads table.name conds).all (fun c => columnPermitted schema session c.1 c.2) then .error (.invalidPermission table.name) else
+  let conds ← if session.role == "admin" then .ok conds else guardPredicate schema session conds
+  let assignments := if assignments.isEmpty then [] else assignments.map (fun a => { a with excluded := true }) ++ defaults
+  match permission with
+  | none => return ⟨key.constraint, keys, assignments, conds, .unchecked⟩
+  | some p => do
+    let (condition, check) ← writePolicy schema session p
+    return ⟨key.constraint, keys, assignments, applyWriteCondition .update conds condition, applyWriteCheck .update check⟩
+
+def resolveWriteRaw (schema : Schema) (catalog : WriteCatalog) (session : Session) (input : WriteInput) : Except Error WritePlan := do
+  if !writeVisible catalog session.role input.target input.kind then .error (.unknownRoot input.target) else
+  let table ← match findTable schema input.target with
+    | none => .error (.unknownType input.target)
+    | some table => .ok table
+  let permission := if session.role == "admin" then none else findWritePermission catalog session.role input.target input.kind
+  if (input.kind != .insert && (!input.objects.isEmpty || input.conflict.isSome)) ||
+      (input.kind != .update && !(input.sets ++ input.increments).isEmpty) ||
+      (input.kind == .insert && (input.byKey || input.conds.isSome || (input.single && input.objects.length != 1))) ||
+      (input.byKey && !input.single) || (input.single && input.kind != .insert && !input.byKey) || (!input.byKey && !input.keys.isEmpty) then .error .invalidFilter else
+  let supplied := input.objects.flatten ++ input.sets ++ input.increments
+  let presets ← match permission with
+    | none => .ok []
+    | some p => if !userWritesAllowed p supplied then .error (.unknownField input.target "write column") else bindPresets session p.presets
+  if !distinct ((input.sets ++ input.increments).map (·.1)) ||
+      input.objects.length > maxFields || supplied.length > maxFields then .error .invalidFilter else
+  let objects ← resolveWriteRows table presets input.objects
+  let assignments ← resolveAssignments table false (input.sets ++ (if input.kind == .update then presets else []))
+  let increments ← resolveAssignments table true input.increments
+  let conds ← if input.byKey then (keyCondition catalog input.target input.keys).map some else .ok input.conds
+  let conds ← resolveFilter (visibleSchema schema session.role) table conds
+  if !(predicateReads input.target conds).all (fun c => columnPermitted schema session c.1 c.2) then .error (.invalidPermission input.target) else
+  let conds ← if session.role == "admin" then .ok conds else guardPredicate schema session conds
+  if !selectionValid (input.children.map (·.alias)) then .error (.invalidSelection input.target) else
+  let outputs ← if input.single then (resolveReturning schema session input.target input.children).map fun ns => [.rows "" ns]
+    else resolveWriteOutputs schema session input.target input.children
+  let conflict ← match input.conflict with
+    | none => .ok none
+    | some conflict => (resolveConflict schema catalog session table conflict).map some
+  let plan : WritePlan := ⟨table.name, table.schema, table.table, (table.columns.headD ⟨"", ""⟩).column, conflict, input.kind, input.single,
+    objects, assignments ++ increments, conds, .unchecked, outputs⟩
+  match permission with
+  | none => .ok plan
+  | some permission => do
+    let (condition, check) ← writePolicy schema session permission
+    return applyWritePermission plan condition check
+
+def userInputPermitted (catalog : WriteCatalog) (session : Session) (input : WriteInput) : Bool :=
+  session.role == "admin" || match findWritePermission catalog session.role input.target input.kind with
+    | none => false
+    | some permission => userWritesAllowed permission (input.objects.flatten ++ input.sets ++ input.increments)
+
+def writeOutputsPermitted (schema : Schema) (session : Session) (plan : WritePlan) : Bool :=
+  plan.outputs.all fun output => match output with
+    | .count _ => true
+    | .rows _ children => returningPermitted schema session plan.target children
+
+def conflictPermitted (schema : Schema) (catalog : WriteCatalog) (session : Session) (plan : WritePlan) : Bool :=
+  plan.conflict.all fun conflict => writePermitted schema catalog session (conflictAsWrite plan conflict)
+
+def writeDeclared (schema : Schema) (plan : WritePlan) : Bool :=
+  schema.tables.any fun table => table.name == plan.target && table.schema == plan.schema && table.table == plan.table
+
+def resolveWrite (schema : Schema) (catalog : WriteCatalog) (session : Session) (input : WriteInput) : Except Error WritePlan := do
+  let plan ← resolveWriteRaw schema catalog session input
+  if writePermitted schema catalog session plan && userInputPermitted catalog session input &&
+      writeOutputsPermitted schema session plan && conflictPermitted schema catalog session plan &&
+      writeDeclared schema plan then .ok plan else .error (.invalidPermission input.target)
+
+theorem resolveWrite_validated (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan) :
+    writePermitted schema catalog session plan = true ∧ userInputPermitted catalog session input = true ∧
+      writeOutputsPermitted schema session plan = true := by
+  simp only [resolveWrite, bind, Except.bind] at h
+  repeat' first | split at h | cases h
+  all_goals simp_all [Bool.and_eq_true]
+
+theorem resolveWrite_conflict (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan) :
+    conflictPermitted schema catalog session plan = true := by
+  simp only [resolveWrite, bind, Except.bind] at h
+  repeat' first | split at h | cases h
+  all_goals simp_all [Bool.and_eq_true]
+
+theorem resolveWrite_declared (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan) :
+    ∃ table ∈ schema.tables, table.name = plan.target ∧ table.schema = plan.schema ∧ table.table = plan.table := by
+  have declared : writeDeclared schema plan = true := by
+    simp only [resolveWrite, bind, Except.bind] at h
+    repeat' first | split at h | cases h
+    all_goals simp_all [Bool.and_eq_true]
+  simpa [writeDeclared, List.any_eq_true, Bool.and_eq_true, and_assoc] using declared
+
+theorem resolveWrite_permissions (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan)
+    (role : session.role ≠ "admin") :
+    ∃ permission, findWritePermission catalog session.role plan.target plan.kind = some permission ∧
+      ∃ condition check, writePolicy schema session permission = .ok (condition, check) ∧
+        (plan.kind = .insert ∨ plan.conds = condition ∨ ∃ es, plan.conds = .and es ∧ condition ∈ es) ∧
+        (plan.kind = .delete ∨ plan.check = .abort check) ∧
+        (∀ assignment ∈ writeColumns plan, writeColumnAllowed schema permission assignment = true) := by
+  have permitted := (resolveWrite_validated schema catalog session input plan h).1
+  simp only [writePermitted, Bool.or_eq_true, beq_iff_eq] at permitted
+  rcases permitted with denied | permitted
+  · exact False.elim (role denied)
+  · split at permitted
+    · cases permitted
+    · rename_i permission found
+      refine ⟨permission, found, ?_⟩
+      split at permitted
+      · cases permitted
+      · rename_i condition check policy
+        simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq] at permitted
+        refine ⟨condition, check, policy, ?_, ?_, List.all_eq_true.mp permitted.2⟩
+        · rcases permitted.1.1 with hi | hc
+          · exact Or.inl hi
+          · exact Or.inr ((hasConjunct_iff _ _).mp hc)
+        · rcases permitted.1.2 with hd | hc
+          · exact Or.inl hd
+          · cases he : plan.check <;> simp_all [predicateEq_iff]
+
+theorem resolveWrite_tables (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan)
+    (role : session.role ≠ "admin") :
+    ∃ permission ∈ catalog.permissions, permission.role = session.role ∧
+      permission.target = plan.target ∧ permission.kind = plan.kind := by
+  obtain ⟨permission, found, _⟩ := resolveWrite_permissions schema catalog session input plan h role
+  have member := List.mem_of_find?_eq_some found
+  have names := List.find?_some found
+  exact ⟨permission, member, by simpa [Bool.and_eq_true, and_assoc] using names⟩
+
+theorem resolveWrite_user_columns (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan)
+    (role : session.role ≠ "admin") :
+    ∃ permission, findWritePermission catalog session.role input.target input.kind = some permission ∧
+      ∀ value ∈ input.objects.flatten ++ input.sets ++ input.increments,
+        value.1 ∈ permission.columns ∧ value.1 ∉ permission.presets.map (·.1) := by
+  have allowed := (resolveWrite_validated schema catalog session input plan h).2.1
+  simp only [userInputPermitted, Bool.or_eq_true, beq_iff_eq] at allowed
+  rcases allowed with denied | allowed
+  · exact False.elim (role denied)
+  · split at allowed
+    · cases allowed
+    · refine ⟨_, by assumption, ?_⟩
+      intro value member
+      have hv := List.all_eq_true.mp allowed value member
+      simpa using hv
+
+theorem resolveWrite_returning_conditions (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan)
+    (role : session.role ≠ "admin") (alias : String) (nodes : List Node)
+    (output : WriteOutput.rows alias nodes ∈ plan.outputs) :
+    ∀ scan ∈ (nodesScans nodes).flatMap scanTree, ∃ condition,
+      roleCondition schema session scan.name = .ok condition ∧
+      (scan.conds = condition ∨ ∃ es, scan.conds = .and es ∧ condition ∈ es) := by
+  have allowed := (resolveWrite_validated schema catalog session input plan h).2.2
+  have hn := List.all_eq_true.mp allowed (.rows alias nodes) output
+  simp only [returningPermitted, Bool.and_eq_true] at hn
+  intro scan member
+  exact scanPermitted_condition schema session scan (List.all_eq_true.mp hn.1 scan member) role
+
+theorem resolveReturning_permissions (schema : Schema) (session : Session) (target : String)
+    (children : List Selection) (nodes : List Node) (h : resolveReturning schema session target children = .ok nodes) :
+    returningPermitted schema session target nodes = true := by
+  simp only [resolveReturning, bind, Except.bind] at h
+  repeat' first | split at h | cases h
+  all_goals assumption
+
+mutual
+def snapshotPredicate (target : String) : Predicate → Predicate
+  | .compare f op v => .compare f op v
+  | .member f neg vs => .member f neg vs
+  | .isNull f b => .isNull f b
+  | .and es => .and (snapshotPredicates target es)
+  | .or es => .or (snapshotPredicates target es)
+  | .not e => .not (snapshotPredicate target e)
+  | .exists scan ps cs => .exists (snapshotScan target scan) ps cs
+def snapshotPredicates (target : String) : List Predicate → List Predicate
+  | [] => []
+  | e :: es => snapshotPredicate target e :: snapshotPredicates target es
+def snapshotScan (target : String) : Scan → Scan
+  | .mk name ns table conds order limit offset =>
+    .mk name (if name == target then "" else ns) (if name == target then "w0" else table)
+      (snapshotPredicate target conds) order limit offset
+end
+
+mutual
+def snapshotNode (target : String) : Node → Node
+  | .column alias leaf => .column alias leaf
+  | .group alias children => .group alias (snapshotNodes target children)
+  | .nodes alias order children => .nodes alias order (snapshotNodes target children)
+  | .relation alias kind scan ps cs children =>
+    .relation alias kind (snapshotScan target scan) ps cs (snapshotNodes target children)
+def snapshotNodes (target : String) : List Node → List Node
+  | [] => []
+  | node :: nodes => snapshotNode target node :: snapshotNodes target nodes
+end
+
+def tokenCommas : List (List Tok) → List Tok
+  | [] => []
+  | [x] => x
+  | x :: y :: rest => x ++ lift [.raw ","] ++ tokenCommas (y :: rest)
+
+def writeCheckToks (check : WriteCheck) : List Tok :=
+  match check with
+  | .unchecked => []
+  | .abort condition => lift [.raw ", CAST(CASE WHEN"] ++ expressionToks 0 "s" condition ++
+    lift [.raw "THEN '1' ELSE 'rusuna: permission check failed' || left(", .col "s" "ctid", .raw "::text, 0) END AS integer) AS", .ident "check__constraint"]
+
+def assignmentToks (assignment : Assignment) : List Tok :=
+  lift [.ident assignment.column, .raw "="] ++
+    (if assignment.increment then lift [.col "s" assignment.column, .raw "+"] else []) ++ (if assignment.excluded then lift [.col "excluded" assignment.column] else [.param assignment.value])
+
+def conflictToks (conflict : ConflictPlan) : List Tok :=
+  lift [.raw "ON CONFLICT ON CONSTRAINT", .ident conflict.constraint] ++
+    (if conflict.assignments.isEmpty then lift [.raw "DO NOTHING"] else
+      lift [.raw "DO UPDATE SET"] ++ tokenCommas (conflict.assignments.map assignmentToks) ++
+        lift [.raw "WHERE"] ++ expressionToks 0 "s" conflict.conds)
+
+def conflictCheckToks (insertCheck updateCheck : WriteCheck) : List Tok :=
+  let check := fun c => match c with
+    | WriteCheck.unchecked => lift [.raw "true"]
+    | .abort condition => expressionToks 0 "s" condition
+  lift [.raw ", CAST(CASE WHEN (CASE WHEN", .col "s" "xmax", .raw "= 0 THEN"] ++ check insertCheck ++
+    lift [.raw "ELSE"] ++ check updateCheck ++ lift [.raw "END) THEN '1' ELSE 'rusuna: permission check failed' || left(", .col "s" "ctid", .raw "::text, 0) END AS integer) AS", .ident "check__constraint"]
+
+def writeBodyToks (plan : WritePlan) : List Tok :=
+  let table := lift [.col plan.schema plan.table, .raw "AS", .ident "s"]
+  let returning := lift [.raw "RETURNING", .ident "s", .raw "AS", .ident "t0", .raw ","] ++
+    lift [if plan.kind == .insert then .raw "NULL::tid" else if plan.kind == .update then .col "b0" "ctid" else .col "s" "ctid",
+      .raw "AS", .ident "k0"] ++ (match plan.conflict with
+    | some conflict => if conflict.assignments.isEmpty then writeCheckToks plan.check else conflictCheckToks plan.check conflict.check
+    | none => writeCheckToks plan.check)
+  match plan.kind with
+  | .insert =>
+    let written := plan.objects.flatten.map (·.column) |>.eraseDups
+    let columns := if written.isEmpty then [plan.defaultColumn] else written
+    if plan.objects.isEmpty then lift [.raw "SELECT", .ident "s", .raw "AS", .ident "t0", .raw ",", .col "s" "ctid", .raw "AS", .ident "k0", .raw "FROM"] ++ table ++ lift [.raw "WHERE false"] else
+    lift [.raw "INSERT INTO"] ++ table ++
+      (if columns.isEmpty then lift [.raw "DEFAULT VALUES"] else
+        lift ([.raw "("] ++ commas (columns.map fun c => [.ident c]) ++ [.raw ") VALUES"]) ++
+        tokenCommas (plan.objects.map fun row => lift [.raw "("] ++ tokenCommas (columns.map fun c =>
+          match row.find? (·.column == c) with
+          | none => lift [.raw "DEFAULT"]
+          | some a => [.param a.value]) ++ lift [.raw ")"])) ++ (plan.conflict.toList.flatMap conflictToks) ++ returning
+  | .update =>
+    if plan.assignments.isEmpty then lift [.raw "SELECT", .ident "s", .raw "AS", .ident "t0", .raw ",", .col "s" "ctid", .raw "AS", .ident "k0", .raw "FROM"] ++ table ++ lift [.raw "WHERE false"] else
+    lift [.raw "UPDATE"] ++ table ++ lift [.raw "SET"] ++ tokenCommas (plan.assignments.map assignmentToks) ++
+      lift [.raw "FROM", .col plan.schema plan.table, .raw "AS", .ident "b0", .raw "WHERE", .col "s" "ctid", .raw "=", .col "b0" "ctid", .raw "AND ("] ++ expressionToks 0 "s" plan.conds ++ lift [.raw ")"] ++ returning
+  | .delete => lift [.raw "DELETE FROM"] ++ table ++ lift [.raw "WHERE"] ++ expressionToks 0 "s" plan.conds ++ returning
+
+def returningToks (single : Bool) (children : List Node) : List Tok :=
+  lift ([.raw "(SELECT"] ++ (if single then rowLex 0 true children else
+    [.raw "coalesce(json_agg("] ++ rowLex 0 true children ++ [.raw "), '[]')"]) ++
+    [.raw "FROM", .ident (rName 0), .raw "AS", .ident (tName 0)]) ++ joinsToks 0 0 true children ++ lift [.raw ")"]
+
+def writeOutputToks (single : Bool) : WriteOutput → List Tok
+  | .count alias => lift [.string alias, .raw ", (SELECT count(*) FROM", .ident (rName 0), .raw ")"]
+  | .rows alias children => (if single then [] else lift [.string alias, .raw ","]) ++ returningToks single children
+
+def emitWrite (plan : WritePlan) : List Tok :=
+  let outputs := plan.outputs.map fun output => match output with
+    | .count alias => WriteOutput.count alias
+    | .rows alias children => .rows alias (snapshotNodes plan.target children)
+  let excluded := match plan.conflict with
+    | none => [.raw "SELECT 1 FROM", .ident "m0", .raw "WHERE", .col "m0" "k0", .raw "=", .col "s" "ctid"]
+    | some conflict => [.raw "SELECT 1 FROM", .ident (rName 0), .raw "AS", .ident "b0", .raw "WHERE true"] ++
+        conflict.keys.flatMap (fun c => [.raw "AND", .col "s" c, .raw "=", .col "b0" c])
+  lift [.raw "WITH", .ident "m0", .raw "AS ("] ++ writeBodyToks plan ++
+    lift ([.raw "),", .ident (rName 0), .raw "AS (SELECT (", .ident "t0", .raw ").* FROM", .ident "m0",
+      .raw "),", .ident "w0", .raw "AS (SELECT", .ident "s", .raw ".* FROM", .col plan.schema plan.table,
+      .raw "AS", .ident "s", .raw "WHERE NOT EXISTS ("] ++ excluded ++ [.raw ")"]) ++
+    (if plan.kind == .delete then [] else lift [.raw "UNION ALL SELECT * FROM", .ident (rName 0)]) ++
+    lift [.raw ") SELECT"] ++
+    (if plan.single then outputs.flatMap (writeOutputToks true) else
+      lift [.raw "json_build_object("] ++ tokenCommas (outputs.map (writeOutputToks false)) ++ lift [.raw ")"])
+
+def runWrite (schema : Schema) (catalog : WriteCatalog) (session : Session) (input : WriteInput) : Except Error Compiled :=
+  (resolveWrite schema catalog session input).map fun plan => render (emitWrite plan)
+
+theorem emitWrite_slots (plan : WritePlan) :
+    slots (emitWrite plan) = List.range' 1 (render (emitWrite plan)).params.length :=
+  slots_numbered (emitWrite plan)
+
+theorem resolveWrite_secure (schema : Schema) (catalog : WriteCatalog) (session : Session) (input : WriteInput) :
+    match resolveWrite schema catalog session input with
+    | .error _ => True
+    | .ok plan => writePermitted schema catalog session plan = true ∧
+      userInputPermitted catalog session input = true ∧ writeOutputsPermitted schema session plan = true ∧
+      conflictPermitted schema catalog session plan = true := by
+  cases h : resolveWrite schema catalog session input with
+  | error _ => trivial
+  | ok plan =>
+    have valid := resolveWrite_validated schema catalog session input plan h
+    exact ⟨valid.1, valid.2.1, valid.2.2, resolveWrite_conflict schema catalog session input plan h⟩
+
+theorem runWrite_accepts (schema : Schema) (catalog : WriteCatalog) (session : Session) (input : WriteInput) :
+    (runWrite schema catalog session input).isOk = (resolveWrite schema catalog session input).isOk := by
+  exact success_map _ _
+
+def runPrimaryKey (schema : Schema) (catalog : WriteCatalog) (session : Session) (target : String)
+    (values : List (String × Value)) (children : List Selection) : Except Error Compiled := do
+  let conds ← keyCondition catalog target values
+  let root : RootField := ⟨"by_pk", target, .list⟩
+  let query ← resolve { schema with roots := [root] } session ⟨"by_pk", "by_pk", some conds, [], none, none, children⟩
+  return render (lift [.raw "WITH", .ident (rName 0), .raw "AS ("] ++ scanToks query.scan [.raw "true"] ++
+    lift [.raw ") SELECT"] ++ returningToks true query.children)
 
 end model

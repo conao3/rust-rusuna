@@ -1,0 +1,57 @@
+{
+  "version": "v2.51.6",
+  "query": "mutation { update_mutation_item(where: {}, _set: {title: \"rejected\"}) { affected_rows } }",
+  "role": "static",
+  "session": {
+    "user_id": 1
+  },
+  "response": {
+    "errors": [
+      {
+        "message": "check constraint of an insert/update permission has failed",
+        "extensions": {
+          "path": "$",
+          "code": "permission-error"
+        }
+      }
+    ]
+  },
+  "tables": {
+    "mutation_author": [
+      {
+        "id": 1,
+        "name": "Ada"
+      },
+      {
+        "id": 2,
+        "name": "Bea"
+      }
+    ],
+    "mutation_item": [
+      {
+        "id": 1,
+        "owner_id": 1,
+        "title": "first",
+        "score": 1,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 2,
+        "owner_id": 2,
+        "title": "second",
+        "score": 2,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 3,
+        "owner_id": 1,
+        "title": "hidden",
+        "score": 20,
+        "note": null,
+        "secret": "private"
+      }
+    ]
+  }
+}

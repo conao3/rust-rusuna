@@ -1,0 +1,36 @@
+type mutation_author @table(name: "mutation_author") @primary_key(columns: ["id"])
+  @permission(role: "user", columns: ["id", "name"], where: {id: {_eq: "$user_id"}}, allow_aggregations: true)
+  @permission(role: "editor", columns: ["id", "name"], where: {id: {_eq: "$user_id"}}, allow_aggregations: true) {
+  id: Int!
+  name: String!
+  items: [mutation_item!]! @relation(columns: ["id"], references: ["owner_id"])
+  items_aggregate: mutation_item_aggregate! @aggregate(target: "mutation_item") @relation(columns: ["id"], references: ["owner_id"])
+}
+
+type mutation_item @insert_permission(role: "static", columns: ["title"], check: {_or: []})
+  @update_permission(role: "static", columns: ["title"], where: {}, check: {_or: []})
+  @insert_permission(role: "writer", columns: ["title", "score"], check: {score: {_gte: 0}}, set: {owner_id: "$user_id"})
+  @update_permission(role: "writer", columns: ["title"], where: {owner_id: {_eq: "$user_id"}}, check: {})
+  @delete_permission(role: "writer", where: {owner_id: {_eq: "$user_id"}})
+  @table(name: "mutation_item") @primary_key(columns: ["id"])
+  @permission(role: "user", columns: ["id", "owner_id", "title", "score", "note"], where: {score: {_lte: 10}}, allow_aggregations: true)
+  @permission(role: "editor", columns: ["id", "owner_id", "title", "score", "note"], where: {score: {_lte: 10}}, allow_aggregations: true)
+  @insert_permission(role: "user", columns: ["id", "title", "score", "note"], check: {score: {_gte: 0}}, set: {owner_id: "$user_id"})
+  @insert_permission(role: "editor", columns: ["id", "title", "score", "note"], check: {score: {_gte: 0}}, set: {owner_id: "$user_id"})
+  @update_permission(role: "user", columns: ["title", "score"], where: {owner_id: {_eq: "$user_id"}}, check: {score: {_gte: 0}}, set: {note: "updated"})
+  @update_permission(role: "editor", columns: ["title", "score"], where: {owner_id: {_eq: "$user_id"}}, check: {score: {_lte: 10}}, set: {note: "updated"})
+  @delete_permission(role: "user", where: {owner_id: {_eq: "$user_id"}})
+  @delete_permission(role: "editor", where: {owner_id: {_eq: "$user_id"}}) {
+  id: Int!
+  owner_id: Int!
+  title: String!
+  score: Int!
+  note: String
+  secret: String!
+  owner: mutation_author! @relation(columns: ["owner_id"], references: ["id"])
+}
+
+type Query {
+  mutation_author: [mutation_author!]! @list
+  mutation_item: [mutation_item!]! @list
+}

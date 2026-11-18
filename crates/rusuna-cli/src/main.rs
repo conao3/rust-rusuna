@@ -36,7 +36,7 @@ enum Command {
         #[command(subcommand)]
         command: SchemaCommand,
     },
-    #[command(about = "Compile query documents")]
+    #[command(about = "Compile query and mutation documents")]
     Query {
         #[command(subcommand)]
         command: QueryCommand,
@@ -45,7 +45,7 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SchemaCommand {
-    #[command(about = "Expand mapping SDL into a query schema")]
+    #[command(about = "Expand mapping SDL into a GraphQL schema")]
     ExpandSdl {
         #[arg(long)]
         role: String,

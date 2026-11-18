@@ -6,7 +6,7 @@ sessions and selections; a successful resolution is required where stated.
 
 ## Independent properties
 
-Nine properties, expressed by fifteen boundary statements. `resolve_tables` is a
+Twelve properties, expressed by twenty boundary statements. `resolve_tables` is a
 consequence of the scan condition property, not an additional independent property.
 `resolve_permissions`, the intermediate traversal lemmas and the pre-permission
 `resolveSelection` lemmas support these same properties.
@@ -95,9 +95,59 @@ theorem resolve_tables (schema : Schema) (session : Session) (root : Selection)
       permission.role = session.role ∧ permission.target = scan.name
 ```
 
+The write properties concern post-write checks that abort the statement, row conditions
+on updates and deletes, and writable columns including the separation of user inputs
+from presets. The table-permission witness is a consequence of the same guarantee.
+`resolveWrite_returning_conditions` extends the existing read-scan property to mutation
+outputs; it is not a separate kind of authorization property.
+
+```lean
+theorem resolveWrite_permissions (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan)
+    (role : session.role ≠ "admin") :
+    ∃ permission, findWritePermission catalog session.role plan.target plan.kind = some permission ∧
+      ∃ condition check, writePolicy schema session permission = .ok (condition, check) ∧
+        (plan.kind = .insert ∨ plan.conds = condition ∨ ∃ es, plan.conds = .and es ∧ condition ∈ es) ∧
+        (plan.kind = .delete ∨ plan.check = .abort check) ∧
+        (∀ assignment ∈ writeColumns plan, writeColumnAllowed schema permission assignment = true)
+```
+
+```lean
+theorem resolveWrite_user_columns (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan)
+    (role : session.role ≠ "admin") :
+    ∃ permission, findWritePermission catalog session.role input.target input.kind = some permission ∧
+      ∀ value ∈ input.objects.flatten ++ input.sets ++ input.increments,
+        value.1 ∈ permission.columns ∧ value.1 ∉ permission.presets.map (·.1)
+```
+
+```lean
+theorem resolveWrite_tables (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan)
+    (role : session.role ≠ "admin") :
+    ∃ permission ∈ catalog.permissions, permission.role = session.role ∧
+      permission.target = plan.target ∧ permission.kind = plan.kind
+```
+
+```lean
+theorem resolveWrite_returning_conditions (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan)
+    (role : session.role ≠ "admin") (alias : String) (nodes : List Node)
+    (output : WriteOutput.rows alias nodes ∈ plan.outputs) :
+    ∀ scan ∈ (nodesScans nodes).flatMap scanTree, ∃ condition,
+      roleCondition schema session scan.name = .ok condition ∧
+      (scan.conds = condition ∨ ∃ es, scan.conds = .and es ∧ condition ∈ es)
+```
+
+```lean
+theorem resolveWrite_declared (schema : Schema) (catalog : WriteCatalog) (session : Session)
+    (input : WriteInput) (plan : WritePlan) (h : resolveWrite schema catalog session input = .ok plan) :
+    ∃ table ∈ schema.tables, table.name = plan.target ∧ table.schema = plan.schema ∧ table.table = plan.table
+```
+
 ## Conditions restated next to their implementations
 
-Sixteen boundary statements. The selection acceptance equalities compare success
+Nineteen boundary statements. The selection acceptance equalities compare success
 with a separate Boolean traversal. Their seven expression, ordering, scan and node
 lemmas and the existential success form below support the same conditions and are
 not counted again.
@@ -184,6 +234,22 @@ theorem resolveSelection_accepts (schema : Schema) (root : Selection) :
 ```lean
 theorem runSelection_accepts (schema : Schema) (root : Selection) :
     (runSelection schema root).isOk = acceptsSelection schema root
+```
+
+```lean
+theorem applyWriteCondition_exact (kind : WriteKind) (user condition : Predicate) :
+    applyWriteCondition kind user condition = (if kind = .insert then user else .and [user, condition])
+```
+
+```lean
+theorem applyWriteCheck_exact (kind : WriteKind) (check : Predicate) :
+    applyWriteCheck kind check = (if kind = .delete then .unchecked else .abort check)
+```
+
+```lean
+theorem applyWritePermission_conditions (plan : WritePlan) (condition check : Predicate) :
+    (applyWritePermission plan condition check).conds = (if plan.kind = .insert then plan.conds else .and [plan.conds, condition]) ∧
+    (applyWritePermission plan condition check).check = (if plan.kind = .delete then .unchecked else .abort check)
 ```
 
 ## Checks of individual values
@@ -304,9 +370,48 @@ a relationship predicate `u.id IS NOT NULL` can resolve while table `u` requires
 The existing scan-condition theorem assumes successful final resolution, so it
 cannot establish this converse. `guardQuery`, `resolve` and `run` stay in Survey.
 
+## Write and returning boundaries
+
+`runWrite` resolves a `WriteInput` to a `WritePlan` and emits that plan. The permission
+statements concern these trees. `WriteCheck.abort` is distinct from `unchecked`;
+`writeCheckToks` emits the integer cast that fails the PostgreSQL statement. SQL execution
+and the mapping of this node to PostgreSQL's error behavior are tested, not proved.
+
+`writeColumnAllowed` requires a declared scalar mapping and membership in either the
+operation's allowed user columns or its preset columns. `resolveWrite_user_columns`
+separately excludes preset columns from supplied inputs. `resolveWrite_tables` identifies
+the exact role, target and operation in the permission catalog.
+`resolveWrite_declared` connects that logical target to the physical SQL schema and table.
+
+A conflict update is a separate `ConflictPlan`. `resolveWrite_conflict` proves that
+`writePermitted` accepts its `conflictAsWrite` projection, whose operation is `update`;
+this checks the update permission, update row condition, aborting update check and written
+columns. `resolveConflict` checks user conflict columns against the update permission
+and excludes presets. An inserted row uses the insert check; a conflicting updated row
+uses the update check. PostgreSQL's `xmax` distinguishes these branches in `RETURNING`.
+
+A mutation's top-level returning rows read the changed-row CTE. They are deliberately
+excluded from `resolveWrite_returning_conditions`, which quantifies over `nodesScans`
+and their predicate scans. Top-level projected columns remain checked by
+`returningPermitted`. The same `scanPermitted_condition` lemma used by
+`resolve_scan_conditions` proves the mutation statement for relationships and aggregates.
+`resolve_scan_conditions` itself continues to describe query resolution.
+
+SQL lowering redirects returning scans of the modified target to a post-operation
+snapshot CTE. The validated plan retains its declared table names and role predicates;
+`snapshotNode` and `snapshotPredicate` lower these sources for execution. This lowering,
+including the use of original tuple identifiers for updates and deletes and primary keys
+for conflicts, is outside the read-scan theorem. Differential fixtures cover relationships
+that return to the modified table after insert, update, delete and conflict update.
+
+`resolveWrite_validated`, `resolveWrite_secure` and `resolveWrite_conflict` expose the
+final validators for the audit. `runWrite_accepts` restates success through a map over
+resolution; it is not an independent input acceptance specification. `emitWrite_slots`
+is an instance of `slots_numbered`. These supporting statements are not counted again.
+
 ## Mutation audit
 
-The strict audit targets twenty-one functions: 144 mutations, 93 killed, zero holes,
+The strict audit targets twenty-four functions: 154 mutations, 103 killed, zero holes,
 18 equivalent on sampled inputs, zero untested, zero timed out and 33 stillborn.
 `make survey` reports the functions outside the strict audit:
 
@@ -318,3 +423,11 @@ The strict audit targets twenty-one functions: 144 mutations, 93 killed, zero ho
 | Total | 13 | 313 | 48 | 104 | 4 | 0 | 52 | 105 |
 
 The survey uses 1000 samples and a 30-second deadline per mutation. Equivalence is sampled output equality, not a proved equivalence.
+
+The write insertion audit targets `applyWriteCondition`, `applyWriteCheck` and
+`applyWritePermission`: ten mutations, all killed, with no hole, untested mutation,
+timeout or stillborn mutation. Hand-written mutations replacing the check with
+`unchecked` and replacing the update/delete condition with the user condition fail
+`applyWriteCheck_exact` and `applyWriteCondition_exact` respectively, as well as the
+corresponding projection of `applyWritePermission_conditions`. Manual failures are
+reported separately from automatic kills.

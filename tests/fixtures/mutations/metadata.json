@@ -1,0 +1,408 @@
+{
+  "type": "bulk",
+  "args": [
+    {
+      "type": "pg_track_table",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_author"
+        }
+      }
+    },
+    {
+      "type": "pg_track_table",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        }
+      }
+    },
+    {
+      "type": "pg_create_object_relationship",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "name": "owner",
+        "using": {
+          "foreign_key_constraint_on": "owner_id"
+        }
+      }
+    },
+    {
+      "type": "pg_create_array_relationship",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_author"
+        },
+        "name": "items",
+        "using": {
+          "foreign_key_constraint_on": {
+            "table": "mutation_item",
+            "column": "owner_id"
+          }
+        }
+      }
+    },
+    {
+      "type": "pg_create_select_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_author"
+        },
+        "role": "user",
+        "permission": {
+          "columns": [
+            "id",
+            "name"
+          ],
+          "filter": {
+            "id": {
+              "_eq": "X-Hasura-User-Id"
+            }
+          },
+          "allow_aggregations": true
+        }
+      }
+    },
+    {
+      "type": "pg_create_select_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "user",
+        "permission": {
+          "columns": [
+            "id",
+            "owner_id",
+            "title",
+            "score",
+            "note"
+          ],
+          "filter": {
+            "score": {
+              "_lte": 10
+            }
+          },
+          "allow_aggregations": true
+        }
+      }
+    },
+    {
+      "type": "pg_create_insert_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "user",
+        "permission": {
+          "columns": [
+            "id",
+            "title",
+            "score",
+            "note"
+          ],
+          "check": {
+            "score": {
+              "_gte": 0
+            }
+          },
+          "set": {
+            "owner_id": "X-Hasura-User-Id"
+          }
+        }
+      }
+    },
+    {
+      "type": "pg_create_update_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "user",
+        "permission": {
+          "columns": [
+            "title",
+            "score"
+          ],
+          "filter": {
+            "owner_id": {
+              "_eq": "X-Hasura-User-Id"
+            }
+          },
+          "check": {
+            "score": {
+              "_gte": 0
+            }
+          },
+          "set": {
+            "note": "updated"
+          }
+        }
+      }
+    },
+    {
+      "type": "pg_create_delete_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "user",
+        "permission": {
+          "filter": {
+            "owner_id": {
+              "_eq": "X-Hasura-User-Id"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "pg_create_select_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_author"
+        },
+        "role": "editor",
+        "permission": {
+          "columns": [
+            "id",
+            "name"
+          ],
+          "filter": {
+            "id": {
+              "_eq": "X-Hasura-User-Id"
+            }
+          },
+          "allow_aggregations": true
+        }
+      }
+    },
+    {
+      "type": "pg_create_select_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "editor",
+        "permission": {
+          "columns": [
+            "id",
+            "owner_id",
+            "title",
+            "score",
+            "note"
+          ],
+          "filter": {
+            "score": {
+              "_lte": 10
+            }
+          },
+          "allow_aggregations": true
+        }
+      }
+    },
+    {
+      "type": "pg_create_insert_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "editor",
+        "permission": {
+          "columns": [
+            "id",
+            "title",
+            "score",
+            "note"
+          ],
+          "check": {
+            "score": {
+              "_gte": 0
+            }
+          },
+          "set": {
+            "owner_id": "X-Hasura-User-Id"
+          }
+        }
+      }
+    },
+    {
+      "type": "pg_create_update_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "editor",
+        "permission": {
+          "columns": [
+            "title",
+            "score"
+          ],
+          "filter": {
+            "owner_id": {
+              "_eq": "X-Hasura-User-Id"
+            }
+          },
+          "check": {
+            "score": {
+              "_lte": 10
+            }
+          },
+          "set": {
+            "note": "updated"
+          }
+        }
+      }
+    },
+    {
+      "type": "pg_create_delete_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "editor",
+        "permission": {
+          "filter": {
+            "owner_id": {
+              "_eq": "X-Hasura-User-Id"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "pg_create_insert_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "writer",
+        "permission": {
+          "columns": [
+            "title",
+            "score"
+          ],
+          "check": {
+            "score": {
+              "_gte": 0
+            }
+          },
+          "set": {
+            "owner_id": "X-Hasura-User-Id"
+          }
+        }
+      }
+    },
+    {
+      "type": "pg_create_update_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "writer",
+        "permission": {
+          "columns": [
+            "title"
+          ],
+          "filter": {
+            "owner_id": {
+              "_eq": "X-Hasura-User-Id"
+            }
+          },
+          "check": {}
+        }
+      }
+    },
+    {
+      "type": "pg_create_delete_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "writer",
+        "permission": {
+          "filter": {
+            "owner_id": {
+              "_eq": "X-Hasura-User-Id"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "pg_create_insert_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "static",
+        "permission": {
+          "columns": [
+            "title"
+          ],
+          "check": {
+            "_or": []
+          }
+        }
+      }
+    },
+    {
+      "type": "pg_create_update_permission",
+      "args": {
+        "source": "default",
+        "table": {
+          "schema": "public",
+          "name": "mutation_item"
+        },
+        "role": "static",
+        "permission": {
+          "columns": [
+            "title"
+          ],
+          "filter": {},
+          "check": {
+            "_or": []
+          }
+        }
+      }
+    }
+  ]
+}

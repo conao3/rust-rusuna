@@ -1,0 +1,89 @@
+{
+  "version": "v2.51.6",
+  "query": "mutation { insert_mutation_item(objects: [{id: 10, title: \"new\", score: 4}, {id: 11, title: \"next\", score: 12}]) { affected_rows returning { id title score owner_id owner { name } } } }",
+  "role": "admin",
+  "session": {
+    "user_id": 1
+  },
+  "response": {
+    "data": {
+      "insert_mutation_item": {
+        "affected_rows": 2,
+        "returning": [
+          {
+            "id": 10,
+            "title": "new",
+            "score": 4,
+            "owner_id": 1,
+            "owner": {
+              "name": "Ada"
+            }
+          },
+          {
+            "id": 11,
+            "title": "next",
+            "score": 12,
+            "owner_id": 1,
+            "owner": {
+              "name": "Ada"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "tables": {
+    "mutation_author": [
+      {
+        "id": 1,
+        "name": "Ada"
+      },
+      {
+        "id": 2,
+        "name": "Bea"
+      }
+    ],
+    "mutation_item": [
+      {
+        "id": 1,
+        "owner_id": 1,
+        "title": "first",
+        "score": 1,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 2,
+        "owner_id": 2,
+        "title": "second",
+        "score": 2,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 3,
+        "owner_id": 1,
+        "title": "hidden",
+        "score": 20,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 10,
+        "owner_id": 1,
+        "title": "new",
+        "score": 4,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 11,
+        "owner_id": 1,
+        "title": "next",
+        "score": 12,
+        "note": null,
+        "secret": "private"
+      }
+    ]
+  }
+}

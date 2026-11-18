@@ -84,6 +84,14 @@ fn coerce_input(
                     )?,
                 );
             }
+            for field in &object.fields {
+                if !field.node.ty.node.nullable && !out.contains_key(&field.node.name.node) {
+                    return Err(error(
+                        pos,
+                        format!("required input field {} is missing", field.node.name.node),
+                    ));
+                }
+            }
             Ok(C::Object(out))
         }
         Some(TypeKind::Enum(enumeration)) => {
@@ -187,7 +195,7 @@ impl Context<'_> {
                     out.insert(key.clone(), value);
                 }
             }
-            return Ok(Some(C::Object(out)));
+            return coerce(self.schema, C::Object(out), ty, false, pos, depth).map(Some);
         }
         let constant = value
             .clone()
@@ -334,6 +342,26 @@ impl Context<'_> {
             .iter()
             .find(|s| s.node.name.node == name)
             .ok_or_else(|| error(field.pos, format!("unknown field {parent}.{name}")))?;
+        let mutation = self
+            .schema
+            .mutation_roots
+            .get(name)
+            .filter(|_| parent == "Mutation")
+            .cloned();
+        let primary = self
+            .schema
+            .primary_roots
+            .get(name)
+            .filter(|_| parent == self.schema.query)
+            .cloned();
+        let mut writes = mutation.as_ref().map(|(target, kind, single, by_key)| {
+            let mut input = crate::MutationArguments::new(target, *kind);
+            input.single = *single;
+            input.by_key = *by_key;
+            input
+        });
+        let mut keys = Vec::new();
+        let mut present = BTreeSet::new();
         let mut arguments = BTreeSet::new();
         for (key, value) in &f.arguments {
             if !arguments.insert(key.node.as_str()) {
@@ -348,7 +376,85 @@ impl Context<'_> {
             let Some(value) = self.value(&value.node, &arg.node.ty.node, value.pos, 0)? else {
                 continue;
             };
+            let value = coerce(self.schema, value, &arg.node.ty.node, false, field.pos, 0)?;
+            present.insert(key.node.to_string());
             if value == C::Null {
+                continue;
+            }
+            if let Some(input) = &mut writes {
+                match key.node.as_str() {
+                    "on_conflict" => {
+                        let C::Object(fields) = value else {
+                            unreachable!()
+                        };
+                        let C::Enum(constraint) = &fields["constraint"] else {
+                            unreachable!()
+                        };
+                        let C::List(columns) = &fields["update_columns"] else {
+                            unreachable!()
+                        };
+                        input.on_conflict = Some(crate::OnConflict {
+                            constraint: constraint.to_string(),
+                            update_columns: columns
+                                .iter()
+                                .map(|c| {
+                                    if let C::Enum(c) = c {
+                                        c.to_string()
+                                    } else {
+                                        unreachable!()
+                                    }
+                                })
+                                .collect(),
+                            filter: fields
+                                .get("where")
+                                .filter(|v| **v != C::Null)
+                                .map(|v| {
+                                    filter(self.schema, &input.target, v, key.pos, 0, &mut scalar)
+                                })
+                                .transpose()?,
+                        });
+                    }
+                    "objects" => {
+                        let C::List(rows) = value else { unreachable!() };
+                        input.objects = rows
+                            .iter()
+                            .map(|r| row_values(self.schema, &input.target, r, key.pos))
+                            .collect::<Result<_, _>>()?;
+                    }
+                    "object" => {
+                        input.objects =
+                            vec![row_values(self.schema, &input.target, &value, key.pos)?]
+                    }
+                    "_set" => input.set = row_values(self.schema, &input.target, &value, key.pos)?,
+                    "_inc" => {
+                        input.increment = row_values(self.schema, &input.target, &value, key.pos)?
+                    }
+                    "pk_columns" => {
+                        input.keys = row_values(self.schema, &input.target, &value, key.pos)?
+                    }
+                    "where" => {
+                        input.filter = Some(filter(
+                            self.schema,
+                            &input.target,
+                            &value,
+                            key.pos,
+                            0,
+                            &mut scalar,
+                        )?)
+                    }
+                    _ if input.by_key => input.keys.push((
+                        key.node.to_string(),
+                        scalar(&value, named(&arg.node.ty.node), key.pos)?,
+                    )),
+                    _ => return Err(error(key.pos, "unsupported mutation argument")),
+                }
+                continue;
+            }
+            if primary.is_some() {
+                keys.push((
+                    key.node.to_string(),
+                    scalar(&value, named(&arg.node.ty.node), key.pos)?,
+                ));
                 continue;
             }
             match key.node.as_str() {
@@ -369,6 +475,16 @@ impl Context<'_> {
                 _ => unreachable!(),
             }
         }
+        for arg in &spec.node.arguments {
+            if !arg.node.ty.node.nullable && !present.contains(arg.node.name.node.as_str()) {
+                return Err(error(
+                    field.pos,
+                    format!("required argument {} is missing", arg.node.name.node),
+                ));
+            }
+        }
+        selection.mutation = writes;
+        selection.primary_key = primary.map(|target| (target, keys));
         let child_type = named(&spec.node.ty.node);
         if matches!(self.schema.types.get(child_type), Some(TypeKind::Object(_))) {
             selection.fields = self.fields(&f.selection_set, child_type, depth + 1)?;
@@ -386,6 +502,8 @@ fn merge(fields: &mut Vec<Selection>, field: Selection, pos: Pos) -> Result<(), 
             || existing.order_by != field.order_by
             || existing.limit != field.limit
             || existing.offset != field.offset
+            || existing.mutation != field.mutation
+            || existing.primary_key != field.primary_key
         {
             return Err(error(pos, "conflicting fields with the same response key"));
         }
@@ -695,10 +813,10 @@ pub(super) fn parse(
             "provide the name of an existing query operation",
         )
     })?;
-    if operation.node.ty != OperationType::Query || !operation.node.directives.is_empty() {
+    if operation.node.ty == OperationType::Subscription || !operation.node.directives.is_empty() {
         return Err(error(
             operation.pos,
-            "only query operations without operation directives are supported; mutation and subscription are unsupported",
+            "query and mutation operations without operation directives are supported",
         ));
     }
     let values = variables
@@ -760,5 +878,73 @@ pub(super) fn parse(
             },
         );
     }
-    context.fields(&operation.node.selection_set, &schema.query, 0)
+    context.fields(
+        &operation.node.selection_set,
+        if operation.node.ty == OperationType::Mutation {
+            "Mutation"
+        } else {
+            &schema.query
+        },
+        0,
+    )
+}
+
+fn row_values(
+    schema: &DocumentSchema,
+    target: &str,
+    value: &C,
+    pos: Pos,
+) -> Result<Vec<(String, Value)>, Error> {
+    let C::Object(values) = value else {
+        return Err(error(pos, "expected row object"));
+    };
+    values
+        .iter()
+        .map(|(f, v)| {
+            let ty = schema
+                .row_types
+                .get(&(target.to_string(), f.to_string()))
+                .ok_or_else(|| error(pos, "unknown scalar column"))?;
+            Ok((f.to_string(), scalar(v, ty, pos)?))
+        })
+        .collect()
+}
+
+pub(super) fn preset(
+    schema: &DocumentSchema,
+    target: &str,
+    field: &str,
+    value: &C,
+    pos: Pos,
+) -> Result<(crate::Operand, String), Error> {
+    let TypeKind::Object(object) = &schema.types[target] else {
+        unreachable!()
+    };
+    let f = object
+        .fields
+        .iter()
+        .find(|f| {
+            f.node.name.node == field
+                && matches!(
+                    schema.types.get(named(&f.node.ty.node)),
+                    Some(TypeKind::Scalar)
+                )
+        })
+        .ok_or_else(|| error(pos, "preset requires a scalar column"))?;
+    let ty = named(&f.node.ty.node).to_string();
+    if let C::String(text) = value {
+        if let Some(text) = text.strip_prefix("$$") {
+            let v = C::String(format!("${text}"));
+            coerce(schema, v.clone(), &f.node.ty.node, false, pos, 0)?;
+            return Ok((crate::Operand::Literal(scalar(&v, &ty, pos)?), ty));
+        }
+        if let Some(name) = text.strip_prefix('$') {
+            if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+                return Err(error(pos, "invalid session variable"));
+            }
+            return Ok((crate::Operand::Session(name.into()), ty));
+        }
+    }
+    coerce(schema, value.clone(), &f.node.ty.node, false, pos, 0)?;
+    Ok((crate::Operand::Literal(scalar(value, &ty, pos)?), ty))
 }

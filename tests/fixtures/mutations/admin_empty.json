@@ -1,0 +1,58 @@
+{
+  "version": "v2.51.6",
+  "query": "mutation { insert_mutation_item(objects: []) { affected_rows returning { id } } update_mutation_item(where: {id: {_eq: 999}}, _set: {title: \"none\"}) { affected_rows returning { id } } }",
+  "role": "admin",
+  "session": {
+    "user_id": 1
+  },
+  "response": {
+    "data": {
+      "insert_mutation_item": {
+        "affected_rows": 0,
+        "returning": []
+      },
+      "update_mutation_item": {
+        "affected_rows": 0,
+        "returning": []
+      }
+    }
+  },
+  "tables": {
+    "mutation_author": [
+      {
+        "id": 1,
+        "name": "Ada"
+      },
+      {
+        "id": 2,
+        "name": "Bea"
+      }
+    ],
+    "mutation_item": [
+      {
+        "id": 1,
+        "owner_id": 1,
+        "title": "first",
+        "score": 1,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 2,
+        "owner_id": 2,
+        "title": "second",
+        "score": 2,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 3,
+        "owner_id": 1,
+        "title": "hidden",
+        "score": 20,
+        "note": null,
+        "secret": "private"
+      }
+    ]
+  }
+}

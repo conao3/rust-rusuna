@@ -4,7 +4,7 @@ use async_graphql_parser::{Positioned, parse_schema};
 use async_graphql_value::ConstValue;
 use std::collections::BTreeSet;
 
-fn directives<'a>(
+pub(super) fn directives<'a>(
     values: &'a [Positioned<ConstDirective>],
     allowed: &[&str],
 ) -> Result<BTreeMap<String, &'a ConstDirective>, Error> {
@@ -19,6 +19,10 @@ fn directives<'a>(
         }
         let args: &[&str] = match name.as_str() {
             "table" => &["name", "schema"],
+            "primary_key" => &["columns", "constraint"],
+            "insert_permission" => &["role", "columns", "check", "set"],
+            "update_permission" => &["role", "columns", "where", "check", "set"],
+            "delete_permission" => &["role", "where"],
             "column" => &["name"],
             "relation" => &["columns", "references"],
             "aggregate" => &["target"],
@@ -39,7 +43,7 @@ fn directives<'a>(
     Ok(out)
 }
 
-fn string(d: &ConstDirective, key: &str) -> Result<String, Error> {
+pub(super) fn string(d: &ConstDirective, key: &str) -> Result<String, Error> {
     match d.get_argument(key) {
         Some(Positioned {
             node: ConstValue::String(value),
@@ -52,7 +56,7 @@ fn string(d: &ConstDirective, key: &str) -> Result<String, Error> {
     }
 }
 
-fn strings(d: &ConstDirective, key: &str) -> Result<Vec<String>, Error> {
+pub(super) fn strings(d: &ConstDirective, key: &str) -> Result<Vec<String>, Error> {
     let Some(Positioned {
         node: ConstValue::List(values),
         ..
@@ -72,7 +76,7 @@ fn strings(d: &ConstDirective, key: &str) -> Result<Vec<String>, Error> {
         .collect()
 }
 
-fn insert(
+pub(super) fn insert(
     defs: &mut BTreeMap<String, String>,
     name: String,
     definition: String,
@@ -178,17 +182,33 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             .node
             .directives
             .iter()
-            .filter(|d| d.node.name.node != "permission")
+            .filter(|d| {
+                ![
+                    "permission",
+                    "insert_permission",
+                    "update_permission",
+                    "delete_permission",
+                ]
+                .contains(&d.node.name.node.as_str())
+            })
             .cloned()
             .collect();
-        let d = directives(&mappings, if root { &[] } else { &["table"] })?;
+        let d = directives(
+            &mappings,
+            if root { &[] } else { &["table", "primary_key"] },
+        )?;
         if root
-            && t.node
-                .directives
-                .iter()
-                .any(|d| d.node.name.node == "permission")
+            && t.node.directives.iter().any(|d| {
+                [
+                    "permission",
+                    "insert_permission",
+                    "update_permission",
+                    "delete_permission",
+                ]
+                .contains(&d.node.name.node.as_str())
+            })
         {
-            return Err(error(t.pos, "@permission applies to table types"));
+            return Err(error(t.pos, "permission directives apply to table types"));
         }
         let mut table = if root {
             Table::new(name, "", "")
@@ -206,6 +226,16 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                 string(mapping, "name")?,
             )
         };
+        if let Some(key) = d.get("primary_key") {
+            table.primary_key = Some(crate::PrimaryKey {
+                columns: strings(key, "columns")?,
+                constraint: if key.get_argument("constraint").is_some() {
+                    string(key, "constraint")?
+                } else {
+                    format!("{}_pkey", table.table)
+                },
+            });
+        }
         let mut fields = BTreeSet::new();
         let mut rendered = format!("type {name} {{\n");
         for f in &o.fields {
@@ -420,8 +450,10 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
         summary.push_str("}\n");
         insert(&mut defs, format!("{name}_aggregate_fields"), summary, pos)?;
     }
+    let (mutation_roots, primary_roots) =
+        writes::definitions(&tables, &scalar_fields, &mut defs, &query)?;
     let sdl = format!(
-        "schema {{ query: {query} }}\n\n{}",
+        "schema {{ query: {query} mutation: Mutation }}\n\n{}",
         defs.values().cloned().collect::<Vec<_>>().join("\n")
     );
     let expanded = parse_schema(&sdl).map_err(syntax)?;
@@ -440,6 +472,12 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
         sdl,
         query,
         session_types: Vec::new(),
+        mutation_roots,
+        primary_roots,
+        row_types: scalar_fields
+            .into_iter()
+            .flat_map(|(t, fields)| fields.into_iter().map(move |(f, ty)| ((t.clone(), f), ty)))
+            .collect(),
     };
     for table in &mut tables {
         let mut roles = BTreeSet::new();
@@ -493,6 +531,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             });
         }
     }
+    writes::permissions(&objects, &mut tables, &mut document)?;
     let mut schema = Schema::new(tables, roots)?;
     schema.document = Some(document);
     Ok(schema)
@@ -501,6 +540,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
 pub(super) fn for_role(
     document: &DocumentSchema,
     schema: &crate::compiler::model::Schema,
+    catalog: &crate::compiler::model::WriteCatalog,
     role: &str,
 ) -> DocumentSchema {
     if role == "admin" {
@@ -568,6 +608,7 @@ pub(super) fn for_role(
             }
         }
     }
+    writes::restrict(&mut document, schema, catalog, role);
     let names: BTreeSet<_> = document.types.keys().cloned().collect();
     for (name, kind) in &mut document.types {
         if let TypeKind::Object(object) = kind {
@@ -577,6 +618,10 @@ pub(super) fn for_role(
                         .roots
                         .iter()
                         .any(|r| r.field == f.node.name.node.as_str())
+                        || document
+                            .primary_roots
+                            .get(f.node.name.node.as_str())
+                            .is_some_and(|t| visible.tables.iter().any(|v| &v.name == t))
                 });
             }
             object
@@ -586,7 +631,7 @@ pub(super) fn for_role(
     }
     document.targets.retain(|(parent, field), _| matches!(document.types.get(parent), Some(TypeKind::Object(o)) if o.fields.iter().any(|f| f.node.name.node == field.as_str())));
     let mut reachable = BTreeSet::new();
-    let mut pending = vec![document.query.clone()];
+    let mut pending = vec![document.query.clone(), "Mutation".to_string()];
     while let Some(name) = pending.pop() {
         if !reachable.insert(name.clone()) {
             continue;
@@ -679,7 +724,7 @@ pub(super) fn for_role(
         });
     }
     document.sdl = format!(
-        "schema {{ query: {} }}\n\n{}",
+        "schema {{ query: {} mutation: Mutation }}\n\n{}",
         document.query,
         rendered.join("\n")
     );

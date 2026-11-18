@@ -1,0 +1,55 @@
+{
+  "version": "v2.51.6",
+  "query": "mutation { insert_mutation_item_one(object: {id: 1, score: -1, title: \"updated\"}, on_conflict: {constraint: mutation_item_pkey, update_columns: [title]}) { id score title } }",
+  "role": "editor",
+  "session": {
+    "user_id": 1
+  },
+  "response": {
+    "data": {
+      "insert_mutation_item_one": {
+        "id": 1,
+        "score": 1,
+        "title": "updated"
+      }
+    }
+  },
+  "tables": {
+    "mutation_author": [
+      {
+        "id": 1,
+        "name": "Ada"
+      },
+      {
+        "id": 2,
+        "name": "Bea"
+      }
+    ],
+    "mutation_item": [
+      {
+        "id": 1,
+        "owner_id": 1,
+        "title": "updated",
+        "score": 1,
+        "note": "updated",
+        "secret": "private"
+      },
+      {
+        "id": 2,
+        "owner_id": 2,
+        "title": "second",
+        "score": 2,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 3,
+        "owner_id": 1,
+        "title": "hidden",
+        "score": 20,
+        "note": null,
+        "secret": "private"
+      }
+    ]
+  }
+}

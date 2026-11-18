@@ -1,6 +1,6 @@
 # rusuna
 
-A Hasura-style GraphQL engine as a Rust library. rusuna compiles a GraphQL query over
+A Hasura-style GraphQL engine as a Rust library. rusuna compiles a GraphQL query or mutation over
 tables and relationships into one PostgreSQL statement that returns the response as a
 single JSON value. It runs inside your own process: no extra server, no database
 extension.
@@ -10,14 +10,14 @@ Rust by [leanfran](https://github.com/conao3/lean-leanfran).
 
 ## Status
 
-rusuna loads a mapping schema from SDL and compiles GraphQL query documents to SQL.
+rusuna loads a mapping schema from SDL and compiles GraphQL query and mutation documents to SQL.
 
 | Feature | State |
 |---|---|
 | Lists, relationships, recursive filters, pagination, null ordering, aggregates and row `__typename` | available |
 | SDL with directives, typed GraphQL text parsing, expanded SDL and a CLI | available |
 | Row and column read permissions per role, with plan invariants | available |
-| Mutations in one transaction | planned |
+| Insert, update, delete, primary-key roots and write permissions | available |
 | Parts for an `async-graphql` schema and `axum` routes | planned |
 | Subscriptions, event triggers | planned |
 
@@ -115,7 +115,7 @@ coercion and custom directives are outside this mapping format.
 Queries support variables and defaults, aliases, named and inline fragments,
 `@skip` and `@include`, Hasura v2 filters and ordering (single object or list), pagination,
 aggregates and row `__typename`. Repeated compatible fields are merged in first-appearance
-order. Conflicting fields, fragment cycles, mutation, subscription and introspection
+order. Conflicting fields, fragment cycles, subscription and introspection
 produce errors. `__typename` on the query root and generated aggregate containers is
 unsupported. A row selection emptied by conditional directives is rejected by the Lean
 selection rules; a skipped root emits no statement.
@@ -188,6 +188,99 @@ The lower-level API uses `Table.permissions: Vec<Permission>` and
 `Operand` is `Literal(Value)` or `Session(String)`. Permission filters have the same
 32-edge, 1000-child and 1000-membership limits as query filters. No mutation permissions
 are implemented.
+
+## Mutations and primary keys
+
+```graphql
+type article @table(name: "article") @primary_key(columns: ["id"])
+  @permission(role: "user", columns: ["id", "author_id", "title", "score"], where: {})
+  @insert_permission(role: "user", columns: ["id", "title", "score"],
+    check: {score: {_gte: 0}}, set: {author_id: "$user_id"})
+  @update_permission(role: "user", columns: ["title", "score"],
+    where: {author_id: {_eq: "$user_id"}}, check: {score: {_gte: 0}})
+  @delete_permission(role: "user", where: {author_id: {_eq: "$user_id"}}) {
+  id: Int!
+  author_id: Int!
+  title: String!
+  score: Int!
+}
+type Query { article: [article!]! @list }
+```
+
+`@primary_key(columns: [String!]!, constraint: String)` declares scalar GraphQL field
+names, including composite keys. `constraint` defaults to the SQL table name followed
+by `_pkey`. The declaration must match the database primary key. The generated query
+field `<Type>_by_pk` takes each key as a required named argument and returns a row or null.
+
+The generated `Mutation` root exposes the following fields for each table type `t`:
+
+| Field | Arguments | Result |
+|---|---|---|
+| `insert_<t>` | `objects`, optional `on_conflict` | `affected_rows`, `returning` |
+| `insert_<t>_one` | `object`, optional `on_conflict` | row or null |
+| `update_<t>` | required `where`, optional `_set`, `_inc` | `affected_rows`, `returning` |
+| `update_<t>_by_pk` | required `pk_columns`, optional `_set`, `_inc` | row or null |
+| `delete_<t>` | required `where` | `affected_rows`, `returning` |
+| `delete_<t>_by_pk` | each primary-key column | row or null |
+
+The `_by_pk` fields require a primary-key declaration. `on_conflict` takes the declared
+primary-key `constraint`, required `update_columns` and optional `where`. An empty
+`update_columns` list means `DO NOTHING`. Conflict updates apply the update permission,
+its presets, its row condition and its post-update check; inserted rows use the insert
+check. Omitted insert fields use database defaults. Explicit null stays null. `_inc`
+accepts numeric columns, and a column cannot occur in both `_set` and `_inc`.
+
+Write directives are repeatable once per role and operation. Insert requires `columns`
+and `check`; update requires `columns`, `where` and `check`; delete requires `where`.
+Insert and update accept a `set` object of column presets. Presets use the same scalar
+literal and session-reference syntax as read permissions. Preset columns are excluded
+from user inputs even when listed in `columns`. The reserved `admin` role is unrestricted.
+An operation without a role permission is absent from that role's schema. Row-returning
+single-row operations require select permission; bulk operations can return only
+`affected_rows` for a role with write permission alone.
+
+`returning` supports the same row selections, relationships and relationship aggregates
+as queries. Its top-level rows have select column restrictions but no select row filter.
+Related scans receive their select row conditions. When a relationship returns to the
+modified table, it reads the post-operation rows through a CTE combining changed rows
+with unaffected snapshot rows. This preserves Hasura's returning semantics within one
+statement; an ordinary read of the physical table inside a data-modifying CTE would
+observe the pre-operation snapshot.
+
+```graphql
+mutation {
+  first: insert_article_one(object: {id: 10, title: "Draft", score: 0}) { id }
+  second: update_article_by_pk(pk_columns: {id: 10}, _inc: {score: 1}) { id score }
+}
+```
+
+`Schema::compile` and `rusuna query compile-sql` accept query and mutation documents.
+They return one `CompiledField` per root field in document order. **The caller must execute
+all fields of a mutation, in order, on one transaction and roll it back if any field
+fails.** rusuna compiles statements; it does not open connections or transactions.
+The lower-level API is `Schema::compile_mutation(&MutationArguments, &[Selection],
+&Session)`. `Table::primary_key` and `Table::write_permissions` provide the equivalent
+schema declarations for `Schema::new`.
+
+An insert or update permission check is a `WriteCheck.abort` node in the plan. SQL
+lowers it to `CAST(CASE WHEN <check> THEN '1' ELSE 'rusuna: permission check failed'
+|| left(s.ctid::text, 0) END AS integer)` in `RETURNING`. The empty suffix depends on
+the affected row, preventing constant folding from rejecting a zero-row operation
+whose permission check is constant false. A violating row fails the whole statement, including
+when only `affected_rows` is selected and under a generic prepared plan. Callers can
+recognize this failure with `is_permission_check_error(sqlstate, message)`, which checks
+`PERMISSION_CHECK_SQLSTATE` (`22P02`) and `PERMISSION_CHECK_MARKER`. A failed statement
+leaves PostgreSQL's transaction aborted until rollback. Hasura reports a GraphQL
+`permission-error`; rusuna exposes a PostgreSQL error so checking a separate result
+column cannot be forgotten.
+
+Outside the mutation surface: nested relationship inserts, `update_<t>_many`, jsonb
+operators such as `_append`, numeric operators other than `_inc`, and conflict constraints
+other than the declared primary key. Conflict updates with primary-key presets are
+rejected: the returning snapshot requires stable conflict keys. Ordinary updates can
+change primary keys. SQL column types, database constraints, triggers
+and defaults belong to the caller's database schema. The returning overlay covers
+the explicit target table; it does not model trigger or cascade changes to other tables.
 
 ## CLI
 
@@ -331,12 +424,15 @@ Conditions written a second time, as an equivalence next to the definition:
 | `scalarValid_iff`, `membershipValid_iff` | Comparison values are non-null and finite, and membership lists respect their size bound. |
 | `predicateEq_iff`, `predicatesEq_iff`, `hasConjunct_iff` | Structural expression equality and immediate conjunct membership have their stated meanings. |
 | `appendCondition_exact`, `addPermission_condition` | The inserted scan is exactly the original scan with the requested role condition appended; binding errors are preserved. |
+| `resolveWrite_permissions`, `resolveWrite_user_columns` | Aborting checks, operation row conditions and authorized writes; user columns exclude presets. |
+| `resolveWrite_declared`, `resolveWrite_tables` | Physical write targets are declared and have the requested operation permission. |
+| `resolveWrite_returning_conditions` | Relationship and predicate scans in returning carry their read permission conditions. |
 | `resolveSelection_accepts`, `runSelection_accepts` | Pre-permission resolution and compilation succeed exactly when the Boolean `acceptsSelection` accepts the schema and selection. |
 
 [leanassay](https://github.com/conao3/lean-leanassay/tree/fc0d05473917864cedb6d27e208c81de3e2a11af) checks which theorems rule out
-broken implementations: the audit covers twenty-one functions, with 144 mutations, 93 killed,
+broken implementations: the audit covers twenty-four functions, with 154 mutations, 103 killed,
 18 equivalent on the sampled inputs, 33 stillborn, zero holes, zero untested and zero timed out.
-There are nine independent properties (fifteen principal theorem statements), sixteen
+There are twelve independent properties (twenty principal theorem statements), nineteen
 restated conditions and zero variable-free checks. The executable audit checks full
 scan equalities as well as their limit projection. AGENTS.md lists the functions it covers and the ones it does not.
 

@@ -1,0 +1,280 @@
+schema { query: Query mutation: Mutation }
+
+input Boolean_comparison_exp {
+  _eq: Boolean
+  _neq: Boolean
+  _gt: Boolean
+  _gte: Boolean
+  _lt: Boolean
+  _lte: Boolean
+  _in: [Boolean!]
+  _nin: [Boolean!]
+  _is_null: Boolean
+}
+
+input Float_comparison_exp {
+  _eq: Float
+  _neq: Float
+  _gt: Float
+  _gte: Float
+  _lt: Float
+  _lte: Float
+  _in: [Float!]
+  _nin: [Float!]
+  _is_null: Boolean
+}
+
+input ID_comparison_exp {
+  _eq: ID
+  _neq: ID
+  _gt: ID
+  _gte: ID
+  _lt: ID
+  _lte: ID
+  _in: [ID!]
+  _nin: [ID!]
+  _is_null: Boolean
+}
+
+input Int_comparison_exp {
+  _eq: Int
+  _neq: Int
+  _gt: Int
+  _gte: Int
+  _lt: Int
+  _lte: Int
+  _in: [Int!]
+  _nin: [Int!]
+  _is_null: Boolean
+}
+
+type Mutation {
+  insert_mutation_author(objects: [mutation_author_insert_input!]!, on_conflict: mutation_author_on_conflict): mutation_author_mutation_response
+  insert_mutation_author_one(object: mutation_author_insert_input!, on_conflict: mutation_author_on_conflict): mutation_author
+  update_mutation_author(where: mutation_author_bool_exp!, _set: mutation_author_set_input, _inc: mutation_author_inc_input): mutation_author_mutation_response
+  delete_mutation_author(where: mutation_author_bool_exp!): mutation_author_mutation_response
+  update_mutation_author_by_pk(pk_columns: mutation_author_pk_columns_input!, _set: mutation_author_set_input, _inc: mutation_author_inc_input): mutation_author
+  delete_mutation_author_by_pk(id: Int!): mutation_author
+  insert_mutation_item(objects: [mutation_item_insert_input!]!, on_conflict: mutation_item_on_conflict): mutation_item_mutation_response
+  insert_mutation_item_one(object: mutation_item_insert_input!, on_conflict: mutation_item_on_conflict): mutation_item
+  update_mutation_item(where: mutation_item_bool_exp!, _set: mutation_item_set_input, _inc: mutation_item_inc_input): mutation_item_mutation_response
+  delete_mutation_item(where: mutation_item_bool_exp!): mutation_item_mutation_response
+  update_mutation_item_by_pk(pk_columns: mutation_item_pk_columns_input!, _set: mutation_item_set_input, _inc: mutation_item_inc_input): mutation_item
+  delete_mutation_item_by_pk(id: Int!): mutation_item
+}
+
+type Query {
+  mutation_author(where: mutation_author_bool_exp, order_by: [mutation_author_order_by!], limit: Int, offset: Int): [mutation_author!]!
+  mutation_item(where: mutation_item_bool_exp, order_by: [mutation_item_order_by!], limit: Int, offset: Int): [mutation_item!]!
+  mutation_author_by_pk(id: Int!): mutation_author
+  mutation_item_by_pk(id: Int!): mutation_item
+}
+
+input String_comparison_exp {
+  _eq: String
+  _neq: String
+  _gt: String
+  _gte: String
+  _lt: String
+  _lte: String
+  _in: [String!]
+  _nin: [String!]
+  _is_null: Boolean
+  _like: String
+  _nlike: String
+  _ilike: String
+  _nilike: String
+}
+
+type mutation_author {
+  id: Int!
+  name: String!
+  items(where: mutation_item_bool_exp, order_by: [mutation_item_order_by!], limit: Int, offset: Int): [mutation_item!]!
+  items_aggregate(where: mutation_item_bool_exp, order_by: [mutation_item_order_by!], limit: Int, offset: Int): mutation_item_aggregate!
+}
+
+type mutation_author_aggregate {
+  aggregate: mutation_author_aggregate_fields
+  nodes: [mutation_author!]!
+}
+
+type mutation_author_aggregate_fields {
+  count: Int!
+  sum: mutation_author_sum_fields
+  avg: mutation_author_avg_fields
+  min: mutation_author_min_fields
+  max: mutation_author_max_fields
+}
+
+type mutation_author_avg_fields {
+  id: Float
+}
+
+input mutation_author_bool_exp {
+  _and: [mutation_author_bool_exp!]
+  _or: [mutation_author_bool_exp!]
+  _not: mutation_author_bool_exp
+  id: Int_comparison_exp
+  name: String_comparison_exp
+  items: mutation_item_bool_exp
+}
+
+enum mutation_author_constraint { mutation_author_pkey }
+
+input mutation_author_inc_input {
+  id: Int
+}
+
+input mutation_author_insert_input {
+  id: Int
+  name: String
+}
+
+type mutation_author_max_fields {
+  id: Int
+  name: String
+}
+
+type mutation_author_min_fields {
+  id: Int
+  name: String
+}
+
+type mutation_author_mutation_response {
+  affected_rows: Int!
+  returning: [mutation_author!]!
+}
+
+input mutation_author_on_conflict { constraint: mutation_author_constraint! update_columns: [mutation_author_update_column!]! where: mutation_author_bool_exp }
+
+input mutation_author_order_by {
+  id: order_by
+  name: order_by
+}
+
+input mutation_author_pk_columns_input { id: Int! }
+
+input mutation_author_set_input {
+  id: Int
+  name: String
+}
+
+type mutation_author_sum_fields {
+  id: Int
+}
+
+enum mutation_author_update_column { id name }
+
+type mutation_item {
+  id: Int!
+  owner_id: Int!
+  title: String!
+  score: Int!
+  note: String
+  secret: String!
+  owner: mutation_author!
+}
+
+type mutation_item_aggregate {
+  aggregate: mutation_item_aggregate_fields
+  nodes: [mutation_item!]!
+}
+
+type mutation_item_aggregate_fields {
+  count: Int!
+  sum: mutation_item_sum_fields
+  avg: mutation_item_avg_fields
+  min: mutation_item_min_fields
+  max: mutation_item_max_fields
+}
+
+type mutation_item_avg_fields {
+  id: Float
+  owner_id: Float
+  score: Float
+}
+
+input mutation_item_bool_exp {
+  _and: [mutation_item_bool_exp!]
+  _or: [mutation_item_bool_exp!]
+  _not: mutation_item_bool_exp
+  id: Int_comparison_exp
+  owner_id: Int_comparison_exp
+  title: String_comparison_exp
+  score: Int_comparison_exp
+  note: String_comparison_exp
+  secret: String_comparison_exp
+  owner: mutation_author_bool_exp
+}
+
+enum mutation_item_constraint { mutation_item_pkey }
+
+input mutation_item_inc_input {
+  id: Int
+  owner_id: Int
+  score: Int
+}
+
+input mutation_item_insert_input {
+  id: Int
+  owner_id: Int
+  title: String
+  score: Int
+  note: String
+  secret: String
+}
+
+type mutation_item_max_fields {
+  id: Int
+  owner_id: Int
+  title: String
+  score: Int
+  note: String
+  secret: String
+}
+
+type mutation_item_min_fields {
+  id: Int
+  owner_id: Int
+  title: String
+  score: Int
+  note: String
+  secret: String
+}
+
+type mutation_item_mutation_response {
+  affected_rows: Int!
+  returning: [mutation_item!]!
+}
+
+input mutation_item_on_conflict { constraint: mutation_item_constraint! update_columns: [mutation_item_update_column!]! where: mutation_item_bool_exp }
+
+input mutation_item_order_by {
+  id: order_by
+  owner_id: order_by
+  title: order_by
+  score: order_by
+  note: order_by
+  secret: order_by
+}
+
+input mutation_item_pk_columns_input { id: Int! }
+
+input mutation_item_set_input {
+  id: Int
+  owner_id: Int
+  title: String
+  score: Int
+  note: String
+  secret: String
+}
+
+type mutation_item_sum_fields {
+  id: Int
+  owner_id: Int
+  score: Int
+}
+
+enum mutation_item_update_column { id owner_id title score note secret }
+
+enum order_by { asc asc_nulls_first asc_nulls_last desc desc_nulls_first desc_nulls_last }

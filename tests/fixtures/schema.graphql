@@ -1,6 +1,6 @@
 scalar DateTime
 
-type author @table(name: "author") {
+type author @table(name: "author") @primary_key(columns: ["id"]) {
   id: Int!
   name: String!
   nickname: String
@@ -9,7 +9,7 @@ type author @table(name: "author") {
   articles_aggregate: article_aggregate! @aggregate(target: "article") @relation(columns: ["id"], references: ["author_id"])
 }
 
-type article @table(name: "article") {
+type article @table(name: "article") @primary_key(columns: ["id"]) {
   id: Int!
   author_id: Int!
   title: String!
@@ -21,14 +21,14 @@ type article @table(name: "article") {
   revisions_aggregate: revision_aggregate! @aggregate(target: "revision") @relation(columns: ["id", "author_id"], references: ["article_id", "author_id"])
 }
 
-type comment @table(name: "comment") {
+type comment @table(name: "comment") @primary_key(columns: ["id"]) {
   id: Int!
   article_id: Int!
   body: String!
   article: article! @relation(columns: ["article_id"], references: ["id"])
 }
 
-type revision @table(name: "revision") {
+type revision @table(name: "revision") @primary_key(columns: ["article_id", "author_id", "note"]) {
   article_id: Int!
   author_id: Int!
   note: String!

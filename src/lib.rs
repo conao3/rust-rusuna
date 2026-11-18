@@ -23,6 +23,8 @@
 
 mod compiler;
 mod graphql;
+mod mutation;
+pub use mutation::*;
 
 pub use graphql::{CompiledField, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_DEPTH};
 
@@ -115,6 +117,8 @@ pub struct Table {
     pub columns: Vec<Column>,
     pub relations: Vec<Relation>,
     pub permissions: Vec<Permission>,
+    pub write_permissions: Vec<WritePermission>,
+    pub primary_key: Option<PrimaryKey>,
 }
 
 impl Table {
@@ -130,6 +134,8 @@ impl Table {
             columns: Vec::new(),
             relations: Vec::new(),
             permissions: Vec::new(),
+            write_permissions: Vec::new(),
+            primary_key: None,
         }
     }
 
@@ -287,6 +293,8 @@ pub struct Selection {
     pub limit: Option<u64>,
     pub offset: Option<u64>,
     pub fields: Vec<Selection>,
+    pub mutation: Option<MutationArguments>,
+    pub primary_key: Option<(String, Vec<(String, Value)>)>,
 }
 
 impl Selection {
@@ -300,6 +308,8 @@ impl Selection {
             limit: None,
             offset: None,
             fields: Vec::new(),
+            mutation: None,
+            primary_key: None,
         }
     }
 
@@ -339,7 +349,7 @@ impl Selection {
 
 /// One SQL statement and its parameters, in the order of `$1`, `$2`, ….
 ///
-/// The statement returns one row with one `json` column: a list or an aggregate object.
+/// The statement returns one row with one nullable `json` column: a list, an object or null.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Compiled {
     pub sql: String,
@@ -405,10 +415,9 @@ impl fmt::Display for Error {
                 column,
             } => write!(f, "{line}:{column}: {message}"),
             Self::MissingSession { name } => write!(f, "session variable `{name}` is missing"),
-            Self::InvalidPermission { name } => write!(
-                f,
-                "permission conditions for `{name}` must include the permissions of every related table"
-            ),
+            Self::InvalidPermission { name } => {
+                write!(f, "permission requirements for `{name}` are not satisfied")
+            }
             Self::UnknownRoot { name } => write!(f, "no root field is named `{name}`"),
             Self::UnknownType { name } => write!(f, "no table is named `{name}`"),
             Self::UnknownField { table, field } => write!(f, "`{table}` has no field `{field}`"),
@@ -483,6 +492,7 @@ impl RootField {
 #[derive(Debug, Clone)]
 pub struct Schema {
     model: model::Schema,
+    writes: model::WriteCatalog,
     document: Option<graphql::DocumentSchema>,
 }
 
@@ -501,7 +511,9 @@ impl Schema {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        let writes = mutation::catalog(&tables)?;
         Ok(Self {
+            writes,
             document: None,
             model: model::Schema {
                 permissions,
@@ -527,6 +539,12 @@ impl Schema {
         root: &Selection,
         session: &Session,
     ) -> Result<Compiled, Error> {
+        if let Some(input) = &root.mutation {
+            return self.compile_mutation(input, &root.fields, session);
+        }
+        if let Some((target, values)) = &root.primary_key {
+            return mutation::compile_primary(self, target, values, &root.fields, session);
+        }
         let root = selection_model(root, 0)?;
         match model::run(self.model.clone(), session_model(session), root) {
             Ok(compiled) => Ok(Compiled {

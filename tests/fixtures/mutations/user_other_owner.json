@@ -1,0 +1,52 @@
+{
+  "version": "v2.51.6",
+  "query": "mutation { update_mutation_item_by_pk(pk_columns: {id: 2}, _set: {title: \"no\"}) { id } delete_mutation_item_by_pk(id: 2) { id } }",
+  "role": "user",
+  "session": {
+    "user_id": 1
+  },
+  "response": {
+    "data": {
+      "update_mutation_item_by_pk": null,
+      "delete_mutation_item_by_pk": null
+    }
+  },
+  "tables": {
+    "mutation_author": [
+      {
+        "id": 1,
+        "name": "Ada"
+      },
+      {
+        "id": 2,
+        "name": "Bea"
+      }
+    ],
+    "mutation_item": [
+      {
+        "id": 1,
+        "owner_id": 1,
+        "title": "first",
+        "score": 1,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 2,
+        "owner_id": 2,
+        "title": "second",
+        "score": 2,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 3,
+        "owner_id": 1,
+        "title": "hidden",
+        "score": 20,
+        "note": null,
+        "secret": "private"
+      }
+    ]
+  }
+}

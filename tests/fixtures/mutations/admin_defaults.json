@@ -1,0 +1,81 @@
+{
+  "version": "v2.51.6",
+  "query": "mutation { insert_mutation_item(objects: [{}, {}]) { affected_rows returning { id title score } } }",
+  "role": "admin",
+  "session": {
+    "user_id": 1
+  },
+  "response": {
+    "data": {
+      "insert_mutation_item": {
+        "affected_rows": 2,
+        "returning": [
+          {
+            "id": 100,
+            "title": "untitled",
+            "score": 0
+          },
+          {
+            "id": 101,
+            "title": "untitled",
+            "score": 0
+          }
+        ]
+      }
+    }
+  },
+  "tables": {
+    "mutation_author": [
+      {
+        "id": 1,
+        "name": "Ada"
+      },
+      {
+        "id": 2,
+        "name": "Bea"
+      }
+    ],
+    "mutation_item": [
+      {
+        "id": 1,
+        "owner_id": 1,
+        "title": "first",
+        "score": 1,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 2,
+        "owner_id": 2,
+        "title": "second",
+        "score": 2,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 3,
+        "owner_id": 1,
+        "title": "hidden",
+        "score": 20,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 100,
+        "owner_id": 1,
+        "title": "untitled",
+        "score": 0,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 101,
+        "owner_id": 1,
+        "title": "untitled",
+        "score": 0,
+        "note": null,
+        "secret": "private"
+      }
+    ]
+  }
+}

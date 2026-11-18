@@ -1,0 +1,62 @@
+{
+  "version": "v2.51.6",
+  "query": "mutation { delete_mutation_item_by_pk(id: 1) { id owner { name items(order_by: {id: asc}) { id score } items_aggregate { aggregate { count sum { score } } } } } }",
+  "role": "admin",
+  "session": {
+    "user_id": 1
+  },
+  "response": {
+    "data": {
+      "delete_mutation_item_by_pk": {
+        "id": 1,
+        "owner": {
+          "name": "Ada",
+          "items": [
+            {
+              "id": 3,
+              "score": 20
+            }
+          ],
+          "items_aggregate": {
+            "aggregate": {
+              "count": 1,
+              "sum": {
+                "score": 20
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "tables": {
+    "mutation_author": [
+      {
+        "id": 1,
+        "name": "Ada"
+      },
+      {
+        "id": 2,
+        "name": "Bea"
+      }
+    ],
+    "mutation_item": [
+      {
+        "id": 2,
+        "owner_id": 2,
+        "title": "second",
+        "score": 2,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 3,
+        "owner_id": 1,
+        "title": "hidden",
+        "score": 20,
+        "note": null,
+        "secret": "private"
+      }
+    ]
+  }
+}

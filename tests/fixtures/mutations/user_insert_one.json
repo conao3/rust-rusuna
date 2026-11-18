@@ -1,0 +1,64 @@
+{
+  "version": "v2.51.6",
+  "query": "mutation { insert_mutation_item_one(object: {title: \"default\", score: 5}) { id title score owner_id } }",
+  "role": "user",
+  "session": {
+    "user_id": 1
+  },
+  "response": {
+    "data": {
+      "insert_mutation_item_one": {
+        "id": 100,
+        "title": "default",
+        "score": 5,
+        "owner_id": 1
+      }
+    }
+  },
+  "tables": {
+    "mutation_author": [
+      {
+        "id": 1,
+        "name": "Ada"
+      },
+      {
+        "id": 2,
+        "name": "Bea"
+      }
+    ],
+    "mutation_item": [
+      {
+        "id": 1,
+        "owner_id": 1,
+        "title": "first",
+        "score": 1,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 2,
+        "owner_id": 2,
+        "title": "second",
+        "score": 2,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 3,
+        "owner_id": 1,
+        "title": "hidden",
+        "score": 20,
+        "note": null,
+        "secret": "private"
+      },
+      {
+        "id": 100,
+        "owner_id": 1,
+        "title": "default",
+        "score": 5,
+        "note": null,
+        "secret": "private"
+      }
+    ]
+  }
+}

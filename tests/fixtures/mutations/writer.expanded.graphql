@@ -1,0 +1,40 @@
+schema { query: Query mutation: Mutation }
+
+type Mutation {
+  insert_mutation_item(objects: [mutation_item_insert_input!]!, on_conflict: mutation_item_on_conflict): mutation_item_mutation_response
+  update_mutation_item(where: mutation_item_bool_exp!, _set: mutation_item_set_input, _inc: mutation_item_inc_input): mutation_item_mutation_response
+  delete_mutation_item(where: mutation_item_bool_exp!): mutation_item_mutation_response
+}
+
+type Query
+
+input mutation_item_bool_exp {
+  _and: [mutation_item_bool_exp!]
+  _or: [mutation_item_bool_exp!]
+  _not: mutation_item_bool_exp
+}
+
+enum mutation_item_constraint { mutation_item_pkey }
+
+input mutation_item_inc_input
+
+input mutation_item_insert_input {
+  title: String
+  score: Int
+}
+
+type mutation_item_mutation_response {
+  affected_rows: Int!
+}
+
+input mutation_item_on_conflict {
+  constraint: mutation_item_constraint!
+  update_columns: [mutation_item_update_column!]!
+  where: mutation_item_bool_exp
+}
+
+input mutation_item_set_input {
+  title: String
+}
+
+enum mutation_item_update_column { title }

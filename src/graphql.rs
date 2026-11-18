@@ -1,5 +1,6 @@
 mod query;
 mod schema;
+mod writes;
 
 use crate::{Compiled, Error, Schema, Selection, Session};
 use async_graphql_parser::{Pos, types::*};
@@ -20,6 +21,9 @@ pub(crate) struct DocumentSchema {
     pub targets: BTreeMap<(String, String), String>,
     pub sdl: String,
     pub query: String,
+    pub mutation_roots: BTreeMap<String, (String, crate::WriteKind, bool, bool)>,
+    pub primary_roots: BTreeMap<String, String>,
+    pub row_types: BTreeMap<(String, String), String>,
     pub session_types: Vec<(String, String, String)>,
 }
 
@@ -29,7 +33,7 @@ impl Schema {
     }
 
     pub fn expanded_sdl(&self, role: &str) -> Result<String, Error> {
-        Ok(schema::for_role(self.document()?, &self.model, role).sdl)
+        Ok(schema::for_role(self.document()?, &self.model, &self.writes, role).sdl)
     }
 
     pub fn parse_query(
@@ -43,7 +47,7 @@ impl Schema {
             return query::parse(self.document()?, query, variables, operation_name);
         }
         query::parse(
-            &schema::for_role(self.document()?, &self.model, role),
+            &schema::for_role(self.document()?, &self.model, &self.writes, role),
             query,
             variables,
             operation_name,
