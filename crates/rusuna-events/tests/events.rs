@@ -783,6 +783,15 @@ async fn a_cron_occurrence_fires_once_across_workers() {
         event.body()["scheduled_time"],
         "2026-01-01T00:05:00.000000Z"
     );
+    until("the recorded delivery", || async {
+        scalar(
+            &pool,
+            "SELECT count(*) FROM rusuna.event_log WHERE status = 'delivered'",
+        )
+        .await
+            == 1
+    })
+    .await;
     clock.set("2026-01-01T00:09:59Z");
     for worker in &workers {
         polls(&worker.monitor, 3).await;
