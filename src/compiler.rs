@@ -2397,10 +2397,16 @@ leanfran::lean! {
       lift [.raw ", CAST(CASE WHEN (CASE WHEN", .col "s" "xmax", .raw "= 0 THEN"] ++ check insertCheck ++
         lift [.raw "ELSE"] ++ check updateCheck ++ lift [.raw "END) THEN '1' ELSE 'rusuna: permission check failed' || left(", .col "s" "ctid", .raw "::text, 0) END AS integer) AS", .ident "check__constraint"]
 
+    def revisitsTarget (plan : WritePlan) : Bool :=
+      plan.outputs.any fun output => match output with
+        | .count _ => false
+        | .rows _ children => ((nodesScans children).flatMap scanTree).any (·.name == plan.target)
+
     def writeBodyToks (plan : WritePlan) : List Tok :=
+      let overlay := revisitsTarget plan
       let table := lift [.col plan.schema plan.table, .raw "AS", .ident "s"]
       let returning := lift [.raw "RETURNING", .ident "s", .raw "AS", .ident "t0", .raw ","] ++
-        lift [if plan.kind == .insert then .raw "NULL::tid" else if plan.kind == .update then .col "b0" "ctid" else .col "s" "ctid",
+        lift [if plan.kind == .insert then .raw "NULL::tid" else if plan.kind == .update then (if overlay then .col "b0" "ctid" else .raw "NULL::tid") else .col "s" "ctid",
           .raw "AS", .ident "k0"] ++ (match plan.conflict with
         | some conflict => if conflict.assignments.isEmpty then writeCheckToks plan.check else conflictCheckToks plan.check conflict.check
         | none => writeCheckToks plan.check)
@@ -2419,7 +2425,8 @@ leanfran::lean! {
       | .update =>
         if plan.assignments.isEmpty then lift [.raw "SELECT", .ident "s", .raw "AS", .ident "t0", .raw ",", .col "s" "ctid", .raw "AS", .ident "k0", .raw "FROM"] ++ table ++ lift [.raw "WHERE false"] else
         lift [.raw "UPDATE"] ++ table ++ lift [.raw "SET"] ++ tokenCommas (plan.assignments.map assignmentToks) ++
-          lift [.raw "FROM", .col plan.schema plan.table, .raw "AS", .ident "b0", .raw "WHERE", .col "s" "ctid", .raw "=", .col "b0" "ctid", .raw "AND ("] ++ expressionToks 0 "s" plan.conds ++ lift [.raw ")"] ++ returning
+          (if overlay then lift [.raw "FROM", .col plan.schema plan.table, .raw "AS", .ident "b0", .raw "WHERE", .col "s" "ctid", .raw "=", .col "b0" "ctid", .raw "AND ("] ++ expressionToks 0 "s" plan.conds ++ lift [.raw ")"]
+            else lift [.raw "WHERE"] ++ expressionToks 0 "s" plan.conds) ++ returning
       | .delete => lift [.raw "DELETE FROM"] ++ table ++ lift [.raw "WHERE"] ++ expressionToks 0 "s" plan.conds ++ returning
 
     def returningToks (single : Bool) (children : List Node) : List Tok :=
@@ -2440,10 +2447,12 @@ leanfran::lean! {
         | some conflict => [.raw "SELECT 1 FROM", .ident (rName 0), .raw "AS", .ident "b0", .raw "WHERE true"] ++
             conflict.keys.flatMap (fun c => [.raw "AND", .col "s" c, .raw "=", .col "b0" c])
       lift [.raw "WITH", .ident "m0", .raw "AS ("] ++ writeBodyToks plan ++
-        lift ([.raw "),", .ident (rName 0), .raw "AS (SELECT (", .ident "t0", .raw ").* FROM", .ident "m0",
-          .raw "),", .ident "w0", .raw "AS (SELECT", .ident "s", .raw ".* FROM", .col plan.schema plan.table,
-          .raw "AS", .ident "s", .raw "WHERE NOT EXISTS ("] ++ excluded ++ [.raw ")"]) ++
-        (if plan.kind == .delete then [] else lift [.raw "UNION ALL SELECT * FROM", .ident (rName 0)]) ++
+        lift [.raw "),", .ident (rName 0), .raw "AS (SELECT (", .ident "t0", .raw ").* FROM", .ident "m0"] ++
+        (if revisitsTarget plan then
+          lift ([.raw "),", .ident "w0", .raw "AS (SELECT", .ident "s", .raw ".* FROM", .col plan.schema plan.table,
+            .raw "AS", .ident "s", .raw "WHERE NOT EXISTS ("] ++ excluded ++ [.raw ")"]) ++
+          (if plan.kind == .delete then [] else lift [.raw "UNION ALL SELECT * FROM", .ident (rName 0)])
+        else []) ++
         lift [.raw ") SELECT"] ++
         (if plan.single then outputs.flatMap (writeOutputToks true) else
           lift [.raw "json_build_object("] ++ tokenCommas (outputs.map (writeOutputToks false)) ++ lift [.raw ")"])

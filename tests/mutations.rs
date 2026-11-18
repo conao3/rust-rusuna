@@ -311,3 +311,44 @@ fn write_permission_directives_reject_unknown_names_and_root_placements() {
         assert!(Schema::from_sdl(sdl).is_err());
     }
 }
+
+#[test]
+fn an_update_applies_to_a_row_changed_by_a_concurrent_transaction() {
+    let url = std::env::var("RUSUNA_POSTGRES").expect("run make check");
+    let mut first = Client::connect(&url, NoTls).unwrap();
+    first
+        .batch_execute(
+            "CREATE TABLE concurrent_counter (id integer PRIMARY KEY, score integer NOT NULL);
+             INSERT INTO concurrent_counter VALUES (1, 1);",
+        )
+        .unwrap();
+    first
+        .batch_execute("BEGIN; UPDATE concurrent_counter SET score = score + 1 WHERE id = 1;")
+        .unwrap();
+    let schema = Schema::from_sdl(
+        "type counter @table(name: \"concurrent_counter\") @primary_key(columns: [\"id\"]) { id: Int! score: Int! } type Query { counter: [counter!]! @list }",
+    )
+    .unwrap();
+    let fields = schema
+        .compile(
+            "mutation { update_counter(where: {id: {_eq: 1}}, _inc: {score: 10}) { affected_rows returning { score } } }",
+            &json!({}),
+            None,
+            &Session::new("admin"),
+        )
+        .unwrap();
+    let compiled = fields[0].compiled.clone();
+    let second = std::thread::spawn(move || {
+        let mut client = Client::connect(&url, NoTls).unwrap();
+        let params: Vec<_> = compiled.params.iter().map(Param).collect();
+        let refs: Vec<_> = params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+        let row = client.query_one(&compiled.sql, &refs).unwrap();
+        row.get::<_, Json>(0)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    first.batch_execute("COMMIT").unwrap();
+    assert_eq!(
+        second.join().unwrap(),
+        json!({"affected_rows": 1, "returning": [{"score": 12}]})
+    );
+}

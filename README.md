@@ -281,6 +281,11 @@ rejected: the returning snapshot requires stable conflict keys. Ordinary updates
 change primary keys. SQL column types, database constraints, triggers
 and defaults belong to the caller's database schema. The returning overlay covers
 the explicit target table; it does not model trigger or cascade changes to other tables.
+The overlay and the self-join that records original tuple identifiers are emitted only when
+`returning` reads the modified table again through a relationship. Under `READ COMMITTED`,
+such an update affects zero rows for a row that a concurrent transaction changed while the
+statement waited for its lock; an update whose `returning` does not read the modified table
+again follows PostgreSQL's ordinary re-check and applies to the new row version.
 
 ## CLI
 
