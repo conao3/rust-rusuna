@@ -27,8 +27,9 @@ commit the workflow and `actions.lock` together.
   schema of one role, the root resolvers (query, mutation and subscription), hand-written
   fields and the transaction extension.
 - `crates/rusuna-axum/`: the axum 0.8 routes `graphql` (`POST`) and `graphql_ws`
-  (WebSocket, `graphql-transport-ws`) and the example `blog`, which also runs an event
-  worker.
+  (WebSocket, `graphql-transport-ws`), `src/rest.rs` with `rest`, the REST endpoints
+  (validated per role in introspection-only mode when they are built), and the example
+  `blog`, which also serves a REST endpoint and runs an event worker.
 - `crates/rusuna-events/`: event triggers, cron triggers and scheduled events, all in
   Rust; the Lean core is not involved. `src/migration.rs` generates the idempotent
   migration (tables `rusuna.event_log` and `rusuna.event_invocation`, the function
@@ -380,6 +381,8 @@ are also tested in autocommit mode without a caller rollback.
   response keys, hand-written fields in both directions,
   hidden roles and introspection with the expanded SDL of each role. Pruned empty types
   are listed by hand in `tests/introspection.rs`.
+- `crates/rusuna-http-tests/tests/rest.rs` builds REST endpoints over the mutation
+  fixtures and compares their bodies with the `data` of the GraphQL route.
 - `crates/rusuna-http-tests/tests/views.rs` reads a view and a materialized view
   (`tests/fixtures/views.sql`, `views.graphql`) with relationships, permissions and
   aggregates, and checks that read-only types have no mutations.

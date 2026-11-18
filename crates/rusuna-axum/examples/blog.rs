@@ -3,6 +3,7 @@ use async_graphql::dynamic::{Field, FieldFuture, FieldValue, Object, Schema, Typ
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::IntoResponse;
+use rusuna_axum::{Endpoint, RestMethod};
 use rusuna_events::{Cause, Event, EventTrigger, Events, Operation, Retry, WorkerOptions};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -87,22 +88,36 @@ async fn main() {
             (role.to_string(), schema)
         })
         .collect();
-    let app = axum::Router::new().route(
-        "/api/graphql",
-        rusuna_axum::graphql(schemas.clone(), |parts: &Parts| {
-            let result = session(|name| parts.headers.get(name).and_then(|v| v.to_str().ok()))
-                .map_err(IntoResponse::into_response);
-            async move { result }
-        })
-        .merge(rusuna_axum::graphql_ws(
-            schemas,
-            |_: &Parts, payload: serde_json::Value| {
-                let result = session(|name| payload["headers"][name].as_str())
-                    .map_err(|(_, message)| message.to_string());
-                async move { result }
-            },
-        )),
-    );
+    let header_session = |parts: &Parts| {
+        let result = session(|name| parts.headers.get(name).and_then(|v| v.to_str().ok()))
+            .map_err(IntoResponse::into_response);
+        async move { result }
+    };
+    let rest = rusuna_axum::rest(
+        schemas.clone(),
+        vec![Endpoint::new(
+            "article",
+            "/api/rest/articles/:id",
+            [RestMethod::Get],
+            "query Article($id: Int!) { article_by_pk(id: $id) { id title author { name } } }",
+        )],
+        header_session,
+    )
+    .await
+    .unwrap();
+    let app = axum::Router::new()
+        .route(
+            "/api/graphql",
+            rusuna_axum::graphql(schemas.clone(), header_session).merge(rusuna_axum::graphql_ws(
+                schemas,
+                |_: &Parts, payload: serde_json::Value| {
+                    let result = session(|name| payload["headers"][name].as_str())
+                        .map_err(|(_, message)| message.to_string());
+                    async move { result }
+                },
+            )),
+        )
+        .merge(rest);
     let events = Events::new()
         .trigger(EventTrigger::new("article_created", "article").operations([Operation::Insert]))
         .handler(

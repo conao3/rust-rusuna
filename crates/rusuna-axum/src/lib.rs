@@ -3,7 +3,12 @@
 //! [`graphql`] takes one schema per role and a function that builds a
 //! [`rusuna::Session`] from the request, and returns a `POST` route. [`graphql_ws`] serves
 //! the same schemas over WebSocket with the `graphql-transport-ws` protocol, for
-//! subscriptions, queries and mutations.
+//! subscriptions, queries and mutations. [`rest`] serves named GraphQL documents as REST
+//! endpoints on the same schemas.
+
+mod rest;
+
+pub use rest::{Endpoint, EndpointError, MAX_BODY_BYTES, RestMethod, rest};
 
 use async_graphql::dynamic::Schema;
 use async_graphql::http::ALL_WEBSOCKET_PROTOCOLS;

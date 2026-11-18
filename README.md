@@ -22,6 +22,7 @@ documents to SQL. `rusuna-events` runs event triggers and cron triggers beside i
 | Views and materialized views as read-only tables | available |
 | Execution with sqlx, parts for an `async-graphql` schema and `axum` routes | available |
 | Subscriptions over WebSocket, polled with one statement per group of subscriptions | available |
+| REST endpoints from named GraphQL documents | available |
 | Event triggers, cron triggers and scheduled events, delivered to Rust handlers and webhooks | available |
 
 The workspace has these crates:
@@ -31,7 +32,7 @@ The workspace has these crates:
 | `rusuna` | The compiler: SDL, GraphQL text and Lean core. No I/O. |
 | `rusuna-sqlx` | Runs compiled statements on PostgreSQL with sqlx 0.9 and returns the `data` JSON; polls subscriptions. |
 | `rusuna-async-graphql` | Builds an async-graphql 7 dynamic schema for one role, beside hand-written fields. |
-| `rusuna-axum` | axum 0.8 routes (`POST` and WebSocket) that pick the role's schema and execute the request. |
+| `rusuna-axum` | axum 0.8 routes (`POST`, WebSocket and REST endpoints) that pick the role's schema and execute the request. |
 | `rusuna-events` | Records row changes with PostgreSQL triggers and delivers them, cron occurrences and scheduled events to Rust handlers and webhooks. |
 | `rusuna-cli` | The `rusuna` command (not published). |
 
@@ -513,6 +514,95 @@ every operation on the schema of the session's role with the session in the conn
 data. Another first message closes the connection with code 4400; an error or a role
 without a schema closes it with code 4403 and the message.
 
+## REST endpoints
+
+`rusuna_axum::rest` serves named GraphQL documents as REST routes, like Hasura's RESTified
+endpoints. Each endpoint binds one query or mutation to a URL pattern and HTTP methods,
+and runs it on the same role schemas, sessions, permissions and transactions as the
+GraphQL route.
+
+```rust
+use rusuna_axum::{Endpoint, RestMethod};
+
+let rest = rusuna_axum::rest(
+    schemas.clone(),
+    vec![
+        Endpoint::new(
+            "article",
+            "/api/rest/articles/:id",
+            [RestMethod::Get],
+            "query Article($id: Int!) { article_by_pk(id: $id) { id title author { name } } }",
+        ),
+        Endpoint::new(
+            "create_article",
+            "/api/rest/articles",
+            [RestMethod::Post],
+            "mutation Create($title: String!) { insert_article_one(object: {title: $title}) { id } }",
+        ),
+    ],
+    |parts: &axum::http::request::Parts| {
+        let session = authenticate(&parts.headers);
+        async move { session }
+    },
+)
+.await?;
+let app = axum::Router::new().route("/api/graphql", graphql_route).merge(rest);
+```
+
+`rest(HashMap<String, dynamic::Schema>, Vec<Endpoint>, session)` returns an
+`axum::Router` or an `EndpointError { endpoint, message }`. The session function is the
+one of `graphql`. `Endpoint::new(name, url, methods, query)` takes a distinct name, a
+path whose segments `:name` bind the GraphQL variable `name`, the methods `Get`, `Post`,
+`Put`, `Patch` and `Delete`, and a document with exactly one query or mutation operation.
+`Endpoint` also deserializes from JSON, so endpoints can live in a file beside the SDL:
+
+```json
+[{"Name": "article", "Url": "/api/rest/articles/:id", "Methods": ["GET"],
+  "Query": "query Article($id: Int!) { article_by_pk(id: $id) { id title } }"}]
+```
+
+**Building.** `rest` validates every document against the schema of every role, without
+running a resolver: it executes the document in async-graphql's introspection-only mode,
+which validates it and answers each field with null. A role whose schema rejects the
+document, for example because a root field or column is hidden from it, cannot call the
+endpoint. It is an error when no role can, when the document is a subscription or has
+other than one operation, when a URL variable is not a variable of the operation or has a
+list type, when two endpoints serve the same method at the same pattern, and when two
+patterns differ only in variable names. Variables that the request must supply are not
+required at this point.
+
+**Variables.** A request builds the variables from three places; a later one replaces an
+earlier one of the same name:
+
+1. the JSON object of the body, for every method except `GET`, passed as is;
+2. the query string;
+3. the path variables.
+
+Values from the path and the query string are text, converted by the variable's declared
+type: `Int` and `Float` read a JSON number, `Boolean` reads `true` or `false`, and a bare
+flag (`?published`) is `true`; an empty value of a nullable variable is null; every other
+type (`String`, `ID`, `DateTime`, enums) is the text as a string. A list-typed variable
+cannot come from the path or the query string. A name that is not a variable of the
+operation is an error. Omitted variables take their defaults, and omitted nullable ones
+are null, as in the GraphQL route.
+
+**Responses.** A success is status 200 with the `data` object of the GraphQL response as
+the body, for example `{"article_by_pk": {"id": 1, "title": "…"}}`. A failure is a JSON
+body with `errors` (and `data`), each error with `extensions.code` where one applies:
+
+| Status | When |
+|---|---|
+| 400 `bad-request` | The body is not a JSON object, a path or query value does not fit its type, or a name is not a variable. |
+| 400 | async-graphql rejects a variable value, `validation-failed`, `data-exception`, `constraint-violation` and `permission-error` (a violated insert or update check). |
+| 403 `access-denied` | The session's role has no schema or cannot call the endpoint. |
+| 404, 405 | axum: no pattern matches, or the pattern has no endpoint for the method. |
+| 500 `unexpected` | Another database error. |
+
+Hasura's RESTified endpoints are declared in metadata and use a query collection; rusuna
+takes them in Rust or JSON. rusuna rejects an endpoint at build time instead of at the
+first request, and its error bodies are GraphQL error lists. Caching (`@cached`) and the
+OpenAPI export are outside this crate.
+
 ## Subscriptions
 
 ```rust
@@ -876,6 +966,19 @@ A reader sees published articles only; a writer also sees its own drafts and ins
 articles as itself. `tools/with-postgres.sh` sets `DATABASE_URL`, which the example
 reads.
 
+The example also serves the REST endpoint `/api/rest/articles/:id`, the document
+`query Article($id: Int!) { article_by_pk(id: $id) { id title author { name } } }`:
+
+```sh
+curl -s http://127.0.0.1:3000/api/rest/articles/1 -H 'x-role: reader'
+curl -s http://127.0.0.1:3000/api/rest/articles/2 -H 'x-role: writer' -H 'x-user-id: 2'
+curl -s -i http://127.0.0.1:3000/api/rest/articles/x -H 'x-role: reader'
+```
+
+The first answers `{"article_by_pk":{"id":1,"title":"Notes on the analytical engine","author":{"name":"Ada"}}}`.
+The draft 2 is `null` for a reader and the row for its author. The last answers status
+400 with the code `bad-request`, since `x` is not an `Int`.
+
 The same path serves subscriptions over WebSocket. The example reads the role and the
 user from the `headers` object of the `connection_init` payload. With
 [websocat](https://github.com/vi/websocat) (`nix shell nixpkgs#websocat`), connect and
@@ -1171,6 +1274,18 @@ a role sees only the rows and columns its permissions grant on them; and introsp
 expanded SDL, a mutation request and `compile_mutation` show that read-only types have no
 mutation. A subscription to the view receives the change of a base table, and one to the
 materialized view receives the change after `REFRESH MATERIALIZED VIEW`.
+
+`crates/rusuna-http-tests/tests/rest.rs` serves five endpoints over the mutation fixtures.
+A `GET` with a path variable, one with query-string values (a number, a bare Boolean flag
+and a percent-encoded string), a `POST` with a JSON body and a `PATCH` and `PUT` that mix
+the path with the query string or the body each answer the `data` of the same document
+sent to the GraphQL route, for `admin` and for `user` with the presets and row conditions
+of its permissions; a path variable replaces a body value of the same name. Values that do
+not fit their types, unknown names, bodies that are not JSON objects, missing required
+variables and a violated insert check answer 400 and change no row; roles whose schema
+rejects the document answer 403. Building the routes runs no resolver, even for a
+mutation, and rejects subscriptions, unknown fields, unbound URL variables, documents with
+two operations, invalid patterns and conflicting endpoints.
 
 The subscription tests in `crates/rusuna-http-tests/tests/subscriptions.rs` run over
 WebSocket. A subscription receives its first result, then the results changed by a

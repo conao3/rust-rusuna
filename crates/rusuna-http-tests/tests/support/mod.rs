@@ -205,3 +205,46 @@ pub fn sorted(value: Json, unordered: &[&str]) -> Json {
         value => value,
     }
 }
+
+pub fn session(parts: &axum::http::request::Parts) -> rusuna::Session {
+    let header = |name: &str| {
+        parts
+            .headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    let role = header("x-hasura-role").unwrap_or_else(|| "admin".into());
+    let mut session = serde_json::Map::new();
+    if let Some(user) = header("x-hasura-user-id") {
+        session.insert("user_id".into(), Json::from(user.parse::<i64>().unwrap()));
+    }
+    rusuna::Session::from_json(role, &Json::Object(session)).unwrap()
+}
+
+pub async fn request(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: Option<&str>,
+) -> (u16, Json) {
+    let body = body.unwrap_or_default();
+    let mut request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (status, serde_json::from_str(body).unwrap_or(Json::Null))
+}
