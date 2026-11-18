@@ -689,11 +689,11 @@ one connection, the statement of rusuna, of [viat-gql](https://crates.io/crates/
 
 | Query | rusuna | viat-gql | Hasura | hand-written |
 |---|---|---|---|---|
-| A: 20 articles, their author and 5 comments each | 0.7 (0.6–7.4) | 0.6 (0.6–3.9) | 0.7 (0.6–7.1) | 1.1 (0.5–7.6) |
-| B: 50,000 articles and their author | 426.5 (125.8–580.3) | 427.3 (315.8–798.4) | 415.3 (130.1–565.8) | 504.8 (222.9–879.5) |
-| C: 2,000 authors, all their articles and all their comments | 1269.3 (743.5–2340.7) | 1257.0 (772.8–2514.4) | 1610.2 (734.3–2128.6) | 1336.9 (901.6–2038.7) |
+| A: 20 articles, their author and 5 comments each | 0.5 (0.4–2.2) | 0.5 (0.4–1.0) | 0.6 (0.5–1.0) | 0.5 (0.4–0.9) |
+| B: 50,000 articles and their author | 137.9 (115.9–185.4) | 196.0 (177.7–259.6) | 136.8 (118.0–154.5) | 172.8 (157.0–246.6) |
+| C: 2,000 authors, all their articles and all their comments | 601.5 (509.3–778.6) | 646.8 (579.8–713.5) | 679.3 (602.4–765.3) | 637.2 (551.6–740.0) |
 
-All three speed goals pass in this run. Compiling these GraphQL documents, including parsing and type checking, takes 274 to 506 µs.
+All three speed goals pass in this run. Compiling these GraphQL documents, including parsing and type checking, takes 93 to 158 µs.
 All four implementations return equal results on the benchmark data. The differential
 test covers 43 admin queries and 19 permission queries, including empty results, nested
 aggregates, custom root names, nullable columns, composite relationship predicates and
@@ -703,10 +703,9 @@ relationships, set and lateral aggregation, and nested `EXISTS`. Each captured H
 statement was also compared with its role-bearing HTTP response. The exported metadata
 is in `tests/fixtures/permissions/metadata.json`.
 
-With role `user` and `user_id = 3`, the same benchmark measures A at 1.0 ms (0.7–3.9),
-B at 0.3 ms (0.2–7.8), and C at 7.5 ms (3.6–10.0), 15 runs each. These smaller result
-sets also match Hasura. The timings include concurrent machine load; compare the
-statements within the same run.
+With role `user` and `user_id = 3`, the same benchmark measures A at 1.0 ms (0.6–4.4),
+B at 0.2 ms (0.2–0.6), and C at 4.2 ms (3.8–6.8), 15 runs each. These smaller result
+sets also match Hasura.
 
 The same comparisons run over HTTP in `crates/rusuna-http-tests`: an axum server built
 with `rusuna-axum`, one async-graphql schema per role and hand-written `viewer` and
