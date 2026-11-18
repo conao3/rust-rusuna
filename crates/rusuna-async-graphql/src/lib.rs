@@ -29,6 +29,10 @@ use std::fmt::{self, Write};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+mod remote;
+
+pub use remote::{ClientHeaders, REMOTE_TIMEOUT, RemoteSchema};
+
 pub const HIDDEN_PREFIX: &str = "__rusuna_";
 
 const BUILTIN_SCALARS: [&str; 5] = ["Int", "Float", "String", "Boolean", "ID"];
@@ -40,6 +44,12 @@ pub enum Error {
     Field {
         type_name: String,
         field: String,
+        message: String,
+    },
+    /// A remote schema that cannot be added: an invalid definition or SDL, an unsupported
+    /// type or a name collision.
+    Remote {
+        name: String,
         message: String,
     },
 }
@@ -54,6 +64,7 @@ impl fmt::Display for Error {
                 field,
                 message,
             } => write!(f, "{type_name}.{field}: {message}"),
+            Self::Remote { name, message } => write!(f, "remote schema {name}: {message}"),
         }
     }
 }
@@ -71,6 +82,7 @@ pub struct Builder {
     schema: Arc<rusuna::Schema>,
     role: String,
     extras: Vec<Extra>,
+    remotes: Vec<RemoteSchema>,
 }
 
 #[derive(Clone, Copy)]
@@ -79,15 +91,20 @@ enum Shape {
     Object,
 }
 
+#[derive(Default)]
+struct Catalog {
+    children: BTreeMap<(String, String), String>,
+    arguments: BTreeMap<(String, String), BTreeMap<String, String>>,
+    extras: BTreeMap<(String, String), Vec<String>>,
+}
+
 struct Shared {
     schema: Arc<rusuna::Schema>,
     role: String,
     query: String,
     mutation: String,
     subscription: String,
-    children: BTreeMap<(String, String), String>,
-    arguments: BTreeMap<(String, String), BTreeMap<String, String>>,
-    extras: BTreeMap<(String, String), Vec<String>>,
+    catalog: Catalog,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -121,7 +138,14 @@ impl Builder {
             schema,
             role: role.into(),
             extras: Vec::new(),
+            remotes: Vec::new(),
         }
+    }
+
+    /// Adds the query and mutation root fields of a remote schema, when it serves the role.
+    pub fn remote(mut self, remote: RemoteSchema) -> Self {
+        self.remotes.push(remote);
+        self
     }
 
     pub fn field<F>(
@@ -269,10 +293,35 @@ impl Builder {
             query: query_name.clone(),
             mutation: mutation_name.clone(),
             subscription: subscription_name.clone(),
-            children,
-            arguments,
-            extras,
+            catalog: Catalog {
+                children,
+                arguments,
+                extras,
+            },
         });
+        let root_names = |root: &str| -> BTreeSet<String> {
+            match definitions.get(root) {
+                Some(TypeKind::Object(object)) => object
+                    .fields
+                    .iter()
+                    .map(|f| f.node.name.node.to_string())
+                    .collect(),
+                _ => BTreeSet::new(),
+            }
+        };
+        let mut taken = remote::Taken {
+            types: definitions.keys().cloned().collect(),
+            query: root_names(&query_name),
+            mutation: root_names(&mutation_name),
+        };
+        let attached = remote::attach(
+            self.remotes
+                .into_iter()
+                .filter(|remote| remote.serves(&shared.role))
+                .collect(),
+            &shared,
+            &mut taken,
+        )?;
         let mut query = Object::new(&query_name);
         let mut mutation = Object::new(&mutation_name);
         let mut has_mutation = false;
@@ -318,6 +367,7 @@ impl Builder {
                     for field in object.fields {
                         let field = field.node;
                         let shape = if shared
+                            .catalog
                             .children
                             .contains_key(&(name.clone(), field.name.node.to_string()))
                         {
@@ -371,6 +421,14 @@ impl Builder {
                 _ => {}
             }
         }
+        for field in attached.query {
+            query = query.field(field);
+        }
+        for field in attached.mutation {
+            has_mutation = true;
+            mutation = mutation.field(field);
+        }
+        types.extend(attached.types);
         Ok(Parts {
             query,
             query_name,
@@ -629,7 +687,7 @@ fn execution_error(error: &rusuna_sqlx::Error) -> async_graphql::Error {
 }
 
 struct Document<'a> {
-    shared: &'a Shared,
+    catalog: &'a Catalog,
     text: String,
     definitions: Vec<String>,
     variables: serde_json::Map<String, Json>,
@@ -641,16 +699,19 @@ impl Document<'_> {
         parent: &str,
         field: &SelectionField<'_>,
         child: Option<&str>,
+        target: Option<&str>,
     ) -> async_graphql::Result<()> {
         let name = field.name();
-        if let Some(alias) = field.alias() {
-            write!(self.text, "{alias}: ")?;
+        match (field.alias(), target) {
+            (Some(alias), Some(target)) => write!(self.text, "{alias}: {target}")?,
+            (None, Some(target)) => write!(self.text, "{name}: {target}")?,
+            (Some(alias), None) => write!(self.text, "{alias}: {name}")?,
+            (None, None) => self.text.push_str(name),
         }
-        self.text.push_str(name);
         let arguments = field.arguments()?;
         if !arguments.is_empty() {
             let types = self
-                .shared
+                .catalog
                 .arguments
                 .get(&(parent.to_string(), name.to_string()));
             self.text.push('(');
@@ -689,15 +750,15 @@ impl Document<'_> {
                 continue;
             }
             let key = (parent.to_string(), name.to_string());
-            if let Some(requires) = self.shared.extras.get(&key) {
+            if let Some(requires) = self.catalog.extras.get(&key) {
                 for column in requires {
                     write!(self.text, " {HIDDEN_PREFIX}{column}: {column}")?;
                 }
                 continue;
             }
-            let child = self.shared.children.get(&key).map(String::as_str);
+            let child = self.catalog.children.get(&key).map(String::as_str);
             self.text.push(' ');
-            self.field(parent, &item, child)?;
+            self.field(parent, &item, child, None)?;
         }
         Ok(())
     }
@@ -714,16 +775,17 @@ fn render(
         Operation::Subscription => (shared.subscription.as_str(), "subscription"),
     };
     let child = shared
+        .catalog
         .children
         .get(&(parent.to_string(), root.definition.name.node.to_string()))
         .map(String::as_str);
     let mut document = Document {
-        shared,
+        catalog: &shared.catalog,
         text: String::new(),
         definitions: Vec::new(),
         variables: serde_json::Map::new(),
     };
-    document.field(parent, field, child)?;
+    document.field(parent, field, child, None)?;
     let definitions = if document.definitions.is_empty() {
         String::new()
     } else {

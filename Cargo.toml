@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/rusuna-cli",
+    "crates/rusuna-http-client",
     "crates/rusuna-sqlx",
     "crates/rusuna-events",
     "crates/rusuna-async-graphql",
@@ -11,6 +12,7 @@ members = [
 default-members = [
     ".",
     "crates/rusuna-cli",
+    "crates/rusuna-http-client",
     "crates/rusuna-sqlx",
     "crates/rusuna-events",
     "crates/rusuna-async-graphql",
@@ -29,6 +31,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 rusuna = { path = ".", version = "0.1.0" }
+rusuna-http-client = { path = "crates/rusuna-http-client", version = "0.1.0" }
 rusuna-sqlx = { path = "crates/rusuna-sqlx", version = "0.1.0" }
 rusuna-events = { path = "crates/rusuna-events", version = "0.1.0" }
 rusuna-async-graphql = { path = "crates/rusuna-async-graphql", version = "0.1.0" }

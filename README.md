@@ -23,6 +23,7 @@ documents to SQL. `rusuna-events` runs event triggers and cron triggers beside i
 | Execution with sqlx, parts for an `async-graphql` schema and `axum` routes | available |
 | Subscriptions over WebSocket, polled with one statement per group of subscriptions | available |
 | REST endpoints from named GraphQL documents | available |
+| Remote schemas: root fields of other GraphQL servers on the same endpoint | available |
 | Event triggers, cron triggers and scheduled events, delivered to Rust handlers and webhooks | available |
 
 The workspace has these crates:
@@ -31,9 +32,10 @@ The workspace has these crates:
 |---|---|
 | `rusuna` | The compiler: SDL, GraphQL text and Lean core. No I/O. |
 | `rusuna-sqlx` | Runs compiled statements on PostgreSQL with sqlx 0.9 and returns the `data` JSON; polls subscriptions. |
-| `rusuna-async-graphql` | Builds an async-graphql 7 dynamic schema for one role, beside hand-written fields. |
+| `rusuna-async-graphql` | Builds an async-graphql 7 dynamic schema for one role, beside hand-written fields and remote schemas. |
 | `rusuna-axum` | axum 0.8 routes (`POST`, WebSocket and REST endpoints) that pick the role's schema and execute the request. |
 | `rusuna-events` | Records row changes with PostgreSQL triggers and delivers them, cron occurrences and scheduled events to Rust handlers and webhooks. |
+| `rusuna-http-client` | The hyper 1 and rustls HTTP client of webhooks and remote schemas. |
 | `rusuna-cli` | The `rusuna` command (not published). |
 
 ## Usage
@@ -514,6 +516,71 @@ every operation on the schema of the session's role with the session in the conn
 data. Another first message closes the connection with code 4400; an error or a role
 without a schema closes it with code 4403 and the message.
 
+## Remote schemas
+
+A remote schema puts the query and mutation root fields of another GraphQL server on the
+role schemas, like Hasura's remote schemas. Clients select them in the same operation as
+rusuna's root fields; rusuna forwards each remote root field to its server.
+
+```rust
+use rusuna_async_graphql::{Builder, RemoteSchema};
+
+let weather = RemoteSchema::new("weather", "https://weather.example.com/graphql")?
+    .header("authorization", &token)?
+    .forward_header("x-request-id")?
+    .roles(["admin", "user"])
+    .introspect()
+    .await?;
+let parts = Builder::new(schema.clone(), "user").remote(weather.clone()).build()?;
+```
+
+```graphql
+query { article(limit: 2) { id title } weather(city: "Oslo") { temperature station { name } } }
+```
+
+- **Types.** `introspect()` asks the server for its schema with the standard introspection
+  query when the application starts, and is the usual way. `sdl(text)` takes the SDL
+  instead, so a build needs no network and keeps a fixed copy of the remote schema. The
+  remote types reachable from its query and mutation roots join the role schema:
+  objects, input objects with their default values, enums, custom scalars, arguments with
+  their defaults, and descriptions. Directive definitions are ignored. Interfaces,
+  unions and type extensions are an error of `build`. Subscription root fields are not
+  added.
+- **Names.** A remote type whose name is already a type of the role schema (or of another
+  remote schema), and a remote root field whose name is already a root field, are an
+  error of `build`. `type_prefix(p)` renames every remote type except the built-in
+  scalars, and `root_field_prefix(p)` every remote root field; the forwarded document uses
+  the remote names. Hand-written types registered after `build` are not checked.
+- **Roles.** `roles([...])` lists the roles whose schemas include the remote root fields
+  and types; the default is `admin` only. `Builder::remote` on another role's builder adds
+  nothing, so the fields are absent from that role's introspection and execution.
+- **Forwarding.** A remote root field is sent as a document of that field alone, with
+  the field's alias, arguments as variables declared with the remote's argument types,
+  and its selection with fragments expanded. Each remote root field of a request is one
+  HTTP `POST` (`content-type: application/json`, the fixed headers of `header`, and the
+  client request headers named by `forward_header`). The client headers come from the
+  request data `ClientHeaders`, which the `rusuna-axum` routes add. Remote values are read
+  from the response like rusuna's own rows, so a remote field below the root issues no
+  request. The client is `rusuna-http-client` (hyper 1 with rustls); `timeout` (default
+  `REMOTE_TIMEOUT`, 60 seconds) bounds a request.
+- **Errors.** When the server answers with `errors`, the root field is null and carries
+  the message of the first remote error with `extensions.code` `remote-schema-error` and
+  the remote errors in `extensions.remote_errors`. An unreachable server, a timeout or an
+  answer that is not a GraphQL response give the same code with a message naming the
+  remote schema. A `rest` endpoint answers such an error with status 502.
+- **Mutations.** Remote mutation root fields run in document order with rusuna's, and the
+  rule of repeated response keys applies to them. They are not part of rusuna's
+  transaction: a failing remote field rolls back the rusuna writes of the operation and
+  stops later root fields, but a remote write that succeeded stays, and a later failure
+  cannot undo it.
+
+Differences from Hasura and what is outside: rusuna does not send Hasura's session
+headers (`x-hasura-role`, session variables) unless they are forwarded client headers;
+there are no remote schema permissions that restrict remote fields or arguments per role
+beyond the role list; there are no relationships between rusuna types and remote types
+(Hasura's remote relationships); remote root fields are not batched into one request per
+server; and remote subscriptions are not forwarded.
+
 ## REST endpoints
 
 `rusuna_axum::rest` serves named GraphQL documents as REST routes, like Hasura's RESTified
@@ -597,6 +664,7 @@ body with `errors` (and `data`), each error with `extensions.code` where one app
 | 403 `access-denied` | The session's role has no schema or cannot call the endpoint. |
 | 404, 405 | axum: no pattern matches, or the pattern has no endpoint for the method. |
 | 500 `unexpected` | Another database error. |
+| 502 `remote-schema-error` | A remote schema failed or answered with errors. |
 
 Hasura's RESTified endpoints are declared in metadata and use a query collection; rusuna
 takes them in Rust or JSON. rusuna rejects an endpoint at build time instead of at the
@@ -1287,6 +1355,22 @@ rejects the document answer 403. Building the routes runs no resolver, even for 
 mutation, and rejects subscriptions, unknown fields, unbound URL variables, documents with
 two operations, invalid patterns and conflicting endpoints.
 
+`crates/rusuna-http-tests/tests/remote.rs` serves a weather GraphQL server (axum and an
+async-graphql dynamic schema) on `127.0.0.1:0` inside the test, and adds it to the schemas
+of `tests/fixtures/permissions.graphql`. One request selects rusuna and remote root fields
+with variables, a fragment, an alias and an enum argument; the remote part equals the
+server's own answer. A mutation updates a table and the remote server in one operation;
+when the remote field fails, the table write is rolled back and later remote fields do not
+run, and repeated remote response keys are rejected. Introspection lists the remote
+types, descriptions, enum values and input defaults for `admin` and `user` and nothing for
+`reviewer`, which cannot select the fields. Fixed and forwarded headers reach the server
+and other client headers do not; a remote error, an unreachable server and introspecting
+it are errors with their messages. Same-named types or root fields, interfaces, unions,
+undefined types, invalid SDL and a missing SDL fail `build`; with prefixes, a renamed
+input object and enum argument are forwarded under the remote names, one request per
+remote root field. Schemas built from introspection and from SDL answer queries and
+introspection alike.
+
 The subscription tests in `crates/rusuna-http-tests/tests/subscriptions.rs` run over
 WebSocket. A subscription receives its first result, then the results changed by a
 mutation through rusuna and by plain SQL, and nothing after a write that leaves its result
@@ -1342,8 +1426,8 @@ Each test that loads its own tables creates its own database in the cluster.
 ## Publishing
 
 `cargo package --workspace --exclude rusuna-cli --exclude rusuna-http-tests` builds the
-five published crates; their dependencies on each other carry `version = "0.1.0"`, so
-they are published in the order `rusuna`, `rusuna-sqlx`, `rusuna-events`, `rusuna-async-graphql`,
+six published crates; their dependencies on each other carry `version = "0.1.0"`, so
+they are published in the order `rusuna`, `rusuna-http-client`, `rusuna-sqlx`, `rusuna-events`, `rusuna-async-graphql`,
 `rusuna-axum`. The `rusuna` package contains `src/` and `.leanfran/cache/`, the Rust
 leanfran generated from the `lean!` block. Its build script copies the cached module and
 needs neither Lean nor Lake, so a crate that depends on the published `rusuna`

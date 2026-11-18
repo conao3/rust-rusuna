@@ -17,11 +17,11 @@ axum = { workspace = true, features = ["ws"] }
 form_urlencoded = "1.2.2"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 rusuna = { workspace = true }
+rusuna-async-graphql = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-rusuna-async-graphql = { workspace = true }
 rusuna-events = { workspace = true }
 rusuna-sqlx = { workspace = true }
 sqlx = { workspace = true }

@@ -20,6 +20,7 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, get, post};
 use futures_util::{StreamExt, stream};
+use rusuna_async_graphql::ClientHeaders;
 use serde_json::Value as Json;
 use std::collections::HashMap;
 use std::future::Future;
@@ -37,6 +38,7 @@ where
         let session = session.clone();
         async move {
             let (parts, body) = request.into_parts();
+            let headers = ClientHeaders(parts.headers.clone());
             let session = match session(&parts).await {
                 Ok(session) => session,
                 Err(response) => return response,
@@ -61,7 +63,8 @@ where
                     Ok(request) => request.into_inner(),
                     Err(rejection) => return rejection.into_response(),
                 };
-            GraphQLResponse::from(schema.execute(request.data(session)).await).into_response()
+            GraphQLResponse::from(schema.execute(request.data(session).data(headers)).await)
+                .into_response()
         }
     })
 }
@@ -146,12 +149,14 @@ async fn serve<F, Fut>(
         )
         .await;
     };
+    let headers = ClientHeaders(parts.headers.clone());
     let (sink, rest) = socket.split();
     let messages = stream::once(async move { Ok(first) }).chain(rest);
     GraphQLWebSocket::new_with_pair(sink, messages, schema, protocol)
         .on_connection_init(move |_| async move {
             let mut data = Data::default();
             data.insert(session);
+            data.insert(headers);
             Ok(data)
         })
         .serve()

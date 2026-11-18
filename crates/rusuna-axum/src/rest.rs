@@ -8,6 +8,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodFilter, MethodRouter};
+use rusuna_async_graphql::ClientHeaders;
 use serde::Deserialize;
 use serde_json::{Map, Value as Json, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -381,6 +382,7 @@ where
     }
     let mut request = GraphQLRequest::new(prepared.query.clone())
         .variables(Variables::from_json(Json::Object(variables)))
+        .data(ClientHeaders(parts.headers.clone()))
         .data(session);
     request.operation_name = prepared.operation_name.clone();
     respond(schema.execute(request).await)
@@ -409,6 +411,7 @@ fn status(error: &ServerError) -> StatusCode {
     match code {
         Some("access-denied") => StatusCode::FORBIDDEN,
         Some("unexpected") => StatusCode::INTERNAL_SERVER_ERROR,
+        Some("remote-schema-error") => StatusCode::BAD_GATEWAY,
         _ => StatusCode::BAD_REQUEST,
     }
 }

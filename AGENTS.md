@@ -25,7 +25,10 @@ commit the workflow and `actions.lock` together.
   lists, and `Subscriptions`, the poller that groups subscriptions by role and SQL text.
 - `crates/rusuna-async-graphql/`: `Builder` and `Parts`, the async-graphql 7 dynamic
   schema of one role, the root resolvers (query, mutation and subscription), hand-written
-  fields and the transaction extension.
+  fields and the transaction extension. `src/remote.rs` holds `RemoteSchema`: the SDL or
+  introspection import, the type and root field prefixes, the role list and the resolver
+  that forwards a remote root field, rendered with the same `Document` as rusuna root
+  fields from its own `Catalog` of argument types and child types.
 - `crates/rusuna-axum/`: the axum 0.8 routes `graphql` (`POST`) and `graphql_ws`
   (WebSocket, `graphql-transport-ws`), `src/rest.rs` with `rest`, the REST endpoints
   (validated per role in introspection-only mode when they are built), and the example
@@ -36,9 +39,12 @@ commit the workflow and `actions.lock` together.
   `rusuna.capture_event()` and one `rusuna_event_<name>` trigger per declaration),
   `src/worker.rs` holds `Events` and `Worker` (claims with `FOR UPDATE SKIP LOCKED`, a
   lease, results fenced by `tries`, `LISTEN rusuna_events` beside polling),
-  `src/cron.rs` the five-field cron triggers (croner 4) and `src/webhook.rs` the hyper 1
-  client with rustls on ring. Every worker query takes the time from the injected
+  `src/cron.rs` the five-field cron triggers (croner 4) and `src/webhook.rs` the webhooks,
+  sent with `rusuna-http-client`. Every worker query takes the time from the injected
   `Clock`.
+- `crates/rusuna-http-client/`: `Client::post_json`, hyper 1 with rustls on ring and the
+  webpki roots, shared by the webhooks and remote schemas so neither crate depends on the
+  other.
 - `crates/rusuna-http-tests/`: unpublished; HTTP tests against the Hasura fixtures and
   the introspection comparison. Each test creates its own database.
 - Workspace dependencies and package metadata are in the root `Cargo.toml`
@@ -381,6 +387,8 @@ are also tested in autocommit mode without a caller rollback.
   response keys, hand-written fields in both directions,
   hidden roles and introspection with the expanded SDL of each role. Pruned empty types
   are listed by hand in `tests/introspection.rs`.
+- `crates/rusuna-http-tests/tests/remote.rs` serves a remote GraphQL server (axum and an
+  async-graphql dynamic schema) inside the test and adds it to the role schemas.
 - `crates/rusuna-http-tests/tests/rest.rs` builds REST endpoints over the mutation
   fixtures and compares their bodies with the `data` of the GraphQL route.
 - `crates/rusuna-http-tests/tests/views.rs` reads a view and a materialized view

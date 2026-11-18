@@ -1901,6 +1901,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "rusuna",
+ "rusuna-http-client",
  "rusuna-sqlx",
  "serde_json",
  "sqlx",
@@ -1941,15 +1942,10 @@ name = "rusuna-events"
 version = "0.1.0"
 dependencies = [
  "axum",
- "bytes",
  "chrono",
  "croner",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "rustls",
  "rusuna",
+ "rusuna-http-client",
  "rusuna-sqlx",
  "serde",
  "serde_json",
@@ -1958,10 +1954,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusuna-http-client"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "rustls",
+]
+
+[[package]]
 name = "rusuna-http-tests"
 version = "0.1.0"
 dependencies = [
  "async-graphql",
+ "async-graphql-axum",
  "axum",
  "futures-util",
  "rusuna",

@@ -15,7 +15,8 @@ async-graphql = { workspace = true }
 async-trait = "0.1"
 futures-util = { version = "0.3", default-features = false }
 rusuna = { workspace = true }
+rusuna-http-client = { workspace = true }
 rusuna-sqlx = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
