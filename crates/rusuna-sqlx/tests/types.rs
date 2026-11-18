@@ -298,3 +298,117 @@ async fn multiplexed_parameters_keep_the_inferred_types() {
         vec![json!([{"id": 1}]), json!([])]
     );
 }
+
+async fn next(subscription: &mut rusuna_sqlx::Subscription) -> Option<rusuna_sqlx::Outcome> {
+    tokio::time::timeout(std::time::Duration::from_secs(20), subscription.next())
+        .await
+        .expect("no result arrived")
+}
+
+fn compiled(query: &str) -> rusuna::Compiled {
+    Schema::from_sdl(SDL)
+        .unwrap()
+        .compile(query, &json!({}), None, &Session::new("admin"))
+        .unwrap()
+        .remove(0)
+        .compiled
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_subscription_leaves_its_group_running() {
+    let pool = pool("sqlx_subscription_errors").await;
+    let subscriptions = rusuna_sqlx::Subscriptions::new(
+        pool.clone(),
+        rusuna_sqlx::SubscriptionOptions {
+            interval: std::time::Duration::from_millis(100),
+            batch_size: 100,
+        },
+    );
+    for (good, bad) in [
+        ("{label: {_eq: \"one\"}}", "{label: {_eq: \"o\\u0000\"}}"),
+        (
+            "{day: {_eq: \"2020-01-02\"}}",
+            "{day: {_eq: \"0000-01-01\"}}",
+        ),
+        (
+            "{day: {_eq: \"2020-01-02\"}}",
+            "{day: {_eq: \"+12345-01-01\"}}",
+        ),
+        (
+            "{local: {_eq: \"2020-01-02 12:30\"}}",
+            "{local: {_eq: \"0000-01-01 00:00\"}}",
+        ),
+        (
+            "{at: {_eq: \"2020-01-01T00:00:00Z\"}}",
+            "{at: {_eq: \"+12345-01-01T00:00:00Z\"}}",
+        ),
+    ] {
+        let good = compiled(&format!("{{ typed(where: {good}) {{ id }} }}"));
+        let bad = compiled(&format!("{{ typed(where: {bad}) {{ id }} }}"));
+        assert_eq!(good.sql, bad.sql);
+        let mut conn = pool.acquire().await.unwrap();
+        let direct = rusuna_sqlx::fetch(&mut conn, &bad).await;
+        let expected = rusuna_sqlx::fetch(&mut conn, &good).await.unwrap();
+        drop(conn);
+        assert_ne!(expected, json!([]));
+        let mut member = subscriptions.subscribe("admin", &good).await.unwrap();
+        let first = next(&mut member).await.unwrap().unwrap();
+        match (direct, subscriptions.subscribe("admin", &bad).await) {
+            (Ok(expected), Ok(mut other)) => {
+                assert_eq!(
+                    next(&mut other).await.unwrap().unwrap(),
+                    expected,
+                    "{:?}",
+                    bad.params
+                )
+            }
+            (Err(_), Err(_)) => {}
+            (direct, multiplexed) => panic!(
+                "{:?}: {:?} {:?}",
+                bad.params,
+                direct.map(|_| ()),
+                multiplexed.map(|_| ())
+            ),
+        }
+        assert_eq!(first, expected);
+    }
+
+    let like = |pattern: &str| {
+        compiled(&format!(
+            "{{ typed(where: {{id: {{_gt: 2}}, label: {{_like: {pattern}}}}}, order_by: {{id: asc}}) {{ id }} }}"
+        ))
+    };
+    let mut good = subscriptions
+        .subscribe("admin", &like("\"%\""))
+        .await
+        .unwrap();
+    let mut bad = subscriptions
+        .subscribe("admin", &like("\"\\\\\""))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut good).await.unwrap().unwrap(), json!([]));
+    assert_eq!(next(&mut bad).await.unwrap().unwrap(), json!([]));
+    sqlx::query("INSERT INTO typed (id, label) VALUES (3, 'three')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(next(&mut good).await.unwrap().unwrap(), json!([{"id": 3}]));
+    let error = next(&mut bad).await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("LIKE pattern"), "{error}");
+    let polls = subscriptions.stats().polls;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while subscriptions.stats().polls < polls + 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO typed (id, label) VALUES (4, 'four')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        next(&mut good).await.unwrap().unwrap(),
+        json!([{"id": 3}, {"id": 4}])
+    );
+}

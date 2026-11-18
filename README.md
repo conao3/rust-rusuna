@@ -122,7 +122,8 @@ Supported scalars are `Int` (signed 32-bit GraphQL input), `Float`, `String`, `B
 `ID` and the declared string-valued `DateTime`. The database is responsible for validating
 DateTime syntax and SQL column compatibility. Table types need at least one scalar
 column. The row field names `_and`, `_or` and `_not` are reserved for filter operators.
-Interfaces, unions, enums, custom input definitions, extensions, custom scalar
+The generated root types `Mutation` and `Subscription` cannot share a name with a
+declared type. Interfaces, unions, enums, custom input definitions, extensions, custom scalar
 coercion and custom directives are outside this mapping format.
 
 Queries support variables and defaults, aliases, named and inline fragments,
@@ -390,7 +391,8 @@ let response = graphql
   example under a hand-written `viewer`. `Parts::query_field` and `Parts::mutation_field`
   add hand-written root fields, and `Parts::schema()` returns a `SchemaBuilder` with
   every rusuna type registered; register further hand-written types on it.
-  `Parts::register(builder)` registers the same types on a builder the caller creates.
+  `Parts::register(builder)` registers the same types on a builder the caller creates; pass
+  `parts.subscription_name()` as its subscription root.
 - **Hand-written fields on rusuna types.** `Builder::field(type, name, type_ref,
   requires, resolver)` adds a field to a rusuna row type. `requires` names scalar
   fields of that type. The statement selects each of them under the alias
@@ -468,8 +470,7 @@ are [async-graphql-axum](https://docs.rs/async-graphql-axum/7.2.1/async_graphql_
 `rusuna_axum::graphql_ws(HashMap<String, dynamic::Schema>, session)` is a `GET` route that
 upgrades to a WebSocket and speaks the
 [`graphql-transport-ws`](https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md)
-protocol (and the older `graphql-ws` protocol of subscriptions-transport-ws, both through
-async-graphql-axum). The client's first message must be `connection_init`. The session
+protocol through async-graphql-axum. The client's first message must be `connection_init`. The session
 function receives the upgrade request's head and that message's payload and returns
 `Result<rusuna::Session, String>`; the session is fixed for the connection, so
 authentication can read either the upgrade headers or the payload. The connection runs
@@ -505,11 +506,15 @@ values (variables and session values) compile to the same text, so these are the
 subscriptions that differ in values only. Every `interval` (default one second) each
 group runs one statement for up to `batch_size` (default 100) subscriptions, and sends a
 subscription its result when it differs from the last result sent to it (JSON
-equality). A new subscription joins its group and starts a run at once, so the first
-result does not wait for the interval. A group exists while it has subscriptions:
+equality). Subscribing runs the group's statement for the new subscription alone: its
+result is the first result, sent at once, and an invalid value or a failing statement
+fails that subscription without joining the group. The interval counts from the end of a
+run. When the statement of a batch fails, each subscription of the batch runs alone, so a
+database error reaches only the subscriptions whose own statement fails; the group keeps
+polling and sends a later success again. A group exists while it has subscriptions:
 `complete`, a closed connection or dropping a `rusuna_sqlx::Subscription` leaves the group,
 and the last one leaving stops its runs. `Subscriptions::stats()` reports the groups,
-subscriptions, runs and statements.
+subscriptions, runs and the statements of runs.
 
 The statement of a group is `rusuna_sqlx::Multiplexed`. It reads one `jsonb[]` parameter,
 the parameters of each subscription as one JSON array, and runs the compiled statement
@@ -526,18 +531,18 @@ placeholder `$k` of the compiled statement becomes element `k - 1` of the array,
 the type PostgreSQL infers for `$k` when `Multiplexed::prepare` prepares the compiled
 statement. The values are written as text in the form `rusuna_sqlx::fetch` would send:
 integers and floats in decimal (`float4` values rounded to `f32` first), date and time
-values normalized to ISO 8601. The types are those `fetch` binds; another inferred type
-makes `prepare` fail. A subscription's parameters are checked against these types when it
-subscribes, so an invalid value fails that subscription alone and never the group's
-statement. The rewrite copies single-quoted literals and double-quoted identifiers
+values as the microsecond `fetch` binds, in ISO 8601 with years past 9999 written in
+full and `BC` for years before 1. The types are those `fetch` binds; another inferred type makes `prepare`
+fail. The rewrite copies single-quoted literals and double-quoted identifiers
 unchanged and requires the placeholders outside them to be exactly `$1` to `$n` in order,
 which `placeholders_numbered` proves for every compiled statement.
 
 On the benchmark data (`bench/seed.sql`), the statement of
 `article(where: {title: {_like: $t}}, order_by: {id: asc}) { id title comments { body } author { name } }`
-for 100 subscriptions with different `user_id` values took 98 to 107 ms in `psql`, under
-`plan_cache_mode = auto` and `force_generic_plan` alike, against 112 ms for the 100 single
-statements under a generic plan. A per-row argument in the lateral subquery uses the index
+for 100 subscriptions with different `user_id` values executed in 98 to 107 ms
+(`EXPLAIN ANALYZE`, 7 runs each under `plan_cache_mode = auto` and `force_generic_plan`).
+The 100 single statements under a generic plan took 112 ms in total by `psql`'s `\timing`,
+round trips on a Unix socket included. A per-row argument in the lateral subquery uses the index
 on `article.author_id` as a parameter would.
 
 Differences from Hasura v2 live queries:
@@ -549,8 +554,8 @@ Differences from Hasura v2 live queries:
   subscription.
 - The `subscription_root` of Hasura also has `<t>_stream` fields (streaming subscriptions);
   rusuna has none.
-- A database error of a group's statement is sent to every subscription of the batch as a
-  GraphQL error, and the group keeps polling; a later success is sent again.
+- Hasura sends the first result from the next poll; rusuna runs the statement for the new
+  subscription when it subscribes.
 
 Lists without `order_by` follow PostgreSQL's row order, which can differ between runs
 and then sends a result with the same rows in another order.
@@ -859,13 +864,15 @@ mutation through rusuna and by plain SQL, and nothing after a write that leaves 
 unchanged or that touches rows its role and session cannot read. 100 subscriptions with
 four `user_id` values and seven variable values form one group; each receives the result
 of its own session and variables, and `pg_stat_statements` counts exactly one statement per
-run of the group, with the update as the only other statement. 101 subscriptions take two
+run of the group, with the update as the only other statement. `<t>_by_pk` goes from null
+to the inserted row and `<t>_aggregate` counts it. 101 subscriptions take two
 statements per run; another role or another statement makes another group; `complete`
 and a closed connection leave the group, and an empty group stops running. A role without
 read permission has no subscription field. The multiplexed statement of each of the 43
 admin and 19 permission fixtures, run for several sessions under custom and generic
 plans, returns the result of each single statement, and every supported parameter type
-keeps its value.
+keeps its value. A subscription whose statement fails, at subscription or later, gets
+the error alone while its group keeps sending the other results.
 
 ## Development
 

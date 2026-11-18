@@ -2,7 +2,7 @@ use crate::{
     BOOL, BPCHAR, Bound, DATE, Error, FLOAT4, FLOAT8, INT2, INT4, INT8, NAME, TEXT, TIMESTAMP,
     TIMESTAMPTZ, VARCHAR, timestamp, timestamptz,
 };
-use chrono::{NaiveDate, SecondsFormat};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, TimeDelta};
 use rusuna::{Compiled, Value};
 use serde_json::Value as Json;
 use sqlx::postgres::{PgArguments, PgConnection, PgPool, PgTypeInfo};
@@ -166,14 +166,12 @@ fn text(value: &Value, ty: &PgTypeInfo) -> Option<Json> {
         (Value::Float(v), FLOAT4) => (*v as f32).to_string(),
         (Value::Float(v), FLOAT8) => v.to_string(),
         (Value::Text(v), TEXT | VARCHAR | BPCHAR | NAME) => v.clone(),
-        (Value::Text(v), TIMESTAMPTZ) => {
-            timestamptz(v)?.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+        (Value::Text(v), TIMESTAMPTZ) => datetime_text(timestamptz(v)?.naive_utc(), "+00")?,
+        (Value::Text(v), TIMESTAMP) => datetime_text(timestamp(v)?, "")?,
+        (Value::Text(v), DATE) => {
+            let (date, era) = date_text(NaiveDate::parse_from_str(v, "%Y-%m-%d").ok()?);
+            format!("{date}{era}")
         }
-        (Value::Text(v), TIMESTAMP) => timestamp(v)?.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
-        (Value::Text(v), DATE) => NaiveDate::parse_from_str(v, "%Y-%m-%d")
-            .ok()?
-            .format("%Y-%m-%d")
-            .to_string(),
         _ => return None,
     };
     Some(Json::String(text))
@@ -236,6 +234,28 @@ fn replace_placeholders(sql: &str, replacements: &[String]) -> Result<String, Er
     Ok(out)
 }
 
+fn date_text(date: NaiveDate) -> (String, &'static str) {
+    let (year, era) = if date.year() <= 0 {
+        (1 - date.year(), " BC")
+    } else {
+        (date.year(), "")
+    };
+    (
+        format!("{year:04}-{:02}-{:02}", date.month(), date.day()),
+        era,
+    )
+}
+
+fn datetime_text(value: NaiveDateTime, offset: &str) -> Option<String> {
+    let epoch = NaiveDate::from_ymd_opt(2000, 1, 1)?.and_hms_opt(0, 0, 0)?;
+    let value = epoch + TimeDelta::microseconds((value - epoch).num_microseconds()?);
+    let (date, era) = date_text(value.date());
+    Some(format!(
+        "{date}T{}{offset}{era}",
+        value.format("%H:%M:%S%.6f")
+    ))
+}
+
 /// Settings of [`Subscriptions`].
 #[derive(Debug, Clone, Copy)]
 pub struct SubscriptionOptions {
@@ -263,7 +283,7 @@ pub struct SubscriptionStats {
     pub subscriptions: usize,
     /// Runs of a group, each executing one statement per batch of subscriptions.
     pub polls: u64,
-    /// Multiplexed statements executed.
+    /// Multiplexed statements the runs of groups executed.
     pub statements: u64,
 }
 
@@ -302,8 +322,10 @@ struct Inner {
 /// the subscriptions whose variables or session values differ. A group runs one
 /// [`Multiplexed`] statement per batch of [`SubscriptionOptions::batch_size`]
 /// subscriptions every [`SubscriptionOptions::interval`], and sends a subscription its
-/// result when it differs from the last result sent to it. A group starts with its first
-/// subscription and stops when its last subscription is dropped.
+/// result when it differs from the last result sent to it. When the statement of a batch
+/// fails, each subscription of the batch runs alone, so an error reaches only the
+/// subscriptions whose own statement fails. A group starts with its first subscription and
+/// stops when its last subscription is dropped.
 #[derive(Clone)]
 pub struct Subscriptions {
     inner: Arc<Inner>,
@@ -341,9 +363,9 @@ impl Subscriptions {
     /// Subscribes to the result of `compiled`, the statement of one query root field
     /// compiled for a session of `role`.
     ///
-    /// The parameters are checked against the statement's types before the subscription
-    /// joins its group, so an invalid value fails this call alone. The first result arrives
-    /// from the group's next run, which the new subscription starts at once.
+    /// The call runs the group's statement for this subscription alone: the result is the
+    /// subscription's first result, and an invalid value or a failing statement fails this
+    /// call alone. The subscription then joins its group.
     pub async fn subscribe(&self, role: &str, compiled: &Compiled) -> Result<Subscription, Error> {
         let key = (role.to_string(), compiled.sql.clone());
         let existing = self
@@ -353,19 +375,23 @@ impl Subscriptions {
             .unwrap()
             .get(&key)
             .map(|group| group.multiplexed.clone());
+        let mut conn = self.inner.pool.acquire().await?;
         let multiplexed = match existing {
             Some(multiplexed) => multiplexed,
-            None => {
-                let mut conn = self.inner.pool.acquire().await?;
-                Arc::new(Multiplexed::prepare(&mut conn, compiled).await?)
-            }
+            None => Arc::new(Multiplexed::prepare(&mut conn, compiled).await?),
         };
         let arguments = multiplexed.arguments(&compiled.params)?;
+        let first = multiplexed
+            .fetch(&mut conn, std::slice::from_ref(&arguments))
+            .await?
+            .remove(0);
+        drop(conn);
         let id = self.inner.ids.fetch_add(1, Ordering::SeqCst);
-        let (sender, receiver) = watch::channel(None);
+        let (sender, mut receiver) = watch::channel(Some(Ok(first.clone())));
+        receiver.mark_changed();
         let member = Member {
             arguments,
-            last: None,
+            last: Some(Ok(first)),
             sender,
         };
         let mut groups = self.inner.groups.lock().unwrap();
@@ -385,7 +411,6 @@ impl Subscriptions {
             group
         });
         group.members.insert(id, member);
-        group.wake.notify_one();
         Ok(Subscription {
             inner: self.inner.clone(),
             key,
@@ -429,38 +454,45 @@ impl Drop for Subscription {
     }
 }
 
+async fn run(
+    inner: &Inner,
+    multiplexed: &Multiplexed,
+    arguments: &[Json],
+) -> Result<Vec<Json>, Error> {
+    let mut conn = inner.pool.acquire().await?;
+    let result = multiplexed.fetch(&mut conn, arguments).await;
+    inner.statements.fetch_add(1, Ordering::SeqCst);
+    result
+}
+
 async fn poll(inner: Arc<Inner>, key: Key, generation: u64, wake: Arc<Notify>) {
-    wake.notified().await;
     loop {
+        tokio::select! {
+            _ = tokio::time::sleep(inner.options.interval) => {}
+            _ = wake.notified() => {}
+        }
         let Some((multiplexed, batches)) = snapshot(&inner, &key, generation) else {
             return;
         };
-        inner.polls.fetch_add(1, Ordering::SeqCst);
         let mut outcomes = Vec::new();
         for batch in batches {
             let (ids, arguments): (Vec<u64>, Vec<Json>) = batch.into_iter().unzip();
-            let result = match inner.pool.acquire().await {
-                Ok(mut conn) => {
-                    let result = multiplexed.fetch(&mut conn, &arguments).await;
-                    inner.statements.fetch_add(1, Ordering::SeqCst);
-                    result
-                }
-                Err(error) => Err(error.into()),
-            };
-            match result {
+            match run(&inner, &multiplexed, &arguments).await {
                 Ok(values) => outcomes.extend(ids.into_iter().zip(values.into_iter().map(Ok))),
-                Err(error) => {
-                    let error = Arc::new(error);
-                    outcomes.extend(ids.into_iter().map(|id| (id, Err(error.clone()))));
+                Err(error) if ids.len() == 1 => outcomes.push((ids[0], Err(Arc::new(error)))),
+                Err(_) => {
+                    for (id, arguments) in ids.into_iter().zip(arguments) {
+                        let outcome = run(&inner, &multiplexed, std::slice::from_ref(&arguments))
+                            .await
+                            .map(|mut values| values.remove(0))
+                            .map_err(Arc::new);
+                        outcomes.push((id, outcome));
+                    }
                 }
             }
         }
+        inner.polls.fetch_add(1, Ordering::SeqCst);
         deliver(&inner, &key, generation, outcomes);
-        let interval = inner.options.interval;
-        tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
-            _ = wake.notified() => {}
-        }
     }
 }
 

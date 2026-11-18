@@ -583,3 +583,56 @@ async fn multiplexed_statements_return_the_results_of_each_statement() {
         multiplexed_matches(&pool, &compiled, &unordered, name).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn primary_key_and_aggregate_roots_are_subscribed() {
+    let pool = database("http_subscription_roots", &["schema.sql", "seed.sql"]).await;
+    let subscriptions = Subscriptions::new(pool.clone(), options());
+    let admin = serve_ws(role_schemas(
+        &fixture("schema.graphql"),
+        &pool,
+        &subscriptions,
+    ))
+    .await;
+    let roles = serve_ws(role_schemas(
+        &fixture("permissions.graphql"),
+        &pool,
+        &subscriptions,
+    ))
+    .await;
+    let mut row = Client::connect(admin, json!({"role": "admin"})).await;
+    row.subscribe(
+        "1",
+        "subscription($id: Int!) { author_by_pk(id: $id) { id name } }",
+        json!({"id": 99}),
+    )
+    .await;
+    assert_eq!(row.data("1").await, json!({"author_by_pk": null}));
+    let mut count =
+        Client::connect(roles, json!({"role": "user", "session": {"user_id": 3}})).await;
+    count
+        .subscribe(
+            "1",
+            "subscription { article_aggregate { aggregate { count } } }",
+            json!({}),
+        )
+        .await;
+    assert_eq!(
+        count.data("1").await,
+        json!({"article_aggregate": {"aggregate": {"count": 4}}})
+    );
+    sqlx::raw_sql(
+        "INSERT INTO author (id, name) VALUES (99, 'new author'); INSERT INTO article VALUES (99, 3, 'new article', '2020-01-02 00:00+00')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row.data("1").await,
+        json!({"author_by_pk": {"id": 99, "name": "new author"}})
+    );
+    assert_eq!(
+        count.data("1").await,
+        json!({"article_aggregate": {"aggregate": {"count": 5}}})
+    );
+}
