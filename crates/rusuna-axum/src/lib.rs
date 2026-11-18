@@ -1,3 +1,8 @@
+//! An axum route that serves rusuna async-graphql schemas.
+//!
+//! [`graphql`] takes one schema per role and a function that builds a
+//! [`rusuna::Session`] from the request, and returns a `POST` route.
+
 use async_graphql::dynamic::Schema;
 use async_graphql::{ErrorExtensions, Response as GraphQLBody};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};

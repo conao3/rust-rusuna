@@ -1,3 +1,10 @@
+//! Builds an async-graphql dynamic schema from a [`rusuna::Schema`] for one role.
+//!
+//! [`Builder`] produces [`Parts`]: the types, input types and root fields of the role,
+//! which share one schema with hand-written dynamic fields. Each root field resolves with
+//! one PostgreSQL statement. The resolvers read a [`rusuna::Session`] from the request
+//! data and a `sqlx::PgPool` from the schema data.
+
 use async_graphql::dynamic::{
     Enum, Field, FieldFuture, FieldValue, InputObject, InputValue, Object, ResolverContext, Scalar,
     SchemaBuilder, TypeRef,

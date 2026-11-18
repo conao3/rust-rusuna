@@ -1,3 +1,10 @@
+//! Executes statements compiled by [`rusuna`] with sqlx on PostgreSQL.
+//!
+//! [`execute`] runs the root fields of a query one by one and the root fields of a
+//! mutation in document order on one transaction, and returns the JSON object of the
+//! GraphQL `data`. [`fetch`] runs one compiled statement on a connection.
+//! [`Error::PermissionCheck`] reports a row that fails a write permission check.
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use rusuna::{Compiled, CompiledField, Value};
 use serde_json::{Map, Value as Json};
