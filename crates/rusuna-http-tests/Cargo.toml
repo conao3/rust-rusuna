@@ -1,0 +1,18 @@
+[package]
+name = "rusuna-http-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dev-dependencies]
+async-graphql = { workspace = true }
+axum = { workspace = true }
+rusuna = { workspace = true }
+rusuna-async-graphql = { workspace = true }
+rusuna-axum = { workspace = true }
+rusuna-sqlx = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }

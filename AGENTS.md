@@ -17,7 +17,17 @@ commit the workflow and `actions.lock` together.
 - `src/lib.rs`: the public Rust types and their conversion to and from `model`.
 - `src/graphql.rs` and `src/graphql/`: SDL loading, deterministic expansion, typed GraphQL
   parsing with async-graphql-parser 7 and conversion to `Selection`.
-- `crates/rusuna-cli/`: the clap CLI `rusuna`.
+- `crates/rusuna-cli/`: the clap CLI `rusuna` (not published).
+- `crates/rusuna-sqlx/`: `fetch` and `execute` with sqlx 0.9. Parameters are encoded
+  for the types PostgreSQL infers when sqlx prepares the statement.
+- `crates/rusuna-async-graphql/`: `Builder` and `Parts`, the async-graphql 7 dynamic
+  schema of one role, the root resolvers, hand-written fields and the transaction
+  extension.
+- `crates/rusuna-axum/`: the axum 0.8 route `graphql` and the example `blog`.
+- `crates/rusuna-http-tests/`: unpublished; HTTP tests against the Hasura fixtures and
+  the introspection comparison. Each test creates its own database.
+- Workspace dependencies and package metadata are in the root `Cargo.toml`
+  (`[workspace.dependencies]`, `[workspace.package]`).
 - `lean/` and `.leanfran/cache/`: the extracted Lean and the generated Rust. A build in
   the dev shell rewrites them when the block changes; commit them with the source.
 - `audit/Audit/`: the leanassay audit `make check` runs. `audit/Survey/`: the tables of
@@ -42,8 +52,17 @@ generated `run` and converts its arguments and result. Do not reimplement these 
 
 Rust owns the public types, the depth check that bounds the recursion of the conversion,
 and everything with I/O: tests, the database client and the benchmark. Rust also parses SDL and GraphQL, expands fragments and variables, and checks values
-against the generated GraphQL type graph. SQL types and database execution remain caller
-responsibilities. `Schema::from_sdl` builds the schema; `Schema::compile` accepts text,
+against the generated GraphQL type graph. The `rusuna` crate performs no I/O; the other
+crates execute statements, build the async-graphql schema and serve HTTP. SQL column
+types remain the caller's database schema.
+
+The async-graphql resolvers hand a root field to the core as GraphQL text: the alias, the
+selection from `Context::field()`, and every argument as a variable declared with the
+argument's type from the role's expanded SDL, its value passed as JSON. Argument values
+are never printed as GraphQL literals: enum values arrive from clients as JSON strings,
+which only the core's variable coercion accepts. async-graphql removes `@skip` and `@include` before resolvers run;
+the extension's `prepare_request` fills variable defaults and omitted nullable variables
+first. Selection rules stay in the core. `Schema::from_sdl` builds the schema; `Schema::compile` accepts text,
 JSON variables, an optional operation name and an explicit `Session`. `compile_selection` is the lower-level
 entry to Lean. Keep selection acceptance rules and SQL generation in Lean.
 
@@ -333,8 +352,19 @@ are also tested in autocommit mode without a caller rollback.
 - `tests/compile.rs` holds the expected statements, the parameters and their order, the
   rejected selections, the largest query on a small stack and compiling from several
   threads.
-- `RUSUNA_POSTGRES` is a required input of the differential test and the benchmark;
-  `tools/with-postgres.sh` sets it.
+- `crates/rusuna-http-tests/` runs an axum server per test on `127.0.0.1:0` and posts
+  with a raw HTTP/1.1 client. It compares the 43 admin and 19 permission queries with the
+  Hasura statements, the 64 mutation fixtures with Hasura's responses and tables, a
+  rollback after a failing later root field, enum inputs as variables, repeated mutation
+  response keys, hand-written fields in both directions,
+  hidden roles and introspection with the expanded SDL of each role. Pruned empty types
+  are listed by hand in `tests/introspection.rs`.
+- `crates/rusuna-sqlx/tests/` binds each supported parameter type and checks mutation
+  transactions on a table of its own.
+- `RUSUNA_POSTGRES` is a required input of the database tests and the benchmark;
+  `tools/with-postgres.sh` sets it and `DATABASE_URL`, which the example reads.
+- `cargo package --workspace --exclude rusuna-cli --exclude rusuna-http-tests` packages
+  the published crates. A build of the `rusuna` package needs only `.leanfran/cache/`.
 
 ## Speed
 

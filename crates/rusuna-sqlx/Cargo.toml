@@ -1,0 +1,20 @@
+[package]
+name = "rusuna-sqlx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+description = "Execute rusuna statements on PostgreSQL with sqlx"
+keywords = ["graphql", "postgresql", "hasura", "sqlx"]
+categories = ["database", "web-programming"]
+
+[dependencies]
+chrono = { workspace = true }
+rusuna = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

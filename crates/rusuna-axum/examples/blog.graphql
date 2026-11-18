@@ -1,0 +1,25 @@
+type author @table(name: "author") @primary_key(columns: ["id"])
+  @permission(role: "reader", columns: ["id", "name"], where: {})
+  @permission(role: "writer", columns: ["id", "name"], where: {}) {
+  id: Int!
+  name: String!
+  articles: [article!]! @relation(columns: ["id"], references: ["author_id"])
+}
+
+type article @table(name: "article") @primary_key(columns: ["id"])
+  @permission(role: "reader", columns: ["id", "title", "author_id"], where: {published: {_eq: true}}, allow_aggregations: true)
+  @permission(role: "writer", columns: ["id", "title", "author_id", "published"], where: {_or: [{published: {_eq: true}}, {author_id: {_eq: "$user_id"}}]}, allow_aggregations: true)
+  @insert_permission(role: "writer", columns: ["title", "published"], check: {}, set: {author_id: "$user_id"})
+  @update_permission(role: "writer", columns: ["title", "published"], where: {author_id: {_eq: "$user_id"}}, check: {author_id: {_eq: "$user_id"}}) {
+  id: Int!
+  title: String!
+  author_id: Int!
+  published: Boolean!
+  author: author! @relation(columns: ["author_id"], references: ["id"])
+}
+
+type Query {
+  article: [article!]! @list
+  article_aggregate: article_aggregate! @aggregate(target: "article")
+  author: [author!]! @list
+}

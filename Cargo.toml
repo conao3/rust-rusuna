@@ -1,21 +1,60 @@
 [workspace]
-members = [".", "crates/rusuna-cli"]
-default-members = [".", "crates/rusuna-cli"]
+members = [
+    ".",
+    "crates/rusuna-cli",
+    "crates/rusuna-sqlx",
+    "crates/rusuna-async-graphql",
+    "crates/rusuna-axum",
+    "crates/rusuna-http-tests",
+]
+default-members = [
+    ".",
+    "crates/rusuna-cli",
+    "crates/rusuna-sqlx",
+    "crates/rusuna-async-graphql",
+    "crates/rusuna-axum",
+    "crates/rusuna-http-tests",
+]
 exclude = ["bench"]
 
-[package]
-name = "rusuna"
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "A Hasura-style GraphQL engine as a Rust library: compiles a query to one SQL statement"
 repository = "https://github.com/conao3/rust-rusuna"
+homepage = "https://github.com/conao3/rust-rusuna"
+readme = "README.md"
+
+[workspace.dependencies]
+rusuna = { path = ".", version = "0.1.0" }
+rusuna-sqlx = { path = "crates/rusuna-sqlx", version = "0.1.0" }
+rusuna-async-graphql = { path = "crates/rusuna-async-graphql", version = "0.1.0" }
+rusuna-axum = { path = "crates/rusuna-axum", version = "0.1.0" }
+async-graphql = { version = "7.2.1", default-features = false, features = ["dynamic-schema"] }
+async-graphql-axum = "7.2.1"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "json", "chrono"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+
+[package]
+name = "rusuna"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "A Hasura-style GraphQL engine as a Rust library: compiles a query to one SQL statement"
+keywords = ["graphql", "postgresql", "hasura", "sql", "lean"]
+categories = ["database", "web-programming"]
 include = ["/src", "/build.rs", "/.leanfran/cache", "/LICENSE", "/README.md"]
 
 [dependencies]
-async-graphql-parser = "7"
-async-graphql-value = "7"
-serde_json = { version = "1", features = ["preserve_order"] }
+async-graphql-parser = "7.2.1"
+async-graphql-value = "7.2.1"
+serde_json = { workspace = true }
 leanfran = { version = "=0.6.0", default-features = false }
 
 [build-dependencies]

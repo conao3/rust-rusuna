@@ -1,0 +1,23 @@
+[package]
+name = "rusuna-axum"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+description = "An axum route that serves rusuna async-graphql schemas per role"
+keywords = ["graphql", "postgresql", "hasura", "axum"]
+categories = ["database", "web-programming::http-server"]
+
+[dependencies]
+async-graphql = { workspace = true }
+async-graphql-axum = { workspace = true }
+axum = { workspace = true }
+rusuna = { workspace = true }
+
+[dev-dependencies]
+rusuna-async-graphql = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }

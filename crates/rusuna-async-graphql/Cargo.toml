@@ -1,0 +1,20 @@
+[package]
+name = "rusuna-async-graphql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+description = "Serve a rusuna schema from an async-graphql dynamic schema beside hand-written resolvers"
+keywords = ["graphql", "postgresql", "hasura", "async-graphql"]
+categories = ["database", "web-programming"]
+
+[dependencies]
+async-graphql = { workspace = true }
+async-trait = "0.1"
+rusuna = { workspace = true }
+rusuna-sqlx = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }

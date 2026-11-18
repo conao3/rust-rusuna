@@ -18,8 +18,18 @@ rusuna loads a mapping schema from SDL and compiles GraphQL query and mutation d
 | SDL with directives, typed GraphQL text parsing, expanded SDL and a CLI | available |
 | Row and column read permissions per role, with plan invariants | available |
 | Insert, update, delete, primary-key roots and write permissions | available |
-| Parts for an `async-graphql` schema and `axum` routes | planned |
+| Execution with sqlx, parts for an `async-graphql` schema and `axum` routes | available |
 | Subscriptions, event triggers | planned |
+
+The workspace has these crates:
+
+| Crate | Role |
+|---|---|
+| `rusuna` | The compiler: SDL, GraphQL text and Lean core. No I/O. |
+| `rusuna-sqlx` | Runs compiled statements on PostgreSQL with sqlx 0.9 and returns the `data` JSON. |
+| `rusuna-async-graphql` | Builds an async-graphql 7 dynamic schema for one role, beside hand-written fields. |
+| `rusuna-axum` | One axum 0.8 route that picks the role's schema and executes the request. |
+| `rusuna-cli` | The `rusuna` command (not published). |
 
 ## Usage
 
@@ -51,8 +61,8 @@ for field in fields {
 ```
 
 Execute each `CompiledField.compiled` with a PostgreSQL client and put its JSON result
-under `CompiledField.response_key` in the response's `data` object. Compilation performs
-no I/O. `Schema::parse_query(query, &variables, operation_name, role)` returns the expanded
+under `CompiledField.response_key` in the response's `data` object; `rusuna-sqlx` does
+this. `CompiledField.mutation` is true for mutation roots. Compilation performs no I/O. `Schema::parse_query(query, &variables, operation_name, role)` returns the expanded
 `Vec<Selection>`; `Schema::compile` additionally calls the Lean compiler for each root.
 `variables` is a JSON object; `operation_name: Option<&str>` is required when a document
 has multiple operations. `Error::Document { message, line, column }` reports syntax and
@@ -123,7 +133,8 @@ selection rules; a skipped root emits no statement.
 Documents and variables are bounded to 1 MiB, document nesting to 128 levels and fragment
 expansion to 100,000 visited selections, before the core's tighter selection limits.
 The parser is [async-graphql-parser](https://docs.rs/async-graphql-parser/7.2.1/async_graphql_parser/)
-7.2.1 with async-graphql-value 7.2.1. Database execution belongs to the caller.
+7.2.1 with async-graphql-value 7.2.1. `Schema::roles()` lists `admin` and every role
+named by a read or write permission.
 
 ## Read permissions
 
@@ -186,8 +197,8 @@ never searches the SQL text or expands permission cycles.
 The lower-level API uses `Table.permissions: Vec<Permission>` and
 `Permission { role, filter: Filter<Operand>, columns, allow_aggregations }`, where
 `Operand` is `Literal(Value)` or `Session(String)`. Permission filters have the same
-32-edge, 1000-child and 1000-membership limits as query filters. No mutation permissions
-are implemented.
+32-edge, 1000-child and 1000-membership limits as query filters. Write permissions are
+`Table::write_permissions` (next section).
 
 ## Mutations and primary keys
 
@@ -257,7 +268,8 @@ mutation {
 `Schema::compile` and `rusuna query compile-sql` accept query and mutation documents.
 They return one `CompiledField` per root field in document order. **The caller must execute
 all fields of a mutation, in order, on one transaction and roll it back if any field
-fails.** rusuna compiles statements; it does not open connections or transactions.
+fails.** The `rusuna` crate compiles statements; `rusuna_sqlx::execute` and the
+async-graphql parts open the connection and the transaction.
 The lower-level API is `Schema::compile_mutation(&MutationArguments, &[Selection],
 &Session)`. `Table::primary_key` and `Table::write_permissions` provide the equivalent
 schema declarations for `Schema::new`.
@@ -291,6 +303,174 @@ when the concurrent transaction changes the row's primary key, the statement ski
 row; on a table without a primary-key declaration, the update self-join matches `ctid`
 and skips a concurrently changed row, and a delete's returning relationships can still
 include the deleted row's pre-change version.
+
+## Running on PostgreSQL with sqlx
+
+```rust
+let fields = schema.compile(query, &variables, None, &session)?;
+let data: serde_json::Map<String, serde_json::Value> = rusuna_sqlx::execute(&pool, &fields).await?;
+```
+
+`rusuna_sqlx::execute(&PgPool, &[CompiledField])` runs a query's root fields one after
+another on one pooled connection. When any field is a mutation root, it runs all fields in
+document order on one transaction, rolls back on the first error and commits otherwise.
+`rusuna_sqlx::fetch(&mut PgConnection, &Compiled)` runs one statement, including on a
+transaction the caller holds, and returns its JSON value (`null` for an absent row).
+
+Parameters take the types PostgreSQL infers for them: `fetch` prepares the statement
+(sqlx caches it per connection), reads the parameter types and encodes each `Value` for
+its type. `Int` binds to `int2`, `int4` (both range checked), `int8`, `float4` and
+`float8`; `Float` to `float4` and `float8`; `Bool` to `bool`; `Text` to `text`,
+`varchar`, `bpchar` and `name`, and to `timestamptz` (RFC 3339, or
+`YYYY-MM-DD HH:MM[:SS[.f]]` with a `±HH[:MM]` offset), `timestamp` (the same without an
+offset) and `date` (`YYYY-MM-DD`). `Null` binds to any type. Other combinations are
+`Error::Parameter` before the statement runs.
+
+`rusuna_sqlx::Error` is `PermissionCheck` for a violated insert or update check
+(`rusuna::is_permission_check_error`), `Parameter { index, message }` and
+`Database(sqlx::Error)`. `PermissionCheck` displays Hasura's message,
+`PERMISSION_CHECK_MESSAGE`.
+
+## async-graphql schema
+
+`rusuna-async-graphql` turns `Schema::expanded_sdl(role)` into the types of an
+[async-graphql 7 dynamic schema](https://docs.rs/async-graphql/7.2.1/async_graphql/dynamic/index.html):
+objects, input objects, enums, custom scalars and the root fields. Each rusuna root field
+is resolved by one statement. Its resolver reads the field's alias, arguments with
+variables substituted, and its selection with fragments expanded
+(`Context::field()`). It writes them as a single-field GraphQL document whose arguments are
+variables declared with the arguments' types, and compiles that document with
+`Schema::compile`, the argument values as JSON variables and the request's `Session`, so
+enum values arrive as JSON strings the way a client sends them. Fields below the root read
+their values from the statement's JSON by response key, so no field below a root issues
+SQL.
+
+```rust
+use async_graphql::dynamic::{Field, FieldFuture, FieldValue, Object, TypeRef};
+
+let parts = rusuna_async_graphql::Builder::new(schema.clone(), "user")
+    .field("article", "wordCount", TypeRef::named_nn(TypeRef::INT), &["title"], |ctx| {
+        FieldFuture::new(async move {
+            let title = rusuna_async_graphql::parent_column(&ctx, "title")?;
+            Ok(Some(async_graphql::Value::from(
+                title.as_str().unwrap_or_default().split_whitespace().count() as i32,
+            )))
+        })
+    })
+    .build()?;
+let viewer = Object::new("Viewer").field(parts.root_field("article").unwrap());
+let graphql = parts
+    .query_field(Field::new("viewer", TypeRef::named_nn("Viewer"), |_| {
+        FieldFuture::new(async { Ok(Some(FieldValue::owned_any(()))) })
+    }))
+    .schema()
+    .register(viewer)
+    .data(pool)
+    .finish()?;
+let response = graphql
+    .execute(async_graphql::Request::new("{ viewer { article { title wordCount } } }").data(session))
+    .await;
+```
+
+- **One schema per role.** `Builder::new(schema, role)` builds the types of that role's
+  expanded SDL, so types, root fields, columns and operations the role may not use are
+  absent from both introspection and execution. Build one async-graphql schema for each
+  role (`rusuna::Schema::roles()`) and choose it per request; `rusuna-axum` does this.
+  The resolver rejects a `Session` of another role with `access-denied`.
+- **Session and pool.** The resolvers read `rusuna::Session` from the request data
+  (`Request::data`) and `sqlx::PgPool` from the schema or request data. Authentication
+  and the construction of the session belong to the caller.
+- **Hand-written fields above rusuna.** `Parts::root_field(name)` returns a new
+  `dynamic::Field` that resolves the query root `name` wherever it is registered, for
+  example under a hand-written `viewer`. `Parts::query_field` and `Parts::mutation_field`
+  add hand-written root fields, and `Parts::schema()` returns a `SchemaBuilder` with
+  every rusuna type registered; register further hand-written types on it.
+  `Parts::register(builder)` registers the same types on a builder the caller creates.
+- **Hand-written fields on rusuna types.** `Builder::field(type, name, type_ref,
+  requires, resolver)` adds a field to a rusuna row type. `requires` names scalar
+  fields of that type. The statement selects each of them under the alias
+  `__rusuna_<field>` whenever the hand-written field is selected, and
+  `parent_column(&ctx, field)` reads it from the parent row. A role that cannot read the
+  type or a required field does not get the hand-written field. Required names are at
+  most 54 bytes so the alias fits the 63-byte limit. A type that is not a row type of
+  the schema, or a required name that is not one of its scalar fields, is an error of
+  `build` for every role.
+- **Static types.** async-graphql 7 schemas are either static (`Schema<Query, Mutation,
+  Subscription>` from derive macros) or dynamic; a dynamic schema cannot register a
+  `#[derive(SimpleObject)]` or `#[Object]` type, and a static schema cannot hold dynamic
+  types. Write the hand-written resolvers that share the schema with rusuna as
+  `dynamic::Object` and `dynamic::Field`. Their resolvers can call the same async
+  functions a static resolver calls, and can convert a serializable result with
+  `async_graphql::to_value` and `FieldValue::value`.
+- **Mutations.** A mutation operation runs its rusuna root fields in document order on
+  one transaction, which the schema's extension opens with the first such field. After a
+  field fails, the transaction is rolled back, later rusuna root fields do not run, and
+  the response has `data: null` with the error. The transaction commits only when the
+  response has no errors, so an error of a hand-written field also rolls back the rusuna
+  writes. Hand-written mutation fields use their own connections. Two mutation root
+  fields with the same response key are a `validation-failed` error: async-graphql
+  7.2.1 resolves each occurrence separately, and a write runs once.
+- **Errors.** Errors carry `extensions.code`. A violated insert or update check has
+  Hasura's message `check constraint of an insert/update permission has failed` and code
+  `permission-error`. Compilation errors are `validation-failed`; database errors are
+  `constraint-violation` (SQLSTATE class 23), `data-exception` (class 22, and
+  parameters that do not fit their column type) or `unexpected`; a missing or foreign
+  session is `access-denied`. async-graphql reports validation errors and positions in
+  its own words, and errors carry `locations` rather than Hasura's `extensions.path`.
+- **Variables.** The extension applies variable defaults and binds omitted nullable
+  variables to null before async-graphql validates and prunes `@skip` and `@include`;
+  async-graphql 7.2.1 reads only the provided variables for those directives.
+- **Introspection.** Introspection lists the types reachable from the root fields, equal
+  to the role's expanded SDL except for comparison inputs no field uses. Object and input
+  types left without fields are removed with the fields and nullable arguments that use
+  them; a role without any root field needs a hand-written query field. `__typename` is
+  answered by async-graphql, from the same type names. The tests of
+  `crates/rusuna-http-tests` compare introspection with the expanded SDL of every role.
+
+## axum route
+
+```rust
+let app = axum::Router::new().route(
+    "/api/graphql",
+    rusuna_axum::graphql(schemas, |parts: &axum::http::request::Parts| {
+        let session = authenticate(&parts.headers);
+        async move { session }
+    }),
+);
+```
+
+`rusuna_axum::graphql(HashMap<String, dynamic::Schema>, session)` is a `POST` route. The
+session function receives the request head and returns `Result<rusuna::Session,
+axum::response::Response>`; an error response is sent as is. The route executes the
+request on the schema of the session's role with the session in the request data, and
+answers `access-denied` for a role without a schema. Request parsing and the response
+are [async-graphql-axum](https://docs.rs/async-graphql-axum/7.2.1/async_graphql_axum/).
+
+## Example server
+
+`crates/rusuna-axum/examples/blog.rs` serves `blog.graphql` with roles `reader` and
+`writer`, chosen by the `x-role` header, with `x-user-id` as the `user_id` session value.
+It adds the hand-written `viewer { role article }` and `article.wordCount`.
+
+```sh
+nix develop --command tools/with-postgres.sh crates/rusuna-axum/examples/blog.sql -- \
+  cargo run -p rusuna-axum --example blog
+```
+
+In another terminal:
+
+```sh
+curl -s http://127.0.0.1:3000/api/graphql -H 'content-type: application/json' -H 'x-role: reader' \
+  -d '{"query":"{ article(order_by: {id: asc}) { id title wordCount author { name } } }"}'
+curl -s http://127.0.0.1:3000/api/graphql -H 'content-type: application/json' -H 'x-role: writer' -H 'x-user-id: 2' \
+  -d '{"query":"{ viewer { role article(order_by: {id: asc}) { id title published } } }"}'
+curl -s http://127.0.0.1:3000/api/graphql -H 'content-type: application/json' -H 'x-role: writer' -H 'x-user-id: 2' \
+  -d '{"query":"mutation { insert_article_one(object: {title: \"Ships and software\", published: true}) { id author { name } } }"}'
+```
+
+A reader sees published articles only; a writer also sees its own drafts and inserts
+articles as itself. `tools/with-postgres.sh` sets `DATABASE_URL`, which the example
+reads.
 
 ## CLI
 
@@ -492,6 +672,8 @@ Outside the proofs:
 - `src/lib.rs`, which converts public Rust types to Lean types and back; SDL parsing,
   role-specific SDL rendering and scalar type checking in `src/graphql/`; authentication
   and construction of the session by the caller.
+- `rusuna-sqlx`, `rusuna-async-graphql` and `rusuna-axum`: parameter encoding, the
+  dynamic schema, the selection hand-off, transactions and HTTP. The HTTP tests cover them.
 - `unquoteChars` as a description of PostgreSQL's reader.
 
 ## Results and speed
@@ -526,6 +708,18 @@ B at 0.3 ms (0.2–7.8), and C at 7.5 ms (3.6–10.0), 15 runs each. These small
 sets also match Hasura. The timings include concurrent machine load; compare the
 statements within the same run.
 
+The same comparisons run over HTTP in `crates/rusuna-http-tests`: an axum server built
+with `rusuna-axum`, one async-graphql schema per role and hand-written `viewer` and
+`article.wordCount` fields answers all 43 admin queries and 19 permission queries with
+the `data` of the Hasura statements, and all 64 mutation fixtures with Hasura's
+responses and table states, including 7 permission-check violations with Hasura's message
+and code, and the multi-root mutations. Further tests cover a failing third root field
+that rolls back the first two, variables with defaults, omitted variables, enum and
+`on_conflict` inputs as variables, repeated mutation response keys, fragments and
+`@skip`, hidden types and root fields per role, and introspection against the expanded
+SDL of 12 role and schema pairs. `crates/rusuna-sqlx/tests` binds every supported
+parameter type and checks the mutation transaction without async-graphql.
+
 ## Development
 
 ```
@@ -538,6 +732,20 @@ the theorem audit (`lake -d audit build --wfail`), the check that the generated 
 the source, and the tests against a throwaway PostgreSQL 17 cluster. `make bench` runs the
 measurement above, `make survey` prints the leanassay tables of the functions outside the
 audit. Enable the optional pre-commit hook with `git config core.hooksPath .githooks`.
+Each test that loads its own tables creates its own database in the cluster.
+
+## Publishing
+
+`cargo package --workspace --exclude rusuna-cli --exclude rusuna-http-tests` builds the
+four published crates; their dependencies on each other carry `version = "0.1.0"`, so
+they are published in the order `rusuna`, `rusuna-sqlx`, `rusuna-async-graphql`,
+`rusuna-axum`. The `rusuna` package contains `src/` and `.leanfran/cache/`, the Rust
+leanfran generated from the `lean!` block. Its build script copies the cached module and
+needs neither Lean nor Lake, so a crate that depends on the published `rusuna`
+([leanfran](https://crates.io/crates/leanfran) and `leanfran-build` 0.6.0 come from
+crates.io) builds with cargo and a C toolchain only. `lean/` is not packaged; the cache
+key depends on the block and on the crate name, so a changed block needs a regenerated
+cache before packaging, which `make check` enforces.
 
 ## License
 

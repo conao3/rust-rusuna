@@ -1,10 +1,14 @@
 [package]
 name = "rusuna-cli"
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 description = "Expand a rusuna schema and compile GraphQL queries to PostgreSQL"
-repository = "https://github.com/conao3/rust-rusuna"
+keywords = ["graphql", "postgresql", "hasura", "cli"]
+categories = ["command-line-utilities", "database"]
 publish = false
 
 [[bin]]
@@ -13,5 +17,5 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-rusuna = { path = "../.." }
-serde_json = "1"
+rusuna = { workspace = true }
+serde_json = { workspace = true }

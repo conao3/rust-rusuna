@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Usage: with-postgres.sh FILE.sql... -- COMMAND...
 # Starts a throwaway PostgreSQL cluster on a Unix socket, loads the SQL files, and runs the
-# command with RUSUNA_POSTGRES set to the connection string.
+# command with RUSUNA_POSTGRES set to the connection string and DATABASE_URL to the same
+# database as a URL.
 set -euo pipefail
 
 files=()
@@ -18,4 +19,4 @@ pg_ctl -D "$dir/data" -l "$dir/log" -o "-c listen_addresses='' -c unix_socket_di
 for file in "${files[@]}"; do
   psql -h "$dir" -U postgres -q -v ON_ERROR_STOP=1 -f "$file"
 done
-RUSUNA_POSTGRES="host=$dir user=postgres dbname=postgres" "$@"
+RUSUNA_POSTGRES="host=$dir user=postgres dbname=postgres" DATABASE_URL="postgres:///postgres?host=$dir&user=postgres" "$@"

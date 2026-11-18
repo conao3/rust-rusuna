@@ -1,0 +1,884 @@
+use async_graphql::dynamic::{
+    Enum, Field, FieldFuture, FieldValue, InputObject, InputValue, Object, ResolverContext, Scalar,
+    SchemaBuilder, TypeRef,
+};
+use async_graphql::extensions::{
+    Extension, ExtensionContext, ExtensionFactory, NextExecute, NextPrepareRequest,
+};
+use async_graphql::parser::types::{
+    BaseType, DocumentOperations, FieldDefinition, Type, TypeKind, TypeSystemDefinition,
+};
+use async_graphql::{
+    Data, ErrorExtensions, Name, Request, Response, SelectionField, ServerError, ServerResult,
+    Value,
+};
+use serde_json::Value as Json;
+use sqlx::{PgPool, Postgres, Transaction};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{self, Write};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+pub const HIDDEN_PREFIX: &str = "__rusuna_";
+
+const BUILTIN_SCALARS: [&str; 5] = ["Int", "Float", "String", "Boolean", "ID"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    Schema(rusuna::Error),
+    Sdl(String),
+    Field {
+        type_name: String,
+        field: String,
+        message: String,
+    },
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Schema(error) => write!(f, "{error}"),
+            Self::Sdl(message) => write!(f, "expanded SDL: {message}"),
+            Self::Field {
+                type_name,
+                field,
+                message,
+            } => write!(f, "{type_name}.{field}: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+struct Extra {
+    type_name: String,
+    name: String,
+    field: Field,
+    requires: Vec<String>,
+}
+
+pub struct Builder {
+    schema: Arc<rusuna::Schema>,
+    role: String,
+    extras: Vec<Extra>,
+}
+
+#[derive(Clone, Copy)]
+enum Shape {
+    Scalar,
+    Object,
+}
+
+struct Shared {
+    schema: Arc<rusuna::Schema>,
+    role: String,
+    query: String,
+    children: BTreeMap<(String, String), String>,
+    arguments: BTreeMap<(String, String), BTreeMap<String, String>>,
+    extras: BTreeMap<(String, String), Vec<String>>,
+}
+
+#[derive(Clone)]
+struct Root {
+    definition: FieldDefinition,
+    mutation: bool,
+}
+
+pub struct Parts {
+    query: Object,
+    query_name: String,
+    mutation: Option<Object>,
+    mutation_name: String,
+    types: Vec<async_graphql::dynamic::Type>,
+    roots: BTreeMap<String, Root>,
+    shared: Arc<Shared>,
+}
+
+impl Builder {
+    pub fn new(schema: Arc<rusuna::Schema>, role: impl Into<String>) -> Self {
+        Self {
+            schema,
+            role: role.into(),
+            extras: Vec::new(),
+        }
+    }
+
+    pub fn field<F>(
+        mut self,
+        type_name: impl Into<String>,
+        name: impl Into<String>,
+        ty: impl Into<TypeRef>,
+        requires: &[&str],
+        resolver: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(ResolverContext<'a>) -> FieldFuture<'a> + Send + Sync + 'static,
+    {
+        let name = name.into();
+        let field = Field::new(name.clone(), ty, resolver);
+        self.extras.push(Extra {
+            type_name: type_name.into(),
+            field,
+            name,
+            requires: requires.iter().map(|s| s.to_string()).collect(),
+        });
+        self
+    }
+
+    pub fn build(self) -> Result<Parts, Error> {
+        let sdl = self
+            .schema
+            .expanded_sdl(&self.role)
+            .map_err(Error::Schema)?;
+        let document =
+            async_graphql::parser::parse_schema(&sdl).map_err(|e| Error::Sdl(e.to_string()))?;
+        let mut query_name = "Query".to_string();
+        let mut mutation_name = "Mutation".to_string();
+        let mut definitions = BTreeMap::new();
+        for definition in document.definitions {
+            match definition {
+                TypeSystemDefinition::Schema(schema) => {
+                    if let Some(query) = &schema.node.query {
+                        query_name = query.node.to_string();
+                    }
+                    if let Some(mutation) = &schema.node.mutation {
+                        mutation_name = mutation.node.to_string();
+                    }
+                }
+                TypeSystemDefinition::Type(ty) => {
+                    definitions.insert(ty.node.name.node.to_string(), ty.node.kind);
+                }
+                TypeSystemDefinition::Directive(_) => {
+                    return Err(Error::Sdl("unexpected directive definition".into()));
+                }
+            }
+        }
+        prune(&mut definitions);
+        let mut children = BTreeMap::new();
+        let mut arguments = BTreeMap::new();
+        let mut scalars = BTreeSet::new();
+        for (name, kind) in &definitions {
+            if let TypeKind::Object(object) = kind {
+                for field in &object.fields {
+                    let field = &field.node;
+                    arguments.insert(
+                        (name.clone(), field.name.node.to_string()),
+                        field
+                            .arguments
+                            .iter()
+                            .map(|a| (a.node.name.node.to_string(), a.node.ty.node.to_string()))
+                            .collect::<BTreeMap<_, _>>(),
+                    );
+                    let ty = named(&field.ty.node);
+                    let shape = match definitions.get(ty) {
+                        Some(TypeKind::Object(_)) => Shape::Object,
+                        _ => Shape::Scalar,
+                    };
+                    if let Shape::Object = shape {
+                        children
+                            .insert((name.clone(), field.name.node.to_string()), ty.to_string());
+                    } else {
+                        scalars.insert((name.clone(), field.name.node.to_string()));
+                    }
+                }
+            }
+        }
+        let columns = row_columns(&self.schema)?;
+        let mut extras = BTreeMap::new();
+        let mut extra_fields: BTreeMap<String, Vec<Field>> = BTreeMap::new();
+        for extra in self.extras {
+            let Some(declared) = columns.get(&extra.type_name) else {
+                return Err(Error::Field {
+                    type_name: extra.type_name,
+                    field: extra.name,
+                    message: "no row type has this name".into(),
+                });
+            };
+            if let Some(unknown) = extra.requires.iter().find(|c| !declared.contains(*c)) {
+                return Err(Error::Field {
+                    type_name: extra.type_name.clone(),
+                    field: extra.name.clone(),
+                    message: format!("the row type has no scalar field {unknown}"),
+                });
+            }
+            let Some(TypeKind::Object(object)) = definitions.get(&extra.type_name) else {
+                continue;
+            };
+            if object.fields.iter().any(|f| f.node.name.node == extra.name) {
+                return Err(Error::Field {
+                    type_name: extra.type_name,
+                    field: extra.name,
+                    message: "the type already has a field with this name".into(),
+                });
+            }
+            if let Some(long) = extra
+                .requires
+                .iter()
+                .find(|c| HIDDEN_PREFIX.len() + c.len() > 63)
+            {
+                return Err(Error::Field {
+                    type_name: extra.type_name.clone(),
+                    field: extra.name.clone(),
+                    message: format!("the required column name {long} is longer than 54 bytes"),
+                });
+            }
+            if !extra
+                .requires
+                .iter()
+                .all(|c| scalars.contains(&(extra.type_name.clone(), c.clone())))
+            {
+                continue;
+            }
+            extras.insert(
+                (extra.type_name.clone(), extra.name.clone()),
+                extra.requires,
+            );
+            extra_fields
+                .entry(extra.type_name)
+                .or_default()
+                .push(extra.field);
+        }
+        let shared = Arc::new(Shared {
+            schema: self.schema,
+            role: self.role,
+            query: query_name.clone(),
+            children,
+            arguments,
+            extras,
+        });
+        let mut query = Object::new(&query_name);
+        let mut mutation = Object::new(&mutation_name);
+        let mut has_mutation = false;
+        let mut types = Vec::new();
+        let mut roots = BTreeMap::new();
+        for (name, kind) in definitions {
+            match kind {
+                TypeKind::Object(object) if name == query_name || name == mutation_name => {
+                    let is_mutation = name == mutation_name;
+                    for field in object.fields {
+                        let root = Root {
+                            definition: field.node,
+                            mutation: is_mutation,
+                        };
+                        let resolver = root_field(&shared, &root);
+                        if is_mutation {
+                            has_mutation = true;
+                            mutation = mutation.field(resolver);
+                        } else {
+                            query = query.field(resolver);
+                        }
+                        roots.insert(root.definition.name.node.to_string(), root);
+                    }
+                }
+                TypeKind::Object(object) => {
+                    let mut out = Object::new(&name);
+                    for field in object.fields {
+                        let field = field.node;
+                        let shape = if shared
+                            .children
+                            .contains_key(&(name.clone(), field.name.node.to_string()))
+                        {
+                            Shape::Object
+                        } else {
+                            Shape::Scalar
+                        };
+                        let mut child = Field::new(
+                            field.name.node.to_string(),
+                            type_ref(&field.ty.node),
+                            move |ctx| FieldFuture::Value(child_value(&ctx, shape)),
+                        );
+                        for argument in field.arguments {
+                            child = child.argument(InputValue::new(
+                                argument.node.name.node.to_string(),
+                                type_ref(&argument.node.ty.node),
+                            ));
+                        }
+                        out = out.field(child);
+                    }
+                    for extra in extra_fields.remove(&name).unwrap_or_default() {
+                        out = out.field(extra);
+                    }
+                    types.push(out.into());
+                }
+                TypeKind::InputObject(input) => {
+                    let mut out = InputObject::new(&name);
+                    for field in input.fields {
+                        out = out.field(InputValue::new(
+                            field.node.name.node.to_string(),
+                            type_ref(&field.node.ty.node),
+                        ));
+                    }
+                    types.push(out.into());
+                }
+                TypeKind::Enum(enumeration) => {
+                    types.push(
+                        Enum::new(&name)
+                            .items(
+                                enumeration
+                                    .values
+                                    .iter()
+                                    .map(|v| v.node.value.node.to_string()),
+                            )
+                            .into(),
+                    );
+                }
+                TypeKind::Scalar if !BUILTIN_SCALARS.contains(&name.as_str()) => {
+                    types.push(Scalar::new(&name).into());
+                }
+                _ => {}
+            }
+        }
+        Ok(Parts {
+            query,
+            query_name,
+            mutation: has_mutation.then_some(mutation),
+            mutation_name,
+            types,
+            roots,
+            shared,
+        })
+    }
+}
+
+impl Parts {
+    pub fn query_name(&self) -> &str {
+        &self.query_name
+    }
+
+    pub fn mutation_name(&self) -> Option<&str> {
+        self.mutation.as_ref().map(|_| self.mutation_name.as_str())
+    }
+
+    pub fn query_field(mut self, field: Field) -> Self {
+        self.query = self.query.field(field);
+        self
+    }
+
+    pub fn mutation_field(mut self, field: Field) -> Self {
+        self.mutation = Some(
+            self.mutation
+                .take()
+                .unwrap_or_else(|| Object::new(&self.mutation_name))
+                .field(field),
+        );
+        self
+    }
+
+    pub fn root_field(&self, name: &str) -> Option<Field> {
+        self.roots
+            .get(name)
+            .filter(|root| !root.mutation)
+            .map(|root| root_field(&self.shared, root))
+    }
+
+    pub fn register(self, mut builder: SchemaBuilder) -> SchemaBuilder {
+        builder = builder.register(self.query);
+        if let Some(mutation) = self.mutation {
+            builder = builder.register(mutation);
+        }
+        for ty in self.types {
+            builder = builder.register(ty);
+        }
+        builder.extension(Transactions)
+    }
+
+    pub fn schema(self) -> SchemaBuilder {
+        let builder =
+            async_graphql::dynamic::Schema::build(&self.query_name, self.mutation_name(), None);
+        self.register(builder)
+    }
+}
+
+pub fn parent_column<'a>(ctx: &ResolverContext<'a>, name: &str) -> async_graphql::Result<&'a Json> {
+    let parent: &'a FieldValue<'a> = ctx.parent_value;
+    parent
+        .downcast_ref::<Json>()
+        .and_then(|row| row.get(format!("{HIDDEN_PREFIX}{name}")))
+        .ok_or_else(|| {
+            async_graphql::Error::new(format!(
+                "the parent row has no column {name}; declare it in the field's requirements"
+            ))
+        })
+}
+
+fn row_columns(schema: &rusuna::Schema) -> Result<BTreeMap<String, BTreeSet<String>>, Error> {
+    let sdl = schema.expanded_sdl("admin").map_err(Error::Schema)?;
+    let document =
+        async_graphql::parser::parse_schema(&sdl).map_err(|e| Error::Sdl(e.to_string()))?;
+    let mut types = BTreeMap::new();
+    for definition in &document.definitions {
+        if let TypeSystemDefinition::Type(ty) = definition {
+            types.insert(ty.node.name.node.to_string(), &ty.node.kind);
+        }
+    }
+    Ok(types
+        .iter()
+        .filter(|(name, _)| types.contains_key(&format!("{name}_bool_exp")))
+        .filter_map(|(name, kind)| match kind {
+            TypeKind::Object(object) => Some((
+                name.clone(),
+                object
+                    .fields
+                    .iter()
+                    .filter(|f| {
+                        !matches!(types.get(named(&f.node.ty.node)), Some(TypeKind::Object(_)))
+                    })
+                    .map(|f| f.node.name.node.to_string())
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect())
+}
+
+fn named(ty: &Type) -> &str {
+    match &ty.base {
+        BaseType::Named(name) => name.as_str(),
+        BaseType::List(inner) => named(inner),
+    }
+}
+
+fn type_ref(ty: &Type) -> TypeRef {
+    let base = match &ty.base {
+        BaseType::Named(name) => TypeRef::Named(name.to_string().into()),
+        BaseType::List(inner) => TypeRef::List(Box::new(type_ref(inner))),
+    };
+    if ty.nullable {
+        base
+    } else {
+        TypeRef::NonNull(Box::new(base))
+    }
+}
+
+fn prune(definitions: &mut BTreeMap<String, TypeKind>) {
+    loop {
+        let empty: BTreeSet<String> = definitions
+            .iter()
+            .filter(|(_, kind)| match kind {
+                TypeKind::Object(object) => object.fields.is_empty(),
+                TypeKind::InputObject(input) => input.fields.is_empty(),
+                _ => false,
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if empty.is_empty() {
+            return;
+        }
+        for name in &empty {
+            definitions.remove(name);
+        }
+        for kind in definitions.values_mut() {
+            match kind {
+                TypeKind::Object(object) => {
+                    object.fields.retain(|field| {
+                        !empty.contains(named(&field.node.ty.node))
+                            && field.node.arguments.iter().all(|argument| {
+                                argument.node.ty.node.nullable
+                                    || !empty.contains(named(&argument.node.ty.node))
+                            })
+                    });
+                    for field in &mut object.fields {
+                        field
+                            .node
+                            .arguments
+                            .retain(|argument| !empty.contains(named(&argument.node.ty.node)));
+                    }
+                }
+                TypeKind::InputObject(input) => {
+                    input
+                        .fields
+                        .retain(|field| !empty.contains(named(&field.node.ty.node)));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn scalar_value(value: &Json) -> Value {
+    match value {
+        Json::Null => Value::Null,
+        Json::Bool(v) => Value::Boolean(*v),
+        Json::Number(v) => Value::Number(v.clone()),
+        Json::String(v) => Value::String(v.clone()),
+        Json::Array(v) => Value::List(v.iter().map(scalar_value).collect()),
+        Json::Object(v) => Value::Object(
+            v.iter()
+                .map(|(k, v)| (Name::new(k), scalar_value(v)))
+                .collect(),
+        ),
+    }
+}
+
+fn borrowed(value: &Json, shape: Shape) -> Option<FieldValue<'_>> {
+    match (value, shape) {
+        (Json::Null, _) => None,
+        (Json::Array(items), Shape::Object) => Some(FieldValue::list(
+            items.iter().map(|item| FieldValue::borrowed_any(item)),
+        )),
+        (value, Shape::Object) => Some(FieldValue::borrowed_any(value)),
+        (value, Shape::Scalar) => Some(FieldValue::value(scalar_value(value))),
+    }
+}
+
+fn owned(value: Json) -> Option<FieldValue<'static>> {
+    match value {
+        Json::Null => None,
+        Json::Array(items) => Some(FieldValue::list(
+            items.into_iter().map(FieldValue::owned_any),
+        )),
+        value => Some(FieldValue::owned_any(value)),
+    }
+}
+
+fn child_value<'a>(ctx: &ResolverContext<'a>, shape: Shape) -> Option<FieldValue<'a>> {
+    let parent: &'a FieldValue<'a> = ctx.parent_value;
+    let field = ctx.ctx.field();
+    let key = field.alias().unwrap_or(field.name());
+    parent
+        .downcast_ref::<Json>()
+        .and_then(|row| row.get(key))
+        .and_then(|value| borrowed(value, shape))
+}
+
+fn coded(message: impl Into<String>, code: &'static str) -> async_graphql::Error {
+    async_graphql::Error::new(message).extend_with(|_, e| e.set("code", code))
+}
+
+fn execution_error(error: rusuna_sqlx::Error) -> async_graphql::Error {
+    let code = match &error {
+        rusuna_sqlx::Error::PermissionCheck => "permission-error",
+        rusuna_sqlx::Error::Parameter { .. } => "data-exception",
+        rusuna_sqlx::Error::Database(sqlx::Error::Database(db)) => {
+            match db.code().as_deref().map(|c| &c[..2.min(c.len())]) {
+                Some("23") => "constraint-violation",
+                Some("22") => "data-exception",
+                _ => "unexpected",
+            }
+        }
+        rusuna_sqlx::Error::Database(_) => "unexpected",
+    };
+    coded(error.to_string(), code)
+}
+
+struct Document<'a> {
+    shared: &'a Shared,
+    text: String,
+    definitions: Vec<String>,
+    variables: serde_json::Map<String, Json>,
+}
+
+impl Document<'_> {
+    fn field(
+        &mut self,
+        parent: &str,
+        field: &SelectionField<'_>,
+        child: Option<&str>,
+    ) -> async_graphql::Result<()> {
+        let name = field.name();
+        if let Some(alias) = field.alias() {
+            write!(self.text, "{alias}: ")?;
+        }
+        self.text.push_str(name);
+        let arguments = field.arguments()?;
+        if !arguments.is_empty() {
+            let types = self
+                .shared
+                .arguments
+                .get(&(parent.to_string(), name.to_string()));
+            self.text.push('(');
+            for (i, (key, value)) in arguments.into_iter().enumerate() {
+                let ty = types
+                    .and_then(|types| types.get(key.as_str()))
+                    .ok_or_else(|| {
+                        async_graphql::Error::new(format!("unknown argument {parent}.{name}.{key}"))
+                    })?;
+                let variable = format!("v{}", self.definitions.len());
+                if i > 0 {
+                    self.text.push(' ');
+                }
+                write!(self.text, "{key}: ${variable}")?;
+                self.definitions.push(format!("${variable}: {ty}"));
+                self.variables.insert(variable, value.into_json()?);
+            }
+            self.text.push(')');
+        }
+        if let Some(child) = child {
+            self.text.push_str(" {");
+            let start = self.text.len();
+            self.selection(child, field)?;
+            if self.text.len() == start {
+                self.text.push_str(" __typename");
+            }
+            self.text.push_str(" }");
+        }
+        Ok(())
+    }
+
+    fn selection(&mut self, parent: &str, field: &SelectionField<'_>) -> async_graphql::Result<()> {
+        for item in field.selection_set() {
+            let name = item.name();
+            if name == "__typename" {
+                continue;
+            }
+            let key = (parent.to_string(), name.to_string());
+            if let Some(requires) = self.shared.extras.get(&key) {
+                for column in requires {
+                    write!(self.text, " {HIDDEN_PREFIX}{column}: {column}")?;
+                }
+                continue;
+            }
+            let child = self.shared.children.get(&key).map(String::as_str);
+            self.text.push(' ');
+            self.field(parent, &item, child)?;
+        }
+        Ok(())
+    }
+}
+
+fn render(
+    shared: &Shared,
+    root: &Root,
+    field: &SelectionField<'_>,
+) -> async_graphql::Result<(String, Json)> {
+    let parent = if root.mutation {
+        "Mutation"
+    } else {
+        shared.query.as_str()
+    };
+    let child = shared
+        .children
+        .get(&(parent.to_string(), root.definition.name.node.to_string()))
+        .map(String::as_str);
+    let mut document = Document {
+        shared,
+        text: String::new(),
+        definitions: Vec::new(),
+        variables: serde_json::Map::new(),
+    };
+    document.field(parent, field, child)?;
+    let operation = if root.mutation { "mutation" } else { "query" };
+    let definitions = if document.definitions.is_empty() {
+        String::new()
+    } else {
+        format!("({})", document.definitions.join(", "))
+    };
+    Ok((
+        format!("{operation}{definitions} {{ {} }}", document.text),
+        Json::Object(document.variables),
+    ))
+}
+
+#[derive(Default)]
+struct State {
+    transaction: Option<Transaction<'static, Postgres>>,
+    failed: bool,
+    keys: BTreeSet<String>,
+}
+
+#[derive(Default)]
+struct Slot {
+    state: Mutex<State>,
+}
+
+async fn resolve_root(
+    shared: &Shared,
+    root: &Root,
+    ctx: &ResolverContext<'_>,
+) -> async_graphql::Result<Option<FieldValue<'static>>> {
+    let session = ctx
+        .data::<rusuna::Session>()
+        .map_err(|_| coded("the request carries no rusuna::Session", "access-denied"))?;
+    if session.role != shared.role {
+        return Err(coded(
+            format!(
+                "the session role {} does not match the schema role {}",
+                session.role, shared.role
+            ),
+            "access-denied",
+        ));
+    }
+    let pool = ctx.data::<PgPool>()?;
+    if !root.mutation {
+        let (text, variables) = render(shared, root, &ctx.ctx.field())?;
+        let fields = shared
+            .schema
+            .compile(&text, &variables, None, session)
+            .map_err(|e| coded(e.to_string(), "validation-failed"))?;
+        let Some(field) = fields.into_iter().next() else {
+            return Ok(None);
+        };
+        let mut conn = pool
+            .acquire()
+            .await
+            .map_err(|e| execution_error(e.into()))?;
+        let value = rusuna_sqlx::fetch(&mut conn, &field.compiled)
+            .await
+            .map_err(execution_error)?;
+        return Ok(owned(value));
+    }
+    let slot = ctx.data::<Arc<Slot>>()?;
+    let mut state = slot.state.lock().await;
+    if state.failed {
+        return Ok(None);
+    }
+    let result = async {
+        let field = ctx.ctx.field();
+        let key = field.alias().unwrap_or(field.name()).to_string();
+        if !state.keys.insert(key.clone()) {
+            return Err(coded(
+                format!("the mutation repeats the root response key {key}"),
+                "validation-failed",
+            ));
+        }
+        let (text, variables) = render(shared, root, &field)?;
+        let fields = shared
+            .schema
+            .compile(&text, &variables, None, session)
+            .map_err(|e| coded(e.to_string(), "validation-failed"))?;
+        let Some(field) = fields.into_iter().next() else {
+            return Ok(Json::Null);
+        };
+        if state.transaction.is_none() {
+            state.transaction = Some(pool.begin().await.map_err(|e| execution_error(e.into()))?);
+        }
+        let transaction = state.transaction.as_mut().unwrap();
+        rusuna_sqlx::fetch(transaction, &field.compiled)
+            .await
+            .map_err(execution_error)
+    }
+    .await;
+    match result {
+        Ok(value) => Ok(owned(value)),
+        Err(error) => {
+            state.failed = true;
+            if let Some(transaction) = state.transaction.take() {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|e| execution_error(e.into()))?;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn root_field(shared: &Arc<Shared>, root: &Root) -> Field {
+    let definition = &root.definition;
+    let mut field = Field::new(
+        definition.name.node.to_string(),
+        type_ref(&definition.ty.node),
+        {
+            let shared = shared.clone();
+            let root = root.clone();
+            move |ctx| {
+                let shared = shared.clone();
+                let root = root.clone();
+                FieldFuture::new(async move { resolve_root(&shared, &root, &ctx).await })
+            }
+        },
+    );
+    for argument in &definition.arguments {
+        field = field.argument(InputValue::new(
+            argument.node.name.node.to_string(),
+            type_ref(&argument.node.ty.node),
+        ));
+    }
+    field
+}
+
+struct Transactions;
+
+impl ExtensionFactory for Transactions {
+    fn create(&self) -> Arc<dyn Extension> {
+        Arc::new(TransactionExtension)
+    }
+}
+
+struct TransactionExtension;
+
+#[async_trait::async_trait]
+impl Extension for TransactionExtension {
+    async fn prepare_request(
+        &self,
+        ctx: &ExtensionContext<'_>,
+        mut request: Request,
+        next: NextPrepareRequest<'_>,
+    ) -> ServerResult<Request> {
+        let operation_name = request.operation_name.clone();
+        let definitions: Vec<(Name, Option<Value>, bool)> = {
+            let document = request.parsed_query()?;
+            let operation = match &document.operations {
+                DocumentOperations::Single(operation) => Some(operation),
+                DocumentOperations::Multiple(operations) => match &operation_name {
+                    Some(name) => operations.get(name.as_str()),
+                    None if operations.len() == 1 => operations.values().next(),
+                    None => None,
+                },
+            };
+            operation
+                .map(|operation| {
+                    operation
+                        .node
+                        .variable_definitions
+                        .iter()
+                        .map(|d| {
+                            (
+                                d.node.name.node.clone(),
+                                d.node.default_value().cloned(),
+                                d.node.var_type.node.nullable,
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        for (name, default, nullable) in definitions {
+            if request.variables.contains_key(&name) {
+                continue;
+            }
+            match default {
+                Some(value) => {
+                    request.variables.insert(name, value);
+                }
+                None if nullable => {
+                    request.variables.insert(name, Value::Null);
+                }
+                None => {}
+            }
+        }
+        next.run(ctx, request).await
+    }
+
+    async fn execute(
+        &self,
+        ctx: &ExtensionContext<'_>,
+        operation_name: Option<&str>,
+        next: NextExecute<'_>,
+    ) -> Response {
+        let slot = Arc::new(Slot::default());
+        let mut data = Data::default();
+        data.insert(slot.clone());
+        let mut response = next.run_with_data(ctx, operation_name, data).await;
+        let mut state = slot.state.lock().await;
+        let transaction = state.transaction.take();
+        if state.failed {
+            response.data = Value::Null;
+        }
+        if let Some(transaction) = transaction {
+            let result = if response.errors.is_empty() {
+                transaction.commit().await
+            } else {
+                response.data = Value::Null;
+                transaction.rollback().await
+            };
+            if let Err(error) = result {
+                response.data = Value::Null;
+                response
+                    .errors
+                    .push(ServerError::new(error.to_string(), None));
+            }
+        }
+        response
+    }
+}
