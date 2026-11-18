@@ -72,7 +72,7 @@ def genNode : Nat → Gen Node
     else if (← Gen.choose Nat 0 5 (by omega)).val = 0 then
       pure (.group "aggregate" [.column "count" .count])
     else if (← Gen.choose Nat 0 5 (by omega)).val = 0 then
-      pure (.nodes "nodes" [] (← genList 2 (genNode fuel)))
+      pure (.nodes "nodes" [] (← Arbitrary.arbitrary) (← genList 2 (genNode fuel)))
     else
       pure (.relation (← genColumn) (← Arbitrary.arbitrary) (← genScan 2) (← genList 2 genColumn)
         (← genList 2 genColumn) (← genList 3 (genNode fuel)))
@@ -116,7 +116,7 @@ instance : Shrinkable Session := ⟨fun _ => []⟩
 
 def genPermission (target role : String) : Gen Permission := do
   let value ← if (← Gen.choose Nat 0 1 (by omega)).val = 0 then pure (.session "id") else pure (.literal (← Arbitrary.arbitrary))
-  pure ⟨target, role, .compare "a" .eq value, ["a", "b"], true⟩
+  pure ⟨target, role, .compare "a" .eq value, ["a", "b"], true, (← Arbitrary.arbitrary)⟩
 
 instance : Arbitrary Schema := ⟨do pure { tables := [← genTable "t" "u", ← genTable "u" "t"], permissions := [← genPermission "t" "user", ← genPermission "u" "user", ← genPermission "t" "other", ← genPermission "u" "other"], roots := [⟨"t", "t", .list⟩, ⟨"u", "u", .list⟩, ⟨"t_aggregate", "t", .aggregate⟩] }⟩
 instance : Shrinkable Schema := ⟨fun _ => []⟩

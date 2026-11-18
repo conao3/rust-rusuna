@@ -99,6 +99,36 @@ async fn role_queries_over_http_match_hasura() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn limited_role_queries_over_http_match_hasura() {
+    let pool = database("http_limits", &["schema.sql", "seed.sql"]).await;
+    let sdl = fixture("limits.graphql");
+    let address = serve(schemas(&sdl, &pool, None)).await;
+    let schema = rusuna::Schema::from_sdl(&sdl).unwrap();
+    let cases: Json = serde_json::from_str(&fixture("limits/cases.json")).unwrap();
+    assert_eq!(cases.as_array().unwrap().len(), 17);
+    for case in cases.as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let role = case["role"].as_str().unwrap();
+        let expected = hasura(
+            &pool,
+            Some(json!({ "x-hasura-role": role })),
+            &fixture(&format!("limits/hasura/{name}.sql")),
+        )
+        .await;
+        let query = fixture(&format!("limits/queries/{name}.graphql"));
+        let session = rusuna::Session::from_json(role, &case["session"]).unwrap();
+        let key = response_key(&schema, &query, &session);
+        let actual = post(
+            address,
+            &role_headers(role, &case["session"]),
+            &json!({ "query": query }),
+        )
+        .await;
+        assert_eq!(actual, json!({ "data": { key: expected } }), "{name}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn variables_fragments_and_aliases_pass_through_the_resolver() {
     let pool = database("http_documents", &["schema.sql", "seed.sql"]).await;
     let address = serve(schemas(&fixture("renamed-schema.graphql"), &pool, None)).await;

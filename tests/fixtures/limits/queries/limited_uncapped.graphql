@@ -1,0 +1,1 @@
+{ revision(order_by: [{article_id: asc}, {author_id: asc}, {note: asc}]) { note article { id comments(order_by: {id: asc}) { id } } } }

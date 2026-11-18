@@ -18,6 +18,7 @@ documents to SQL. `rusuna-events` runs event triggers and cron triggers beside i
 | Lists, relationships, recursive filters, pagination, null ordering, aggregates and row `__typename` | available |
 | SDL with directives, typed GraphQL text parsing, expanded SDL and a CLI | available |
 | Row and column read permissions per role, with plan invariants | available |
+| Row limits of read permissions on lists and aggregate `nodes` | available |
 | Insert, update, delete, primary-key roots and write permissions | available |
 | Views and materialized views as read-only tables | available |
 | Execution with sqlx, parts for an `async-graphql` schema and `axum` routes | available |
@@ -182,7 +183,7 @@ The lower-level API sets `Table::read_only` (`Table::new(…).read_only()`).
 ```graphql
 type Article @table(name: "article")
   @permission(role: "user", columns: ["id", "title"],
-              where: {author_id: {_eq: "$user_id"}}, allow_aggregations: true) {
+              where: {author_id: {_eq: "$user_id"}}, allow_aggregations: true, limit: 20) {
   id: Int!
   title: String!
   author_id: Int!
@@ -194,15 +195,27 @@ type Query {
 ```
 
 `@permission(role: String!, columns: [String!]!, where: <Type>_bool_exp!,
-allow_aggregations: Boolean)` is repeatable, once per role per table. Column names are
+allow_aggregations: Boolean, limit: Int)` is repeatable, once per role per table. Column names are
 GraphQL field names; an empty list grants no scalar columns. `allow_aggregations`
 defaults to false. Filters use the same grammar as query filters, including relationships.
 A scalar string `"$name"` reads a session variable; `"$$price"` is the literal `"$price"`.
 Names after `$` contain letters, digits or underscores. `_is_null` takes a literal
 Boolean, since it selects SQL syntax rather than a bound value. Membership lists can contain
-individual session references; a session variable cannot hold a list. Permission `limit`
-is not supported: limiting selected nodes and aggregate inputs requires a separate
-Hasura-compatible plan rule. Supplying that argument is an error.
+individual session references; a session variable cannot hold a list.
+
+`limit` (a non-negative integer, 0 included) bounds the rows the role reads, as in Hasura
+v2.51.6:
+
+- A list root and an array relationship read at most `limit` rows: the query's own `limit`
+  when it is smaller, `limit` otherwise. The query's `offset` applies before the bound.
+- An aggregate root or aggregate relationship computes `aggregate` over the rows the query
+  selects, with the query's `limit` and `offset` only. Its `nodes` list the first `limit` of
+  those rows in the query's order.
+- The `<t>_by_pk` root, object relationships, relationship predicates in `where` (`EXISTS`)
+  and the top-level `returning` rows of a mutation are not bounded. Array relationships and
+  aggregate `nodes` inside `returning` are.
+
+Which rows remain without `order_by` is up to PostgreSQL, as in Hasura.
 
 ```rust
 let session = Session::new("user").variable("user_id", rusuna::Value::Int(3));
@@ -236,7 +249,7 @@ logically imply it. This check uses the resolved expression after session bindin
 never searches the SQL text or expands permission cycles.
 
 The lower-level API uses `Table.permissions: Vec<Permission>` and
-`Permission { role, filter: Filter<Operand>, columns, allow_aggregations }`, where
+`Permission { role, filter: Filter<Operand>, columns, allow_aggregations, limit }`, where
 `Operand` is `Literal(Value)` or `Session(String)`. Permission filters have the same
 32-edge, 1000-child and 1000-membership limits as query filters. Write permissions are
 `Table::write_permissions` (next section).
@@ -1174,6 +1187,9 @@ levels plus 32 `EXISTS` levels and a maximum-depth 1000-term permission (65,001 
 - An array relationship without a `limit` or `offset` whose parents are read as a set is read once:
   its rows are restricted to the parent rows with `IN`, aggregated by the parent key, and
   joined to the parents.
+- A role's permission `limit` becomes the `LIMIT` of a list root or an array relationship,
+  which is then read like one with a query `limit`. A bounded `nodes` list takes the first
+  rows of the ordered aggregate: `array_to_json((array_agg(… ORDER BY …))[1:n])`.
 - Comparison values are statement parameters, including each element of `_in` and `_nin`.
   `limit` and `offset` are non-negative integers written into the statement. `_is_null`
   selects `IS NULL` or `IS NOT NULL`. Empty `_in` is false and empty `_nin` is true.
@@ -1209,6 +1225,7 @@ Properties:
 | `distinct_iff` | The check for repeated aliases accepts exactly the lists without duplicates. |
 | `resolve_scan_conditions`, `resolve_tables` | Every non-admin scan, including scans inside permission predicates, contains the bound condition of that role and has a permission definition. |
 | `resolve_columns` | User column references in selections, filters, ordering and aggregates belong to the role's visible columns; join keys and policy columns are excluded. |
+| `resolve_limits`, `capLimit_cap`, `capLimit_user`, `capLimit_choice` | For a non-admin role whose permission has a `limit`, every list root, array relationship and aggregate `nodes` list of the plan has a limit of at most that value. The applied limit is at most the permission's and the query's and equals one of them. |
 
 `compile_erase` erases `Value` operands, including bound session operands. It does not
 erase pagination, `_is_null` flags, names, role choices or permission syntax.
@@ -1223,15 +1240,16 @@ Conditions written a second time, as an equivalence next to the definition:
 | `scalarValid_iff`, `membershipValid_iff` | Comparison values are non-null and finite, and membership lists respect their size bound. |
 | `predicateEq_iff`, `predicatesEq_iff`, `hasConjunct_iff` | Structural expression equality and immediate conjunct membership have their stated meanings. |
 | `appendCondition_exact`, `addPermission_condition` | The inserted scan is exactly the original scan with the requested role condition appended; binding errors are preserved. |
+| `limitScan_exact`, `listScan_array`, `listScan_other`, `limitNodes_limit`, `listChildren_limits`, `listChildren_other` | A row limit is applied to the scan of a list and the `nodes` of an aggregate, and nothing else changes. |
 | `resolveWrite_permissions`, `resolveWrite_user_columns` | Aborting checks, operation row conditions and authorized writes; user columns exclude presets. |
 | `resolveWrite_declared`, `resolveWrite_tables` | Physical write targets are declared and have the requested operation permission. |
 | `resolveWrite_returning_conditions` | Relationship and predicate scans in returning carry their read permission conditions. |
 | `resolveSelection_accepts`, `runSelection_accepts` | Pre-permission resolution and compilation succeed exactly when the Boolean `acceptsSelection` accepts the schema and selection. |
 
 [leanassay](https://github.com/conao3/lean-leanassay/tree/fc0d05473917864cedb6d27e208c81de3e2a11af) checks which theorems rule out
-broken implementations: the audit covers twenty-four functions, with 154 mutations, 103 killed,
-18 equivalent on the sampled inputs, 33 stillborn, zero holes, zero untested and zero timed out.
-There are twelve independent properties (twenty principal theorem statements), nineteen
+broken implementations: the audit covers twenty-nine functions, with 183 mutations, 125 killed,
+21 equivalent on the sampled inputs, 37 stillborn, zero holes, zero untested and zero timed out.
+There are thirteen independent properties (twenty-four principal theorem statements), twenty-five
 restated conditions and zero variable-free checks. The executable audit checks full
 scan equalities as well as their limit projection. AGENTS.md lists the functions it covers and the ones it does not.
 
@@ -1284,6 +1302,8 @@ Outside the proofs:
 - `rusuna-sqlx`, `rusuna-async-graphql` and `rusuna-axum`: parameter encoding, the
   dynamic schema, the selection hand-off, transactions, HTTP and WebSocket. The HTTP tests
   cover them.
+- The row limits inside a mutation's `returning`. `resolve_limits` concerns query plans; the
+  mutation fixtures of a limited role test `returning`.
 - The multiplexed subscription statement. `rusuna-sqlx` rewrites the placeholders of the
   SQL text in Rust; `placeholders_numbered` fixes what it expects, and a test runs the
   rewritten statement of every admin and permission fixture against its single statements.

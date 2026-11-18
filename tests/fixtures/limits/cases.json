@@ -1,0 +1,104 @@
+[
+  {
+    "name": "limited_aggregate",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_aggregate_larger",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_aggregate_smaller",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_array",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_array_arguments",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_by_pk",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_nodes",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_object_exists",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_relationship_aggregate",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_root",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_root_larger",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_root_smaller",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "limited_uncapped",
+    "role": "limited",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "zero_aggregate",
+    "role": "zero",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "zero_by_pk",
+    "role": "zero",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "zero_object",
+    "role": "zero",
+    "session": {},
+    "unordered": []
+  },
+  {
+    "name": "zero_root",
+    "role": "zero",
+    "session": {},
+    "unordered": []
+  }
+]

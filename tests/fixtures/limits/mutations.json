@@ -1,0 +1,156 @@
+[
+  {
+    "name": "insert_returning",
+    "role": "limited",
+    "session": {},
+    "query": "mutation { insert_comment(objects: [{id: 101, article_id: 9, body: \"x\"}, {id: 102, article_id: 9, body: \"y\"}, {id: 103, article_id: 9, body: \"z\"}]) { affected_rows returning { id article { id comments(order_by: {id: asc}) { id } comments_aggregate(order_by: {id: asc}) { aggregate { count } nodes { id } } } } } }",
+    "response": {
+      "data": {
+        "insert_comment": {
+          "affected_rows": 3,
+          "returning": [
+            {
+              "id": 101,
+              "article": {
+                "id": 9,
+                "comments": [
+                  {
+                    "id": 10
+                  },
+                  {
+                    "id": 11
+                  }
+                ],
+                "comments_aggregate": {
+                  "aggregate": {
+                    "count": 6
+                  },
+                  "nodes": [
+                    {
+                      "id": 10
+                    },
+                    {
+                      "id": 11
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": 102,
+              "article": {
+                "id": 9,
+                "comments": [
+                  {
+                    "id": 10
+                  },
+                  {
+                    "id": 11
+                  }
+                ],
+                "comments_aggregate": {
+                  "aggregate": {
+                    "count": 6
+                  },
+                  "nodes": [
+                    {
+                      "id": 10
+                    },
+                    {
+                      "id": 11
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": 103,
+              "article": {
+                "id": 9,
+                "comments": [
+                  {
+                    "id": 10
+                  },
+                  {
+                    "id": 11
+                  }
+                ],
+                "comments_aggregate": {
+                  "aggregate": {
+                    "count": 6
+                  },
+                  "nodes": [
+                    {
+                      "id": 10
+                    },
+                    {
+                      "id": 11
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "insert_one_returning",
+    "role": "limited",
+    "session": {},
+    "query": "mutation { insert_comment_one(object: {id: 104, article_id: 4, body: \"x\"}) { id article { comments(order_by: {id: desc}) { id } } } }",
+    "response": {
+      "data": {
+        "insert_comment_one": {
+          "id": 104,
+          "article": {
+            "comments": [
+              {
+                "id": 104
+              },
+              {
+                "id": 13
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "delete_returning",
+    "role": "limited",
+    "session": {},
+    "query": "mutation { delete_comment(where: {id: {_lte: 5}}) { affected_rows returning { id body } } }",
+    "response": {
+      "data": {
+        "delete_comment": {
+          "affected_rows": 5,
+          "returning": [
+            {
+              "id": 1,
+              "body": "comment body 1"
+            },
+            {
+              "id": 2,
+              "body": "comment body 2"
+            },
+            {
+              "id": 3,
+              "body": "comment body 3"
+            },
+            {
+              "id": 4,
+              "body": "comment body 4"
+            },
+            {
+              "id": 5,
+              "body": "comment body 5"
+            }
+          ]
+        }
+      }
+    }
+  }
+]

@@ -132,7 +132,8 @@ fn permission_directives_validate_roles_columns_and_supported_arguments() {
         "@permission(role: \"user\", columns: [\"id\", \"id\"], where: {})",
         "@permission(role: \"user\", columns: [\"id\"], where: {missing: {_eq: 1}})",
         "@permission(role: \"user\", columns: [\"id\"], where: {id: {_eq: \"bad\"}})",
-        "@permission(role: \"user\", columns: [\"id\"], where: {}, limit: 2)",
+        "@permission(role: \"user\", columns: [\"id\"], where: {}, limit: -1)",
+        "@permission(role: \"user\", columns: [\"id\"], where: {}, limit: 1.5)",
         "@permission(role: \"user\", columns: [\"id\"], where: {}, allow_aggregations: 1)",
     ] {
         assert!(Schema::from_sdl(&format!("type A @table(name: \"a\") {directive} {{ id: Int! }} type Query {{ rows: [A!]! @list }}")).is_err(), "{directive}");
@@ -207,6 +208,7 @@ fn maximum_permission_filters_compile_on_a_two_mib_stack() {
                     filter,
                     columns: vec!["id".into()],
                     allow_aggregations: true,
+                    limit: None,
                 });
                 Schema::new(
                     vec![table],

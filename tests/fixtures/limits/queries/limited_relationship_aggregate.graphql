@@ -1,0 +1,1 @@
+{ author(order_by: {id: asc}) { id articles_aggregate(order_by: {id: desc}) { aggregate { count max { id } } nodes { id } } page: articles_aggregate(order_by: {id: asc}, limit: 1) { aggregate { count } nodes { id } } } }

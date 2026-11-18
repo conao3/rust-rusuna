@@ -376,7 +376,7 @@ leanfran::lean! {
 
     inductive Node where
       | group (alias : String) (children : List Node)
-      | nodes (alias : String) (order : List (String × Direction)) (children : List Node)
+      | nodes (alias : String) (order : List (String × Direction)) (limit : Option Nat) (children : List Node)
       | column (alias : String) (column : Leaf)
       | relation (alias : String) (kind : Kind) (scan : Scan) (parent child : List String)
           (children : List Node)
@@ -438,7 +438,7 @@ leanfran::lean! {
     def emptyField : Node → List Lex
       | .column alias leaf => emptyLeaf leaf ++ [.raw "AS", .ident alias]
       | .group alias children => emptyRow children ++ [.raw "AS", .ident alias]
-      | .nodes alias _ _ => [.raw "'[]'::json AS", .ident alias]
+      | .nodes alias _ _ _ => [.raw "'[]'::json AS", .ident alias]
       | .relation alias _ _ _ _ _ => [.raw "null AS", .ident alias]
     def emptyFields : List Node → List (List Lex)
       | [] => []
@@ -452,9 +452,14 @@ leanfran::lean! {
     def fieldLex (depth index : Nat) (set : Bool) : Node → List Lex
       | .column alias column => leafLex (tName depth) column ++ [.raw "AS", .ident alias]
       | .group alias children => rowLex depth set children ++ [.raw "AS", .ident alias]
-      | .nodes alias order _ =>
-        [.raw "coalesce(json_agg(", .col (cName index) "j"] ++ orderLex (tName depth) order
-          ++ [.raw "), '[]') AS", .ident alias]
+      | .nodes alias order limit _ =>
+        match limit with
+        | none =>
+          [.raw "coalesce(json_agg(", .col (cName index) "j"] ++ orderLex (tName depth) order
+            ++ [.raw "), '[]') AS", .ident alias]
+        | some n =>
+          [.raw "coalesce(array_to_json((array_agg(", .col (cName index) "j"] ++ orderLex (tName depth) order
+            ++ [.raw "))[1:", .nat n, .raw "]), '[]') AS", .ident alias]
       | .relation alias kind scan _ _ children =>
         if isSet set kind scan.limit scan.offset then
           [.raw "coalesce(", .col (cName index) "j", .raw ","]
@@ -508,7 +513,7 @@ leanfran::lean! {
     def joinToks (depth index : Nat) (set : Bool) : Node → List Tok
       | .column _ _ => []
       | .group _ children => joinsToks depth 0 set children
-      | .nodes _ _ children =>
+      | .nodes _ _ _ children =>
         lift ([.raw "LEFT JOIN LATERAL (SELECT"] ++ rowLex depth set children
           ++ [.raw "AS \"j\" FROM (SELECT true) AS \"_\""])
           ++ joinsToks depth 0 set children
@@ -548,7 +553,7 @@ leanfran::lean! {
 
     mutual
     def nodeValues : Node → List Value
-      | .group _ children | .nodes _ _ children => nodesValues children
+      | .group _ children | .nodes _ _ _ children => nodesValues children
       | .column _ _ => []
       | .relation _ _ scan _ _ children => scanValues scan ++ nodesValues children
     def nodesValues : List Node → List Value
@@ -563,7 +568,7 @@ leanfran::lean! {
     mutual
     def eraseNode : Node → Node
       | .group alias children => .group alias (eraseNodes children)
-      | .nodes alias order children => .nodes alias order (eraseNodes children)
+      | .nodes alias order limit children => .nodes alias order limit (eraseNodes children)
       | .column alias column => .column alias column
       | .relation alias kind scan parent child children =>
         .relation alias kind (eraseScan scan) parent child (eraseNodes children)
@@ -603,7 +608,7 @@ leanfran::lean! {
           simp [lift_values, scanToks_values, lateralScan_values,
             joinsToks_values (depth + 1) 0 _ children]
       | group alias children => simpa [joinToks, nodeValues] using joinsToks_values depth 0 set children
-      | nodes alias order children => simp [joinToks, nodeValues, lift_values, joinsToks_values depth 0 set children]
+      | nodes alias order limit children => simp [joinToks, nodeValues, lift_values, joinsToks_values depth 0 set children]
     theorem joinsToks_values (depth index : Nat) (set : Bool) (ns : List Node) :
         (joinsToks depth index set ns).filterMap tokValue = nodesValues ns := by
       cases ns with
@@ -642,7 +647,7 @@ leanfran::lean! {
         fieldLex depth index set (eraseNode n) = fieldLex depth index set n := by
       cases n with
       | column alias leaf => rfl
-      | nodes alias order children => simp [fieldLex, eraseNode]
+      | nodes alias order limit children => cases limit <;> simp [fieldLex, eraseNode]
       | relation alias kind scan parent child children =>
         cases scan
         simp [eraseNode, fieldLex, eraseScan, emptyRow_erase, Scan.limit, Scan.offset]
@@ -692,7 +697,7 @@ leanfran::lean! {
           simp [lift_erase, scanToks_erase, lateralScan_erase, lateralAgg_erase,
             joinsToks_erase (depth + 1) 0 _ children, resultLex_erase]
       | group alias children => simpa [joinToks, eraseNode] using joinsToks_erase depth 0 set children
-      | nodes alias order children => simp [joinToks, eraseNode, lift_erase, rowLex_erase, joinsToks_erase depth 0 set children]
+      | nodes alias order limit children => simp [joinToks, eraseNode, lift_erase, rowLex_erase, joinsToks_erase depth 0 set children]
     theorem joinsToks_erase (depth index : Nat) (set : Bool) (ns : List Node) :
         (joinsToks depth index set ns).map eraseTok = joinsToks depth index set (eraseNodes ns) := by
       cases ns with
@@ -753,7 +758,7 @@ leanfran::lean! {
       deriving DecidableEq, Repr
 
     inductive RootKind where
-      | list | aggregate
+      | list | aggregate | single
       deriving DecidableEq, Repr
 
     structure RootField where
@@ -778,6 +783,7 @@ leanfran::lean! {
       conds : Expression String Operand
       columns : List String
       aggregations : Bool
+      limit : Option Nat
       deriving Repr
 
     structure Schema where
@@ -982,7 +988,7 @@ leanfran::lean! {
             else
               match resolveNodes schema table (depth + 1) next scanOrder children with
               | .error e => .error e
-              | .ok nodes => .ok (if mode = .aggregate && name = "nodes" then .nodes alias scanOrder nodes else .group alias nodes)
+              | .ok nodes => .ok (if mode = .aggregate && name = "nodes" then .nodes alias scanOrder none nodes else .group alias nodes)
           | none =>
             if mode != .row then .error (.unknownField table.name name)
             else match findRelation table name with
@@ -1027,7 +1033,10 @@ leanfran::lean! {
             match resolveScan schema table root.conds root.order root.limit root.offset with
             | .error e => .error e
             | .ok scan =>
-              let kind := if field.kind = .aggregate then Kind.aggregate else Kind.array
+              let kind := match field.kind with
+                | .list => Kind.array
+                | .aggregate => Kind.aggregate
+                | .single => Kind.object
               match resolveNodes schema table 0 (relationMode kind) scan.order root.children with
               | .error e => .error e
               | .ok children => .ok { kind, scan, children }
@@ -1212,7 +1221,7 @@ leanfran::lean! {
 
     mutual
     def nodeScans : Node → List Scan
-      | .group _ children | .nodes _ _ children => nodesScans children
+      | .group _ children | .nodes _ _ _ children => nodesScans children
       | .column _ _ => []
       | .relation _ _ scan _ _ children => scan :: nodesScans children
     def nodesScans : List Node → List Scan
@@ -1626,7 +1635,7 @@ leanfran::lean! {
     def nodeReads (name : String) : Node → List (String × String)
       | .column _ leaf => leafReads name leaf
       | .group _ children => nodesReads name children
-      | .nodes _ order children => order.map (fun o => (name, o.1)) ++ nodesReads name children
+      | .nodes _ order _ children => order.map (fun o => (name, o.1)) ++ nodesReads name children
       | .relation _ _ scan _ _ children => scanReads scan ++ nodesReads scan.name children
     def nodesReads (name : String) : List Node → List (String × String)
       | [] => []
@@ -1652,6 +1661,85 @@ leanfran::lean! {
       let condition ← roleCondition schema session scan.name
       return appendCondition scan condition
 
+    def permissionLimit (schema : Schema) (session : Session) (name : String) : Option Nat :=
+      (findPermission schema session.role name).bind (·.limit)
+
+    def capLimit (cap limit : Option Nat) : Option Nat :=
+      match cap with
+      | none => limit
+      | some c => some (match limit with
+        | none => c
+        | some l => min l c)
+
+    def limitScan (cap : Option Nat) (scan : Scan) : Scan :=
+      .mk scan.name scan.schema scan.table scan.conds scan.order (capLimit cap scan.limit) scan.offset
+
+    def limitNodes (cap : Option Nat) : Node → Node
+      | .nodes alias order limit children => .nodes alias order (capLimit cap limit) children
+      | node => node
+
+    def listScan (kind : Kind) (cap : Option Nat) (scan : Scan) : Scan :=
+      if kind = .array then limitScan cap scan else scan
+
+    def listChildren (kind : Kind) (cap : Option Nat) (children : List Node) : List Node :=
+      if kind = .aggregate then children.map (limitNodes cap) else children
+
+    theorem capLimit_cap (cap limit : Option Nat) :
+        ∀ c, cap = some c → ∃ n, capLimit cap limit = some n ∧ n ≤ c := by
+      intro c hc
+      subst hc
+      cases limit <;> simp [capLimit, Nat.min_le_right]
+
+    theorem capLimit_user (cap limit : Option Nat) :
+        ∀ l, limit = some l → ∃ n, capLimit cap limit = some n ∧ n ≤ l := by
+      intro l hl
+      subst hl
+      cases cap <;> simp [capLimit, Nat.min_le_left]
+
+    theorem capLimit_choice (cap limit : Option Nat) :
+        capLimit cap limit = limit ∨ capLimit cap limit = cap := by
+      cases cap <;> cases limit <;> simp [capLimit] <;> omega
+
+    theorem limitScan_exact (cap : Option Nat) (scan : Scan) :
+        limitScan cap scan = .mk scan.name scan.schema scan.table scan.conds scan.order (capLimit cap scan.limit) scan.offset := rfl
+
+    theorem listScan_array (cap : Option Nat) (scan : Scan) : listScan .array cap scan = limitScan cap scan := rfl
+
+    theorem listScan_other (kind : Kind) (cap : Option Nat) (scan : Scan) (h : kind ≠ .array) :
+        listScan kind cap scan = scan := by
+      simp [listScan, h]
+
+    def nodesLimit : Node → Option (Option Nat)
+      | .nodes _ _ limit _ => some limit
+      | _ => none
+
+    theorem limitNodes_limit (cap : Option Nat) (node : Node) :
+        nodesLimit (limitNodes cap node) = (nodesLimit node).map (capLimit cap) := by
+      cases node <;> rfl
+
+    theorem listChildren_limits (cap : Option Nat) (children : List Node) :
+        (listChildren .aggregate cap children).map nodesLimit = children.map fun n => (nodesLimit n).map (capLimit cap) := by
+      simp [listChildren, limitNodes_limit]
+
+    theorem listChildren_other (kind : Kind) (cap : Option Nat) (children : List Node) (h : kind ≠ .aggregate) :
+        listChildren kind cap children = children := by
+      simp [listChildren, h]
+
+    theorem listScan_values (kind : Kind) (cap : Option Nat) (scan : Scan) :
+        scanValues (listScan kind cap scan) = scanValues scan := by
+      unfold listScan
+      split <;> rfl
+
+    theorem listChildren_values (kind : Kind) (cap : Option Nat) (children : List Node) :
+        nodesValues (listChildren kind cap children) = nodesValues children := by
+      unfold listChildren
+      split
+      · induction children with
+        | nil => rfl
+        | cons n ns ih =>
+          cases n <;> simp only [List.map_cons, nodesValues, ih] <;> rfl
+      · rfl
+
     mutual
     def guardPredicate (schema : Schema) (session : Session) : Predicate → Except Error Predicate
       | .compare f op v => .ok (.compare f op v)
@@ -1674,25 +1762,55 @@ leanfran::lean! {
     def guardNode (schema : Schema) (session : Session) : Node → Except Error Node
       | .column a c => .ok (.column a c)
       | .group a ns => (guardNodes schema session ns).map (.group a)
-      | .nodes a os ns => (guardNodes schema session ns).map (.nodes a os)
+      | .nodes a os l ns => (guardNodes schema session ns).map (.nodes a os l)
       | .relation a k s ps cs ns => do
+        let cap := permissionLimit schema session s.name
         let s ← guardScan schema session s
         let ns ← guardNodes schema session ns
-        return .relation a k s ps cs ns
+        return .relation a k (listScan k cap s) ps cs (listChildren k cap ns)
     def guardNodes (schema : Schema) (session : Session) : List Node → Except Error (List Node)
       | [] => .ok []
       | n :: ns => do return (← guardNode schema session n) :: (← guardNodes schema session ns)
     end
 
     def guardQuery (schema : Schema) (session : Session) (query : Query) : Except Error Query := do
+      let cap := permissionLimit schema session query.scan.name
       let scan ← guardScan schema session query.scan
       let children ← guardNodes schema session query.children
-      return { query with scan, children }
+      return { query with scan := listScan query.kind cap scan, children := listChildren query.kind cap children }
+
+    def listLimits (kind : Kind) (scan : Scan) (children : List Node) : List (String × Option Nat) :=
+      match kind with
+      | .object => []
+      | .array => [(scan.name, scan.limit)]
+      | .aggregate => children.filterMap fun n => (nodesLimit n).map fun l => (scan.name, l)
+
+    mutual
+    def nodeLimits : Node → List (String × Option Nat)
+      | .column _ _ => []
+      | .group _ ns | .nodes _ _ _ ns => nodesLimits ns
+      | .relation _ kind scan _ _ ns => listLimits kind scan ns ++ nodesLimits ns
+    def nodesLimits : List Node → List (String × Option Nat)
+      | [] => []
+      | n :: ns => nodeLimits n ++ nodesLimits ns
+    end
+
+    def queryLimits (query : Query) : List (String × Option Nat) :=
+      listLimits query.kind query.scan query.children ++ nodesLimits query.children
+
+    def withinLimit (cap limit : Option Nat) : Bool :=
+      match cap with
+      | none => true
+      | some c => limit.any (· ≤ c)
+
+    def queryLimited (schema : Schema) (session : Session) (query : Query) : Bool :=
+      session.role == "admin" ||
+        (queryLimits query).all fun site => withinLimit (permissionLimit schema session site.1) site.2
 
     def resolve (schema : Schema) (session : Session) (root : Selection) : Except Error Query := do
       let query ← resolveSelection (visibleSchema schema session.role) root
       let query ← if session.role == "admin" then .ok query else guardQuery schema session query
-      if queryPermitted schema session query then return query
+      if queryPermitted schema session query && queryLimited schema session query then return query
       else .error (.invalidPermission root.name)
 
     def run (schema : Schema) (session : Session) (root : Selection) : Except Error Compiled :=
@@ -1711,6 +1829,22 @@ leanfran::lean! {
       simp only [resolve, bind, Except.bind] at h
       repeat' first | split at h | cases h
       all_goals simp_all [queryPermitted]
+    theorem resolve_limits (schema : Schema) (session : Session) (root : Selection)
+        (query : Query) (h : resolve schema session root = .ok query) (role : session.role ≠ "admin") :
+        ∀ site ∈ queryLimits query, ∀ permission, findPermission schema session.role site.1 = some permission →
+          ∀ cap, permission.limit = some cap → ∃ n, site.2 = some n ∧ n ≤ cap := by
+      have limited : queryLimited schema session query = true := by
+        simp only [resolve, bind, Except.bind] at h
+        repeat' first | split at h | cases h
+        all_goals simp_all
+      intro site member permission found cap capped
+      simp only [queryLimited, Bool.or_eq_true, beq_iff_eq, role, false_or, List.all_eq_true] at limited
+      have hw := limited site member
+      simp only [withinLimit, permissionLimit, found, Option.bind_some, capped] at hw
+      cases hl : site.2 with
+      | none => simp [hl] at hw
+      | some n => exact ⟨n, rfl, by simpa [hl] using hw⟩
+
     theorem hasConjunct_iff (condition expression : Predicate) :
         hasConjunct condition expression = true ↔
           expression = condition ∨ ∃ es, expression = .and es ∧ condition ∈ es := by
@@ -1775,7 +1909,7 @@ leanfran::lean! {
     mutual
     def guardedNodeValues (schema : Schema) (session : Session) : Node → List Value
       | .column _ _ => []
-      | .group _ ns | .nodes _ _ ns => guardedNodesValues schema session ns
+      | .group _ ns | .nodes _ _ _ ns => guardedNodesValues schema session ns
       | .relation _ _ scan _ _ ns => guardedScanValues schema session scan ++ guardedNodesValues schema session ns
     def guardedNodesValues (schema : Schema) (session : Session) : List Node → List Value
       | [] => []
@@ -1843,6 +1977,7 @@ leanfran::lean! {
       all_goals simp only [nodeValues, guardedNodeValues]
       all_goals first
         | rfl
+        | rw [listScan_values, listChildren_values, guardScan_values _ _ _ _ (by assumption), guardNodes_values _ _ _ _ (by assumption)]
         | exact guardNodes_values _ _ _ _ (by assumption)
         | rw [guardScan_values _ _ _ _ (by assumption), guardNodes_values _ _ _ _ (by assumption)]
     theorem guardNodes_values (schema : Schema) (session : Session) (ns out : List Node)
@@ -1862,7 +1997,7 @@ leanfran::lean! {
       simp only [guardQuery, bind, Except.bind, pure, Except.pure] at h
       repeat' first | split at h | cases h
       simp only [queryValues, guardedQueryValues]
-      rw [guardScan_values _ _ _ _ (by assumption), guardNodes_values _ _ _ _ (by assumption)]
+      rw [listScan_values, listChildren_values, guardScan_values _ _ _ _ (by assumption), guardNodes_values _ _ _ _ (by assumption)]
 
     theorem resolve_values (schema : Schema) (session : Session) (root : Selection) :
         match resolve schema session root with
@@ -2369,7 +2504,7 @@ leanfran::lean! {
     def snapshotNode (target : String) : Node → Node
       | .column alias leaf => .column alias leaf
       | .group alias children => .group alias (snapshotNodes target children)
-      | .nodes alias order children => .nodes alias order (snapshotNodes target children)
+      | .nodes alias order limit children => .nodes alias order limit (snapshotNodes target children)
       | .relation alias kind scan ps cs children =>
         .relation alias kind (snapshotScan target scan) ps cs (snapshotNodes target children)
     def snapshotNodes (target : String) : List Node → List Node
@@ -2501,7 +2636,7 @@ leanfran::lean! {
     def runPrimaryKey (schema : Schema) (catalog : WriteCatalog) (session : Session) (target : String)
         (values : List (String × Value)) (children : List Selection) : Except Error Compiled := do
       let conds ← keyCondition catalog target values
-      let root : RootField := ⟨"by_pk", target, .list⟩
+      let root : RootField := ⟨"by_pk", target, .single⟩
       let query ← resolve { schema with roots := [root] } session ⟨"by_pk", "by_pk", some conds, [], none, none, children⟩
       return render (lift [.raw "WITH", .ident (rName 0), .raw "AS ("] ++ scanToks query.scan [.raw "true"] ++
         lift [.raw ") SELECT"] ++ returningToks true query.children)

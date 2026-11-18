@@ -1,0 +1,1 @@
+{ comment(where: {article: {author_id: {_eq: 3}}}, order_by: {id: asc}) { id article { id author { id } } } }

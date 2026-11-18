@@ -1,0 +1,241 @@
+{
+  "version": 3,
+  "sources": [
+    {
+      "name": "default",
+      "kind": "postgres",
+      "tables": [
+        {
+          "table": {
+            "name": "article",
+            "schema": "public"
+          },
+          "object_relationships": [
+            {
+              "name": "author",
+              "using": {
+                "foreign_key_constraint_on": "author_id"
+              }
+            }
+          ],
+          "array_relationships": [
+            {
+              "name": "comments",
+              "using": {
+                "foreign_key_constraint_on": {
+                  "column": "article_id",
+                  "table": {
+                    "name": "comment",
+                    "schema": "public"
+                  }
+                }
+              }
+            },
+            {
+              "name": "revisions",
+              "using": {
+                "manual_configuration": {
+                  "column_mapping": {
+                    "author_id": "author_id",
+                    "id": "article_id"
+                  },
+                  "insertion_order": null,
+                  "remote_table": {
+                    "name": "revision",
+                    "schema": "public"
+                  }
+                }
+              }
+            }
+          ],
+          "select_permissions": [
+            {
+              "role": "limited",
+              "permission": {
+                "columns": [
+                  "id",
+                  "author_id",
+                  "title"
+                ],
+                "filter": {
+                  "id": {
+                    "_gte": 2
+                  }
+                },
+                "limit": 3,
+                "allow_aggregations": true
+              }
+            },
+            {
+              "role": "zero",
+              "permission": {
+                "columns": [
+                  "id",
+                  "author_id",
+                  "title"
+                ],
+                "filter": {},
+                "limit": 0,
+                "allow_aggregations": true
+              }
+            }
+          ]
+        },
+        {
+          "table": {
+            "name": "author",
+            "schema": "public"
+          },
+          "array_relationships": [
+            {
+              "name": "articles",
+              "using": {
+                "foreign_key_constraint_on": {
+                  "column": "author_id",
+                  "table": {
+                    "name": "article",
+                    "schema": "public"
+                  }
+                }
+              }
+            }
+          ],
+          "select_permissions": [
+            {
+              "role": "limited",
+              "permission": {
+                "columns": [
+                  "id",
+                  "name"
+                ],
+                "filter": {},
+                "limit": 2,
+                "allow_aggregations": true
+              }
+            },
+            {
+              "role": "zero",
+              "permission": {
+                "columns": [
+                  "id",
+                  "name"
+                ],
+                "filter": {},
+                "limit": 0,
+                "allow_aggregations": true
+              }
+            }
+          ]
+        },
+        {
+          "table": {
+            "name": "comment",
+            "schema": "public"
+          },
+          "object_relationships": [
+            {
+              "name": "article",
+              "using": {
+                "foreign_key_constraint_on": "article_id"
+              }
+            }
+          ],
+          "select_permissions": [
+            {
+              "role": "limited",
+              "permission": {
+                "columns": [
+                  "id",
+                  "article_id",
+                  "body"
+                ],
+                "filter": {},
+                "limit": 2,
+                "allow_aggregations": true
+              }
+            },
+            {
+              "role": "zero",
+              "permission": {
+                "columns": [
+                  "id",
+                  "article_id",
+                  "body"
+                ],
+                "filter": {}
+              }
+            }
+          ],
+          "delete_permissions": [
+            {
+              "role": "limited",
+              "permission": {
+                "filter": {}
+              }
+            }
+          ],
+          "insert_permissions": [
+            {
+              "role": "limited",
+              "permission": {
+                "columns": [
+                  "id",
+                  "article_id",
+                  "body"
+                ],
+                "check": {}
+              }
+            }
+          ]
+        },
+        {
+          "table": {
+            "name": "revision",
+            "schema": "public"
+          },
+          "object_relationships": [
+            {
+              "name": "article",
+              "using": {
+                "manual_configuration": {
+                  "column_mapping": {
+                    "article_id": "id",
+                    "author_id": "author_id"
+                  },
+                  "insertion_order": null,
+                  "remote_table": {
+                    "name": "article",
+                    "schema": "public"
+                  }
+                }
+              }
+            }
+          ],
+          "select_permissions": [
+            {
+              "role": "limited",
+              "permission": {
+                "columns": [
+                  "article_id",
+                  "author_id",
+                  "note"
+                ],
+                "filter": {},
+                "allow_aggregations": true
+              }
+            }
+          ]
+        }
+      ],
+      "configuration": {
+        "connection_info": {
+          "database_url": {
+            "from_env": "PG_DATABASE_URL"
+          },
+          "isolation_level": "read-committed",
+          "use_prepared_statements": false
+        }
+      }
+    }
+  ]
+}

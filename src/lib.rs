@@ -225,6 +225,9 @@ pub struct Permission {
     pub filter: Filter<Operand>,
     pub columns: Vec<String>,
     pub allow_aggregations: bool,
+    /// The most rows the role reads from a list root, an array relationship or the `nodes`
+    /// of an aggregate. Aggregate values are computed over the rows the query selects.
+    pub limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -524,6 +527,7 @@ impl Schema {
                     conds: permission_filter_model(&p.filter, 0)?,
                     columns: p.columns.clone(),
                     aggregations: p.allow_aggregations,
+                    limit: p.limit.map(Into::into),
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;

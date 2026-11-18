@@ -27,7 +27,7 @@ pub(super) fn directives<'a>(
             "relation" => &["columns", "references"],
             "aggregate" => &["target"],
             "list" => &[],
-            "permission" => &["role", "where", "columns", "allow_aggregations"],
+            "permission" => &["role", "where", "columns", "allow_aggregations", "limit"],
             _ => unreachable!(),
         };
         let mut seen = BTreeSet::new();
@@ -535,6 +535,16 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                 }) => *b,
                 _ => return Err(error(directive.pos, "allow_aggregations must be a boolean")),
             };
+            let limit = match d.get_argument("limit") {
+                None => None,
+                Some(Positioned {
+                    node: ConstValue::Number(n),
+                    ..
+                }) if n.as_u64().is_some() => n.as_u64(),
+                _ => {
+                    return Err(error(directive.pos, "limit must be a non-negative integer"));
+                }
+            };
             document.session_types.extend(
                 session_types
                     .into_iter()
@@ -545,6 +555,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                 filter,
                 columns,
                 allow_aggregations,
+                limit,
             });
         }
     }

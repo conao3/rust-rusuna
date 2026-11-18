@@ -1,0 +1,1 @@
+{ author_aggregate(order_by: {id: asc}) { aggregate { count sum { id } } nodes { id } } }

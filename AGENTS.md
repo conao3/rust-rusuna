@@ -104,7 +104,11 @@ The block has four parts.
   visible schema. `resolve` inserts permissions and validates all scans and user column
   references. `run` is `resolve` followed by `compile`.
 - Permissions. `Permission` holds a role, target, `Expression String Operand`, visible
-  column fields and an aggregation flag. `Session` holds a role and scalar variables.
+  column fields, an aggregation flag and an optional row limit. `guardNode` and `guardQuery`
+  apply the limit where the kind of a level is known (`listScan` for list roots and array
+  relationships, `listChildren` for the `nodes` of aggregates); `guardScan`, `addPermission`
+  and `EXISTS` scans do not see it. The by-primary-key root has the root kind `single`, which
+  resolves to an object-kind query and takes no limit. `Session` holds a role and scalar variables.
   `bindExpression` resolves `Operand.session` to a `Value` before normal expression
   resolution. The reserved `admin` role skips permission insertion. Rust calls the Lean
   `visibleSchema` to build the role's expanded SDL; permission decisions stay in Lean.
@@ -115,7 +119,8 @@ Names in a statement depend only on the nesting depth and the position of a fiel
 `e<depth>` for an `EXISTS` row, and `%` for the row passed to `row_to_json`. A selection alias equal to `%` is rejected.
 
 A relationship is read as a set (`isSet`) when its parent is read as a set, it is an
-array or aggregate relationship and it has neither a limit nor an offset. The root is read as a set. Everything else is a
+array or aggregate relationship and it has neither a limit nor an offset. A permission limit
+sets the limit of an array relationship, so a limited role reads it laterally. The root is read as a set. Everything else is a
 lateral subquery.
 
 `maxDepth` (32) and `maxFields` (1000) bound a query. Aggregate selection wrappers
@@ -128,7 +133,7 @@ compares them. Rust also bounds filter conversion before descending recursively.
 A combined test places the maximum filter inside the deepest accepted relationship.
 `tests/permissions.rs` also checks maximum permission depth, boolean size and membership
 size on a 2 MiB stack. A combined case has 32 relationship levels, 32 `EXISTS`
-levels, a maximum-depth 1000-term permission and 65,001 parameters. Permission `limit` and session-valued `_is_null` are unsupported.
+levels, a maximum-depth 1000-term permission and 65,001 parameters. Session-valued `_is_null` is unsupported.
 
 Do not silently apply another table's permission inside a permission relationship:
 Hasura does not do so. `queryPermitted` requires every such nested scan to already contain
@@ -147,8 +152,8 @@ broken versions. `lake -d audit build --wfail` fails when no broken version of a
 is refuted, when a broken version satisfies every theorem but changes the output (a
 hole), or when no input satisfies a theorem's hypotheses.
 
-The audit covers twenty-four functions: 154 broken versions, 103 refuted, 18 with the same output
-on every input tried, 33 that do not typecheck, no hole, no untested version and no timeout.
+The audit covers twenty-nine functions: 183 broken versions, 125 refuted, 21 with the same output
+on every input tried, 37 that do not typecheck, no hole, no untested version and no timeout.
 
 - Properties: `quoteChars` and `quoteStringChars` (`unquote_quote`, `unquote_quoteChars`: reading a quoted name
   back gives the name; `unquote_quoteString` and `unquote_quoteStringChars` do the
@@ -163,6 +168,12 @@ on every input tried, 33 that do not typecheck, no hole, no untested version and
   the audit checks the complete scan equalities as well as the limit projection.
   They stop an edit of one side only; they do not connect the definition to anything
   written independently.
+- `capLimit` uses `capLimit_cap`, `capLimit_user` and `capLimit_choice` (at most the
+  permission's limit, at most the query's, and one of the two). `limitScan`, `listScan`,
+  `limitNodes` and `listChildren` use `limitScan_exact`, `listScan_array`, `listScan_other`,
+  `limitNodes_limit`, `listChildren_limits` and `listChildren_other`; every mutation that drops
+  the bound is refuted. `resolve_limits` follows from the final validator `queryLimited` in
+  `resolve`.
 - `appendCondition` and `addPermission` use `appendCondition_exact` and
   `addPermission_condition`: all three mutations are refuted, including returning the
   original scan without its condition. The table is in README.md. Audit-only default
@@ -241,8 +252,8 @@ aggregate selection contexts; their uses are covered by the resolution survey an
 rejection tests. Value traversal, erasure and declared-reference helpers state and
 support the preservation theorems; they are not independent acceptance checks.
 
-The reported properties are twelve independent properties, stated by twenty boundary
-theorems; nineteen boundary conditions restated next to the implementation; and zero variable-free
+The reported properties are thirteen independent properties, stated by twenty-four boundary
+theorems; twenty-five boundary conditions restated next to the implementation; and zero variable-free
 checks. `PROOFS.md` lists every counted statement verbatim. Intermediate value,
 declaration and permission traversal lemmas support those properties and are not counted
 again. The permission guarantees are each non-admin scan's role condition and the
@@ -280,6 +291,9 @@ Manual proof failures are not extra automatic mutation kills.
 the `addPermission` audit checks insertion, the permission survey checks the public chain,
 and the differential/rejection tests cover their behavior. The syntactic equality and
 scan/read traversal helpers state the invariants; they are not a second policy language.
+`permissionLimit`, `nodesLimit`, `listLimits`, `nodeLimits`, `nodesLimits`, `queryLimits`,
+`withinLimit` and `queryLimited` state and check the row-limit property; the limit fixtures
+exercise them.
 
 When a proof is written, check it in a file of its own before building: wrap the
 definitions in `namespace model` and run `lean` on the file. A build that fails in Lean
@@ -387,6 +401,11 @@ are also tested in autocommit mode without a caller rollback.
   response keys, hand-written fields in both directions,
   hidden roles and introspection with the expanded SDL of each role. Pruned empty types
   are listed by hand in `tests/introspection.rs`.
+- `tests/limits.rs` compares 17 queries of the roles `limited` and `zero`
+  (`tests/fixtures/limits.graphql`, `tests/fixtures/limits/`, with the Hasura metadata) with
+  the Hasura v2.51.6 statements and their SQL snapshots, and three mutations with Hasura's
+  responses inside a rolled-back transaction. The HTTP tests repeat the queries over `POST`, as
+  multiplexed statements and as a live subscription.
 - `crates/rusuna-http-tests/tests/remote.rs` serves a remote GraphQL server (axum and an
   async-graphql dynamic schema) inside the test and adds it to the role schemas.
 - `crates/rusuna-http-tests/tests/rest.rs` builds REST endpoints over the mutation

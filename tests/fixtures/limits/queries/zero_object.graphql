@@ -1,0 +1,1 @@
+{ comment(order_by: {id: asc}, limit: 3) { id article { id author { name } } } }

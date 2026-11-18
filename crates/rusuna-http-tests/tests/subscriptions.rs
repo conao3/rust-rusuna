@@ -582,6 +582,19 @@ async fn multiplexed_statements_return_the_results_of_each_statement() {
             .collect();
         multiplexed_matches(&pool, &compiled, &unordered, name).await;
     }
+    let schema = rusuna::Schema::from_sdl(&fixture("limits.graphql")).unwrap();
+    let cases: Json = serde_json::from_str(&fixture("limits/cases.json")).unwrap();
+    for case in cases.as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let session = rusuna::Session::new(case["role"].as_str().unwrap());
+        let query = fixture(&format!("limits/queries/{name}.graphql"));
+        let compiled = schema
+            .compile(&query, &json!({}), None, &session)
+            .unwrap()
+            .remove(0)
+            .compiled;
+        multiplexed_matches(&pool, &[compiled.clone(), compiled], &[], name).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -683,5 +696,52 @@ async fn views_and_materialized_views_are_subscribed() {
     assert_eq!(
         client.data("stats").await,
         json!({"view_author_stats_aggregate": {"aggregate": {"count": 2, "sum": {"total": 22}}}})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn limited_subscriptions_send_at_most_the_permitted_rows() {
+    let pool = database("http_subscription_limits", &["schema.sql", "seed.sql"]).await;
+    let subscriptions = Subscriptions::new(pool.clone(), options());
+    let address = serve_ws(role_schemas(
+        &fixture("limits.graphql"),
+        &pool,
+        &subscriptions,
+    ))
+    .await;
+    let mut client = Client::connect(address, json!({"role": "limited", "session": {}})).await;
+    client
+        .subscribe(
+            "list",
+            "subscription { author(order_by: {id: desc}) { id } }",
+            json!({}),
+        )
+        .await;
+    client
+        .subscribe(
+            "aggregate",
+            "subscription { author_aggregate(order_by: {id: desc}) { aggregate { count } nodes { id } } }",
+            json!({}),
+        )
+        .await;
+    assert_eq!(
+        client.data("list").await,
+        json!({"author": [{"id": 6}, {"id": 5}]})
+    );
+    assert_eq!(
+        client.data("aggregate").await,
+        json!({"author_aggregate": {"aggregate": {"count": 6}, "nodes": [{"id": 6}, {"id": 5}]}})
+    );
+    sqlx::query("INSERT INTO author (id, name) VALUES (99, 'new author')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.data("list").await,
+        json!({"author": [{"id": 99}, {"id": 6}]})
+    );
+    assert_eq!(
+        client.data("aggregate").await,
+        json!({"author_aggregate": {"aggregate": {"count": 7}, "nodes": [{"id": 99}, {"id": 6}]}})
     );
 }

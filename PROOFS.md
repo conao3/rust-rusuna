@@ -6,7 +6,7 @@ sessions and selections; a successful resolution is required where stated.
 
 ## Independent properties
 
-Twelve properties, expressed by twenty boundary statements. `resolve_tables` is a
+Thirteen properties, expressed by twenty-four boundary statements. `resolve_tables` is a
 consequence of the scan condition property, not an additional independent property.
 `resolve_permissions`, the intermediate traversal lemmas and the pre-permission
 `resolveSelection` lemmas support these same properties.
@@ -95,6 +95,59 @@ theorem resolve_tables (schema : Schema) (session : Session) (root : Selection)
       permission.role = session.role ∧ permission.target = scan.name
 ```
 
+The row limit property concerns the sites Hasura v2.51.6 bounds by a select permission's
+`limit`. `queryLimits` lists them with the scan or `nodes` limit the plan carries: the scan of
+a list root, the scan of each array relationship, and the `nodes` field of an aggregate root or
+an aggregate relationship, at every depth of the selection tree. Object relationships, the
+by-primary-key root (kind `object`), aggregate rows and the scans of relationship predicates
+(`EXISTS`) are not sites: Hasura does not bound them.
+
+```lean
+def listLimits (kind : Kind) (scan : Scan) (children : List Node) : List (String × Option Nat) :=
+  match kind with
+  | .object => []
+  | .array => [(scan.name, scan.limit)]
+  | .aggregate => children.filterMap fun n => (nodesLimit n).map fun l => (scan.name, l)
+
+mutual
+def nodeLimits : Node → List (String × Option Nat)
+  | .column _ _ => []
+  | .group _ ns | .nodes _ _ _ ns => nodesLimits ns
+  | .relation _ kind scan _ _ ns => listLimits kind scan ns ++ nodesLimits ns
+def nodesLimits : List Node → List (String × Option Nat)
+  | [] => []
+  | n :: ns => nodeLimits n ++ nodesLimits ns
+end
+
+def queryLimits (query : Query) : List (String × Option Nat) :=
+  listLimits query.kind query.scan query.children ++ nodesLimits query.children
+```
+
+```lean
+theorem resolve_limits (schema : Schema) (session : Session) (root : Selection)
+    (query : Query) (h : resolve schema session root = .ok query) (role : session.role ≠ "admin") :
+    ∀ site ∈ queryLimits query, ∀ permission, findPermission schema session.role site.1 = some permission →
+      ∀ cap, permission.limit = some cap → ∃ n, site.2 = some n ∧ n ≤ cap
+```
+
+`capLimit` computes the limit of a site from the permission's `limit` and the query's. Together,
+the three statements below make it the smaller of the two when both are present.
+
+```lean
+theorem capLimit_cap (cap limit : Option Nat) :
+    ∀ c, cap = some c → ∃ n, capLimit cap limit = some n ∧ n ≤ c
+```
+
+```lean
+theorem capLimit_user (cap limit : Option Nat) :
+    ∀ l, limit = some l → ∃ n, capLimit cap limit = some n ∧ n ≤ l
+```
+
+```lean
+theorem capLimit_choice (cap limit : Option Nat) :
+    capLimit cap limit = limit ∨ capLimit cap limit = cap
+```
+
 The write properties concern post-write checks that abort the statement, row conditions
 on updates and deletes, and writable columns including the separation of user inputs
 from presets. The table-permission witness is a consequence of the same guarantee.
@@ -147,7 +200,7 @@ theorem resolveWrite_declared (schema : Schema) (catalog : WriteCatalog) (sessio
 
 ## Conditions restated next to their implementations
 
-Nineteen boundary statements. The selection acceptance equalities compare success
+Twenty-five boundary statements. The selection acceptance equalities compare success
 with a separate Boolean traversal. Their seven expression, ordering, scan and node
 lemmas and the existential success form below support the same conditions and are
 not counted again.
@@ -224,6 +277,35 @@ theorem addPermission_condition (schema : Schema) (session : Session) (scan : Sc
 theorem appendCondition_exact (scan : Scan) (condition : Predicate) :
     appendCondition scan condition =
       .mk scan.name scan.schema scan.table (.and [scan.conds, condition]) scan.order scan.limit scan.offset
+```
+
+```lean
+theorem limitScan_exact (cap : Option Nat) (scan : Scan) :
+    limitScan cap scan = .mk scan.name scan.schema scan.table scan.conds scan.order (capLimit cap scan.limit) scan.offset
+```
+
+```lean
+theorem listScan_array (cap : Option Nat) (scan : Scan) : listScan .array cap scan = limitScan cap scan
+```
+
+```lean
+theorem listScan_other (kind : Kind) (cap : Option Nat) (scan : Scan) (h : kind ≠ .array) :
+    listScan kind cap scan = scan
+```
+
+```lean
+theorem limitNodes_limit (cap : Option Nat) (node : Node) :
+    nodesLimit (limitNodes cap node) = (nodesLimit node).map (capLimit cap)
+```
+
+```lean
+theorem listChildren_limits (cap : Option Nat) (children : List Node) :
+    (listChildren .aggregate cap children).map nodesLimit = children.map fun n => (nodesLimit n).map (capLimit cap)
+```
+
+```lean
+theorem listChildren_other (kind : Kind) (cap : Option Nat) (children : List Node) (h : kind ≠ .aggregate) :
+    listChildren kind cap children = children
 ```
 
 ```lean
@@ -370,6 +452,11 @@ a relationship predicate `u.id IS NOT NULL` can resolve while table `u` requires
 The existing scan-condition theorem assumes successful final resolution, so it
 cannot establish this converse. `guardQuery`, `resolve` and `run` stay in Survey.
 
+`resolve_limits` concerns the plan of a query. A mutation's `returning` relationships take the
+same bounds through `guardNodes`; the limited-role mutation fixtures test them. The
+statement does not interpret `LIMIT` or the `nodes` slice in PostgreSQL; the fixtures compare
+the results with Hasura v2.51.6.
+
 ## Write and returning boundaries
 
 `runWrite` resolves a `WriteInput` to a `WritePlan` and emits that plan. The permission
@@ -412,8 +499,8 @@ is an instance of `slots_numbered`. These supporting statements are not counted 
 
 ## Mutation audit
 
-The strict audit targets twenty-four functions: 154 mutations, 103 killed, zero holes,
-18 equivalent on sampled inputs, zero untested, zero timed out and 33 stillborn.
+The strict audit targets twenty-nine functions: 183 mutations, 125 killed, zero holes,
+21 equivalent on sampled inputs, zero untested, zero timed out and 37 stillborn.
 `make survey` reports the functions outside the strict audit:
 
 | Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
@@ -442,3 +529,9 @@ timeout or stillborn mutation. Hand-written mutations replacing the check with
 `applyWriteCheck_exact` and `applyWriteCondition_exact` respectively, as well as the
 corresponding projection of `applyWritePermission_conditions`. Manual failures are
 reported separately from automatic kills.
+
+The row limit audit targets `capLimit`, `limitScan`, `listScan`, `limitNodes` and
+`listChildren`: 25 mutations, 21 killed and 4 stillborn, with no hole, equivalent, untested or
+timed-out mutation. The mutations that drop the bound are among the killed ones:
+`capLimit := fun _ x => x`, `limitScan := fun _ x => x`, `listScan := fun _ _ x => x`,
+`limitNodes := fun _ x => x` and `listChildren := fun _ _ x => x`.
