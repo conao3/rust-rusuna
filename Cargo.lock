@@ -1740,6 +1740,7 @@ version = "0.1.0"
 dependencies = [
  "async-graphql",
  "async-trait",
+ "futures-util",
  "rusuna",
  "rusuna-sqlx",
  "serde_json",
@@ -1754,8 +1755,10 @@ dependencies = [
  "async-graphql",
  "async-graphql-axum",
  "axum",
+ "futures-util",
  "rusuna",
  "rusuna-async-graphql",
+ "rusuna-sqlx",
  "serde_json",
  "sqlx",
  "tokio",
@@ -1776,6 +1779,7 @@ version = "0.1.0"
 dependencies = [
  "async-graphql",
  "axum",
+ "futures-util",
  "rusuna",
  "rusuna-async-graphql",
  "rusuna-axum",
@@ -1783,6 +1787,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

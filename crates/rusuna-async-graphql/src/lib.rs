@@ -2,12 +2,14 @@
 //!
 //! [`Builder`] produces [`Parts`]: the types, input types and root fields of the role,
 //! which share one schema with hand-written dynamic fields. Each root field resolves with
-//! one PostgreSQL statement. The resolvers read a [`rusuna::Session`] from the request
-//! data and a `sqlx::PgPool` from the schema data.
+//! one PostgreSQL statement, and each subscription root field subscribes to that statement
+//! on a `rusuna_sqlx::Subscriptions`. The resolvers read a [`rusuna::Session`] from the
+//! request or connection data and a `sqlx::PgPool` and a `rusuna_sqlx::Subscriptions` from
+//! the schema data.
 
 use async_graphql::dynamic::{
     Enum, Field, FieldFuture, FieldValue, InputObject, InputValue, Object, ResolverContext, Scalar,
-    SchemaBuilder, TypeRef,
+    SchemaBuilder, Subscription, SubscriptionField, SubscriptionFieldFuture, TypeRef,
 };
 use async_graphql::extensions::{
     Extension, ExtensionContext, ExtensionFactory, NextExecute, NextPrepareRequest,
@@ -19,6 +21,7 @@ use async_graphql::{
     Data, ErrorExtensions, Name, Request, Response, SelectionField, ServerError, ServerResult,
     Value,
 };
+use futures_util::Stream;
 use serde_json::Value as Json;
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,15 +83,24 @@ struct Shared {
     schema: Arc<rusuna::Schema>,
     role: String,
     query: String,
+    mutation: String,
+    subscription: String,
     children: BTreeMap<(String, String), String>,
     arguments: BTreeMap<(String, String), BTreeMap<String, String>>,
     extras: BTreeMap<(String, String), Vec<String>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    Query,
+    Mutation,
+    Subscription,
+}
+
 #[derive(Clone)]
 struct Root {
     definition: FieldDefinition,
-    mutation: bool,
+    operation: Operation,
 }
 
 pub struct Parts {
@@ -96,6 +108,8 @@ pub struct Parts {
     query_name: String,
     mutation: Option<Object>,
     mutation_name: String,
+    subscription: Option<Subscription>,
+    subscription_name: String,
     types: Vec<async_graphql::dynamic::Type>,
     roots: BTreeMap<String, Root>,
     shared: Arc<Shared>,
@@ -141,6 +155,7 @@ impl Builder {
             async_graphql::parser::parse_schema(&sdl).map_err(|e| Error::Sdl(e.to_string()))?;
         let mut query_name = "Query".to_string();
         let mut mutation_name = "Mutation".to_string();
+        let mut subscription_name = "Subscription".to_string();
         let mut definitions = BTreeMap::new();
         for definition in document.definitions {
             match definition {
@@ -150,6 +165,9 @@ impl Builder {
                     }
                     if let Some(mutation) = &schema.node.mutation {
                         mutation_name = mutation.node.to_string();
+                    }
+                    if let Some(subscription) = &schema.node.subscription {
+                        subscription_name = subscription.node.to_string();
                     }
                 }
                 TypeSystemDefinition::Type(ty) => {
@@ -249,6 +267,8 @@ impl Builder {
             schema: self.schema,
             role: self.role,
             query: query_name.clone(),
+            mutation: mutation_name.clone(),
+            subscription: subscription_name.clone(),
             children,
             arguments,
             extras,
@@ -256,16 +276,32 @@ impl Builder {
         let mut query = Object::new(&query_name);
         let mut mutation = Object::new(&mutation_name);
         let mut has_mutation = false;
+        let mut subscription = Subscription::new(&subscription_name);
+        let mut has_subscription = false;
         let mut types = Vec::new();
         let mut roots = BTreeMap::new();
         for (name, kind) in definitions {
             match kind {
+                TypeKind::Object(object) if name == subscription_name => {
+                    for field in object.fields {
+                        let root = Root {
+                            definition: field.node,
+                            operation: Operation::Subscription,
+                        };
+                        has_subscription = true;
+                        subscription = subscription.field(subscription_field(&shared, &root));
+                    }
+                }
                 TypeKind::Object(object) if name == query_name || name == mutation_name => {
                     let is_mutation = name == mutation_name;
                     for field in object.fields {
                         let root = Root {
                             definition: field.node,
-                            mutation: is_mutation,
+                            operation: if is_mutation {
+                                Operation::Mutation
+                            } else {
+                                Operation::Query
+                            },
                         };
                         let resolver = root_field(&shared, &root);
                         if is_mutation {
@@ -340,6 +376,8 @@ impl Builder {
             query_name,
             mutation: has_mutation.then_some(mutation),
             mutation_name,
+            subscription: has_subscription.then_some(subscription),
+            subscription_name,
             types,
             roots,
             shared,
@@ -354,6 +392,12 @@ impl Parts {
 
     pub fn mutation_name(&self) -> Option<&str> {
         self.mutation.as_ref().map(|_| self.mutation_name.as_str())
+    }
+
+    pub fn subscription_name(&self) -> Option<&str> {
+        self.subscription
+            .as_ref()
+            .map(|_| self.subscription_name.as_str())
     }
 
     pub fn query_field(mut self, field: Field) -> Self {
@@ -371,10 +415,20 @@ impl Parts {
         self
     }
 
+    pub fn subscription_field(mut self, field: SubscriptionField) -> Self {
+        self.subscription = Some(
+            self.subscription
+                .take()
+                .unwrap_or_else(|| Subscription::new(&self.subscription_name))
+                .field(field),
+        );
+        self
+    }
+
     pub fn root_field(&self, name: &str) -> Option<Field> {
         self.roots
             .get(name)
-            .filter(|root| !root.mutation)
+            .filter(|root| root.operation == Operation::Query)
             .map(|root| root_field(&self.shared, root))
     }
 
@@ -383,6 +437,9 @@ impl Parts {
         if let Some(mutation) = self.mutation {
             builder = builder.register(mutation);
         }
+        if let Some(subscription) = self.subscription {
+            builder = builder.register(subscription);
+        }
         for ty in self.types {
             builder = builder.register(ty);
         }
@@ -390,8 +447,11 @@ impl Parts {
     }
 
     pub fn schema(self) -> SchemaBuilder {
-        let builder =
-            async_graphql::dynamic::Schema::build(&self.query_name, self.mutation_name(), None);
+        let builder = async_graphql::dynamic::Schema::build(
+            &self.query_name,
+            self.mutation_name(),
+            self.subscription_name(),
+        );
         self.register(builder)
     }
 }
@@ -528,7 +588,7 @@ fn borrowed(value: &Json, shape: Shape) -> Option<FieldValue<'_>> {
     }
 }
 
-fn owned(value: Json) -> Option<FieldValue<'static>> {
+fn owned<'a>(value: Json) -> Option<FieldValue<'a>> {
     match value {
         Json::Null => None,
         Json::Array(items) => Some(FieldValue::list(
@@ -552,8 +612,8 @@ fn coded(message: impl Into<String>, code: &'static str) -> async_graphql::Error
     async_graphql::Error::new(message).extend_with(|_, e| e.set("code", code))
 }
 
-fn execution_error(error: rusuna_sqlx::Error) -> async_graphql::Error {
-    let code = match &error {
+fn execution_error(error: &rusuna_sqlx::Error) -> async_graphql::Error {
+    let code = match error {
         rusuna_sqlx::Error::PermissionCheck => "permission-error",
         rusuna_sqlx::Error::Parameter { .. } => "data-exception",
         rusuna_sqlx::Error::Database(sqlx::Error::Database(db)) => {
@@ -563,7 +623,7 @@ fn execution_error(error: rusuna_sqlx::Error) -> async_graphql::Error {
                 _ => "unexpected",
             }
         }
-        rusuna_sqlx::Error::Database(_) => "unexpected",
+        rusuna_sqlx::Error::Statement(_) | rusuna_sqlx::Error::Database(_) => "unexpected",
     };
     coded(error.to_string(), code)
 }
@@ -648,10 +708,10 @@ fn render(
     root: &Root,
     field: &SelectionField<'_>,
 ) -> async_graphql::Result<(String, Json)> {
-    let parent = if root.mutation {
-        "Mutation"
-    } else {
-        shared.query.as_str()
+    let (parent, operation) = match root.operation {
+        Operation::Query => (shared.query.as_str(), "query"),
+        Operation::Mutation => (shared.mutation.as_str(), "mutation"),
+        Operation::Subscription => (shared.subscription.as_str(), "subscription"),
     };
     let child = shared
         .children
@@ -664,7 +724,6 @@ fn render(
         variables: serde_json::Map::new(),
     };
     document.field(parent, field, child)?;
-    let operation = if root.mutation { "mutation" } else { "query" };
     let definitions = if document.definitions.is_empty() {
         String::new()
     } else {
@@ -688,11 +747,10 @@ struct Slot {
     state: Mutex<State>,
 }
 
-async fn resolve_root(
+fn session<'a>(
     shared: &Shared,
-    root: &Root,
-    ctx: &ResolverContext<'_>,
-) -> async_graphql::Result<Option<FieldValue<'static>>> {
+    ctx: &ResolverContext<'a>,
+) -> async_graphql::Result<&'a rusuna::Session> {
     let session = ctx
         .data::<rusuna::Session>()
         .map_err(|_| coded("the request carries no rusuna::Session", "access-denied"))?;
@@ -705,8 +763,77 @@ async fn resolve_root(
             "access-denied",
         ));
     }
+    Ok(session)
+}
+
+async fn subscribe<'a>(
+    shared: &Shared,
+    root: &Root,
+    ctx: &ResolverContext<'a>,
+) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<FieldValue<'a>>> + use<'a>> {
+    let session = session(shared, ctx)?;
+    let subscriptions = ctx.data::<rusuna_sqlx::Subscriptions>()?;
+    let (text, variables) = render(shared, root, &ctx.ctx.field())?;
+    let field = shared
+        .schema
+        .compile(&text, &variables, None, session)
+        .map_err(|e| coded(e.to_string(), "validation-failed"))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            coded(
+                "the subscription selects no root field",
+                "validation-failed",
+            )
+        })?;
+    let subscription = subscriptions
+        .subscribe(&shared.role, &field.compiled)
+        .await
+        .map_err(|e| execution_error(&e))?;
+    Ok(futures_util::stream::unfold(
+        subscription,
+        |mut subscription| async move {
+            let item = match subscription.next().await? {
+                Ok(value) => Ok(owned(value).unwrap_or(FieldValue::NULL)),
+                Err(error) => Err(execution_error(&error)),
+            };
+            Some((item, subscription))
+        },
+    ))
+}
+
+fn subscription_field(shared: &Arc<Shared>, root: &Root) -> SubscriptionField {
+    let definition = &root.definition;
+    let mut field = SubscriptionField::new(
+        definition.name.node.to_string(),
+        type_ref(&definition.ty.node),
+        {
+            let shared = shared.clone();
+            let root = root.clone();
+            move |ctx| {
+                let shared = shared.clone();
+                let root = root.clone();
+                SubscriptionFieldFuture::new(async move { subscribe(&shared, &root, &ctx).await })
+            }
+        },
+    );
+    for argument in &definition.arguments {
+        field = field.argument(InputValue::new(
+            argument.node.name.node.to_string(),
+            type_ref(&argument.node.ty.node),
+        ));
+    }
+    field
+}
+
+async fn resolve_root(
+    shared: &Shared,
+    root: &Root,
+    ctx: &ResolverContext<'_>,
+) -> async_graphql::Result<Option<FieldValue<'static>>> {
+    let session = session(shared, ctx)?;
     let pool = ctx.data::<PgPool>()?;
-    if !root.mutation {
+    if root.operation == Operation::Query {
         let (text, variables) = render(shared, root, &ctx.ctx.field())?;
         let fields = shared
             .schema
@@ -718,10 +845,10 @@ async fn resolve_root(
         let mut conn = pool
             .acquire()
             .await
-            .map_err(|e| execution_error(e.into()))?;
+            .map_err(|e| execution_error(&e.into()))?;
         let value = rusuna_sqlx::fetch(&mut conn, &field.compiled)
             .await
-            .map_err(execution_error)?;
+            .map_err(|e| execution_error(&e))?;
         return Ok(owned(value));
     }
     let slot = ctx.data::<Arc<Slot>>()?;
@@ -747,12 +874,12 @@ async fn resolve_root(
             return Ok(Json::Null);
         };
         if state.transaction.is_none() {
-            state.transaction = Some(pool.begin().await.map_err(|e| execution_error(e.into()))?);
+            state.transaction = Some(pool.begin().await.map_err(|e| execution_error(&e.into()))?);
         }
         let transaction = state.transaction.as_mut().unwrap();
         rusuna_sqlx::fetch(transaction, &field.compiled)
             .await
-            .map_err(execution_error)
+            .map_err(|e| execution_error(&e))
     }
     .await;
     match result {
@@ -763,7 +890,7 @@ async fn resolve_root(
                 transaction
                     .rollback()
                     .await
-                    .map_err(|e| execution_error(e.into()))?;
+                    .map_err(|e| execution_error(&e.into()))?;
             }
             Err(error)
         }

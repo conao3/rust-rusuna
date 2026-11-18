@@ -9,6 +9,8 @@ use support::fixture;
 
 type Fields = Vec<(String, Vec<(String, String)>, String)>;
 
+type Roots = (String, Option<String>, Option<String>);
+
 #[derive(Debug, PartialEq)]
 enum Shape {
     Object(Fields),
@@ -29,9 +31,9 @@ fn written(ty: &Type) -> String {
     }
 }
 
-fn from_sdl(sdl: &str) -> (String, Option<String>, BTreeMap<String, Shape>) {
+fn from_sdl(sdl: &str) -> (Roots, BTreeMap<String, Shape>) {
     let document = async_graphql::parser::parse_schema(sdl).unwrap();
-    let mut roots = ("Query".to_string(), None);
+    let mut roots = ("Query".to_string(), None, None);
     let mut types = BTreeMap::new();
     for definition in document.definitions {
         match definition {
@@ -39,6 +41,7 @@ fn from_sdl(sdl: &str) -> (String, Option<String>, BTreeMap<String, Shape>) {
                 roots = (
                     schema.node.query.unwrap().node.to_string(),
                     schema.node.mutation.map(|m| m.node.to_string()),
+                    schema.node.subscription.map(|s| s.node.to_string()),
                 );
             }
             TypeSystemDefinition::Type(ty) => {
@@ -83,7 +86,7 @@ fn from_sdl(sdl: &str) -> (String, Option<String>, BTreeMap<String, Shape>) {
             TypeSystemDefinition::Directive(_) => unreachable!(),
         }
     }
-    (roots.0, roots.1, types)
+    (roots, types)
 }
 
 fn introspected(ty: &Json) -> String {
@@ -94,9 +97,9 @@ fn introspected(ty: &Json) -> String {
     }
 }
 
-const QUERY: &str = "{ __schema { queryType { name } mutationType { name } types { kind name fields { name args { name type { ...T } } type { ...T } } inputFields { name type { ...T } } enumValues { name } } } } fragment T on __Type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }";
+const QUERY: &str = "{ __schema { queryType { name } mutationType { name } subscriptionType { name } types { kind name fields { name args { name type { ...T } } type { ...T } } inputFields { name type { ...T } } enumValues { name } } } } fragment T on __Type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }";
 
-fn from_introspection(data: &Json) -> (String, Option<String>, BTreeMap<String, Shape>) {
+fn from_introspection(data: &Json) -> (Roots, BTreeMap<String, Shape>) {
     let schema = &data["__schema"];
     let pairs = |values: &Json| -> Vec<(String, String)> {
         values
@@ -150,17 +153,22 @@ fn from_introspection(data: &Json) -> (String, Option<String>, BTreeMap<String, 
         types.insert(name.to_string(), shape);
     }
     (
-        schema["queryType"]["name"].as_str().unwrap().to_string(),
-        schema["mutationType"]["name"].as_str().map(str::to_string),
+        (
+            schema["queryType"]["name"].as_str().unwrap().to_string(),
+            schema["mutationType"]["name"].as_str().map(str::to_string),
+            schema["subscriptionType"]["name"]
+                .as_str()
+                .map(str::to_string),
+        ),
         types,
     )
 }
 
-fn reachable(query: &str, mutation: Option<&str>, types: &mut BTreeMap<String, Shape>) {
+fn reachable(roots: &Roots, types: &mut BTreeMap<String, Shape>) {
     let mut seen = std::collections::BTreeSet::new();
-    let mut pending: Vec<String> = std::iter::once(query)
-        .chain(mutation)
-        .map(str::to_string)
+    let mut pending: Vec<String> = std::iter::once(roots.0.clone())
+        .chain(roots.1.clone())
+        .chain(roots.2.clone())
         .collect();
     while let Some(name) = pending.pop() {
         if !seen.insert(name.clone()) {
@@ -203,17 +211,20 @@ async fn introspect(schema: &Arc<rusuna::Schema>, role: &str) -> Json {
 async fn introspection_equals_the_expanded_sdl_of_each_role() {
     let mut compared = 0;
     for (path, pruned) in [
-        ("schema.graphql", json!({"visitor": ["Query", "Mutation"]})),
+        (
+            "schema.graphql",
+            json!({"visitor": ["Query", "Mutation", "Subscription"]}),
+        ),
         (
             "permissions.graphql",
-            json!({"user": ["Mutation"], "reviewer": ["Mutation"], "visitor": ["Query", "Mutation"]}),
+            json!({"user": ["Mutation"], "reviewer": ["Mutation"], "visitor": ["Query", "Mutation", "Subscription"]}),
         ),
         (
             "mutations/schema.graphql",
             json!({
-                "static": ["Query", "mutation_item_inc_input", "update_mutation_item._inc"],
-                "writer": ["Query", "mutation_item_inc_input", "update_mutation_item._inc"],
-                "visitor": ["Query", "Mutation"],
+                "static": ["Query", "Subscription", "mutation_item_inc_input", "update_mutation_item._inc"],
+                "writer": ["Query", "Subscription", "mutation_item_inc_input", "update_mutation_item._inc"],
+                "visitor": ["Query", "Mutation", "Subscription"],
             }),
         ),
     ] {
@@ -221,8 +232,7 @@ async fn introspection_equals_the_expanded_sdl_of_each_role() {
         let mut roles = schema.roles();
         roles.push("visitor".into());
         for role in roles {
-            let (query, mutation, mut types) = from_sdl(&schema.expanded_sdl(&role).unwrap());
-            let mut mutation = mutation;
+            let (mut roots, mut types) = from_sdl(&schema.expanded_sdl(&role).unwrap());
             for item in pruned[&role].as_array().into_iter().flatten() {
                 let item = item.as_str().unwrap();
                 if let Some((field, argument)) = item.split_once('.') {
@@ -239,18 +249,17 @@ async fn introspection_equals_the_expanded_sdl_of_each_role() {
                     types.insert(item.to_string(), Shape::Object(Vec::new()));
                 } else {
                     types.remove(item);
-                    if mutation.as_deref() == Some(item) {
-                        mutation = None;
+                    if roots.1.as_deref() == Some(item) {
+                        roots.1 = None;
+                    }
+                    if roots.2.as_deref() == Some(item) {
+                        roots.2 = None;
                     }
                 }
             }
-            reachable(&query, mutation.as_deref(), &mut types);
+            reachable(&roots, &mut types);
             let data = introspect(&schema, &role).await;
-            assert_eq!(
-                from_introspection(&data),
-                (query, mutation, types),
-                "{path} {role}"
-            );
+            assert_eq!(from_introspection(&data), (roots, types), "{path} {role}");
             compared += 1;
         }
     }

@@ -1,4 +1,4 @@
-schema { query: Query mutation: Mutation }
+schema { query: Query mutation: Mutation subscription: Subscription }
 
 input Boolean_comparison_exp {
   _eq: Boolean
@@ -84,6 +84,13 @@ input String_comparison_exp {
   _nlike: String
   _ilike: String
   _nilike: String
+}
+
+type Subscription {
+  mutation_author(where: mutation_author_bool_exp, order_by: [mutation_author_order_by!], limit: Int, offset: Int): [mutation_author!]!
+  mutation_item(where: mutation_item_bool_exp, order_by: [mutation_item_order_by!], limit: Int, offset: Int): [mutation_item!]!
+  mutation_author_by_pk(id: Int!): mutation_author
+  mutation_item_by_pk(id: Int!): mutation_item
 }
 
 type mutation_author {

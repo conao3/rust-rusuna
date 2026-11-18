@@ -19,11 +19,14 @@ commit the workflow and `actions.lock` together.
   parsing with async-graphql-parser 7 and conversion to `Selection`.
 - `crates/rusuna-cli/`: the clap CLI `rusuna` (not published).
 - `crates/rusuna-sqlx/`: `fetch` and `execute` with sqlx 0.9. Parameters are encoded
-  for the types PostgreSQL infers when sqlx prepares the statement.
+  for the types PostgreSQL infers when sqlx prepares the statement. `src/subscription.rs`
+  holds `Multiplexed`, the statement that runs one compiled statement for many parameter
+  lists, and `Subscriptions`, the poller that groups subscriptions by role and SQL text.
 - `crates/rusuna-async-graphql/`: `Builder` and `Parts`, the async-graphql 7 dynamic
-  schema of one role, the root resolvers, hand-written fields and the transaction
-  extension.
-- `crates/rusuna-axum/`: the axum 0.8 route `graphql` and the example `blog`.
+  schema of one role, the root resolvers (query, mutation and subscription), hand-written
+  fields and the transaction extension.
+- `crates/rusuna-axum/`: the axum 0.8 routes `graphql` (`POST`) and `graphql_ws`
+  (WebSocket, `graphql-transport-ws`) and the example `blog`.
 - `crates/rusuna-http-tests/`: unpublished; HTTP tests against the Hasura fixtures and
   the introspection comparison. Each test creates its own database.
 - Workspace dependencies and package metadata are in the root `Cargo.toml`
@@ -41,7 +44,8 @@ commit the workflow and `actions.lock` together.
 - `bench/`: a crate outside the workspace that measures the statements on the full data
   set (`make bench`).
 - `tools/with-postgres.sh`: runs a command with a throwaway PostgreSQL cluster and
-  `RUSUNA_POSTGRES` set.
+  `RUSUNA_POSTGRES` set. The cluster preloads `pg_stat_statements`, which the subscription
+  tests use to count statements.
 
 ## Lean and Rust
 
@@ -49,6 +53,9 @@ Lean owns everything between a schema with a selection and the SQL text with its
 parameters: resolving field names against the schema, validating the selection, the query
 plan, the SQL tokens, quoting identifiers and numbering placeholders. Rust calls the
 generated `run` and converts its arguments and result. Do not reimplement these in Rust.
+The multiplexed subscription statement in `rusuna-sqlx` replaces the placeholders of a
+compiled statement; it reads the numbering Lean produces and fails unless the placeholders
+outside quoted text are `$1` to `$n` in order.
 
 Rust owns the public types, the depth check that bounds the recursion of the conversion,
 and everything with I/O: tests, the database client and the benchmark. Rust also parses SDL and GraphQL, expands fragments and variables, and checks values
@@ -62,7 +69,8 @@ argument's type from the role's expanded SDL, its value passed as JSON. Argument
 are never printed as GraphQL literals: enum values arrive from clients as JSON strings,
 which only the core's variable coercion accepts. async-graphql removes `@skip` and `@include` before resolvers run;
 the extension's `prepare_request` fills variable defaults and omitted nullable variables
-first. Selection rules stay in the core. `Schema::from_sdl` builds the schema; `Schema::compile` accepts text,
+first. A subscription root field is rendered as a `subscription` document, which the core
+compiles with the query root's fields to the statement of the same query. Selection rules stay in the core. `Schema::from_sdl` builds the schema; `Schema::compile` accepts text,
 JSON variables, an optional operation name and an explicit `Session`. `compile_selection` is the lower-level
 entry to Lean. Keep selection acceptance rules and SQL generation in Lean.
 
@@ -359,8 +367,14 @@ are also tested in autocommit mode without a caller rollback.
   response keys, hand-written fields in both directions,
   hidden roles and introspection with the expanded SDL of each role. Pruned empty types
   are listed by hand in `tests/introspection.rs`.
-- `crates/rusuna-sqlx/tests/` binds each supported parameter type and checks mutation
-  transactions on a table of its own.
+- `crates/rusuna-http-tests/tests/subscriptions.rs` subscribes over WebSocket with
+  `tokio-tungstenite`, waits on the counters of `Subscriptions::stats()` instead of on
+  time, and compares them with the `calls` of `pg_stat_statements` in the test database.
+  It also runs the multiplexed statement of every admin and permission fixture.
+- `crates/rusuna-sqlx/tests/` binds each supported parameter type, runs the multiplexed
+  statement for each type and checks mutation transactions on a table of its own. The
+  unit tests of `src/subscription.rs` check the placeholder rewrite, including names that
+  contain `$1`.
 - `RUSUNA_POSTGRES` is a required input of the database tests and the benchmark;
   `tools/with-postgres.sh` sets it and `DATABASE_URL`, which the example reads.
 - `cargo package --workspace --exclude rusuna-cli --exclude rusuna-http-tests` packages

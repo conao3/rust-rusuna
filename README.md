@@ -10,7 +10,8 @@ Rust by [leanfran](https://github.com/conao3/lean-leanfran).
 
 ## Status
 
-rusuna loads a mapping schema from SDL and compiles GraphQL query and mutation documents to SQL.
+rusuna loads a mapping schema from SDL and compiles GraphQL query, mutation and subscription
+documents to SQL.
 
 | Feature | State |
 |---|---|
@@ -19,16 +20,17 @@ rusuna loads a mapping schema from SDL and compiles GraphQL query and mutation d
 | Row and column read permissions per role, with plan invariants | available |
 | Insert, update, delete, primary-key roots and write permissions | available |
 | Execution with sqlx, parts for an `async-graphql` schema and `axum` routes | available |
-| Subscriptions, event triggers | planned |
+| Subscriptions over WebSocket, polled with one statement per group of subscriptions | available |
+| Event triggers | planned |
 
 The workspace has these crates:
 
 | Crate | Role |
 |---|---|
 | `rusuna` | The compiler: SDL, GraphQL text and Lean core. No I/O. |
-| `rusuna-sqlx` | Runs compiled statements on PostgreSQL with sqlx 0.9 and returns the `data` JSON. |
+| `rusuna-sqlx` | Runs compiled statements on PostgreSQL with sqlx 0.9 and returns the `data` JSON; polls subscriptions. |
 | `rusuna-async-graphql` | Builds an async-graphql 7 dynamic schema for one role, beside hand-written fields. |
-| `rusuna-axum` | One axum 0.8 route that picks the role's schema and executes the request. |
+| `rusuna-axum` | axum 0.8 routes (`POST` and WebSocket) that pick the role's schema and execute the request. |
 | `rusuna-cli` | The `rusuna` command (not published). |
 
 ## Usage
@@ -111,7 +113,8 @@ A `schema { query: Root }` definition selects a custom query root type.
 `Schema::expanded_sdl(role)` returns deterministic SDL with `where`, `order_by`, `limit`
 and `offset` arguments on list and aggregate fields. Object relationships have no
 arguments. The output includes `<Type>_bool_exp`, `<Type>_order_by`, scalar comparison
-inputs, `order_by`, and aggregate output types. This same expanded type graph validates
+inputs, `order_by`, and aggregate output types. The `Subscription` root repeats the fields of
+the query root. This same expanded type graph validates
 query values and aggregate operators. `tests/fixtures/schema.graphql` and
 `tests/fixtures/schema.expanded.graphql` are checked for equality by `make check`.
 
@@ -125,8 +128,9 @@ coercion and custom directives are outside this mapping format.
 Queries support variables and defaults, aliases, named and inline fragments,
 `@skip` and `@include`, Hasura v2 filters and ordering (single object or list), pagination,
 aggregates and row `__typename`. Repeated compatible fields are merged in first-appearance
-order. Conflicting fields, fragment cycles, subscription and introspection
-produce errors. `__typename` on the query root and generated aggregate containers is
+order. Conflicting fields, fragment cycles and introspection produce errors. A subscription
+operation selects exactly one root field of the query root and compiles to the statement of
+the same query. `__typename` on the query root and generated aggregate containers is
 unsupported. A row selection emptied by conditional directives is rejected by the Lean
 selection rules; a skipped root emits no statement.
 
@@ -378,7 +382,8 @@ let response = graphql
   role (`rusuna::Schema::roles()`) and choose it per request; `rusuna-axum` does this.
   The resolver rejects a `Session` of another role with `access-denied`.
 - **Session and pool.** The resolvers read `rusuna::Session` from the request data
-  (`Request::data`) and `sqlx::PgPool` from the schema or request data. Authentication
+  (`Request::data`) or the WebSocket connection data, and `sqlx::PgPool` (and
+  `rusuna_sqlx::Subscriptions` for subscriptions) from the schema or request data. Authentication
   and the construction of the session belong to the caller.
 - **Hand-written fields above rusuna.** `Parts::root_field(name)` returns a new
   `dynamic::Field` that resolves the query root `name` wherever it is registered, for
@@ -410,6 +415,13 @@ let response = graphql
   writes. Hand-written mutation fields use their own connections. Two mutation root
   fields with the same response key are a `validation-failed` error: async-graphql
   7.2.1 resolves each occurrence separately, and a write runs once.
+- **Subscriptions.** Each field of the role's `Subscription` root resolves to a stream: the
+  resolver compiles the field like a query root field and subscribes to the statement on
+  the `rusuna_sqlx::Subscriptions` it reads from the schema or request data (next section).
+  `Parts::subscription_field` adds a hand-written `dynamic::SubscriptionField`. A role
+  without query root fields has no `Subscription` root, and async-graphql 7.2.1 then
+  answers every operation sent over WebSocket, including queries, with `Subscription root
+  not found`; serve its queries over `POST`.
 - **Errors.** Errors carry `extensions.code`. A violated insert or update check has
   Hasura's message `check constraint of an insert/update permission has failed` and code
   `permission-error`. Compilation errors are `validation-failed`; database errors are
@@ -427,15 +439,22 @@ let response = graphql
   answered by async-graphql, from the same type names. The tests of
   `crates/rusuna-http-tests` compare introspection with the expanded SDL of every role.
 
-## axum route
+## axum routes
 
 ```rust
 let app = axum::Router::new().route(
     "/api/graphql",
-    rusuna_axum::graphql(schemas, |parts: &axum::http::request::Parts| {
+    rusuna_axum::graphql(schemas.clone(), |parts: &axum::http::request::Parts| {
         let session = authenticate(&parts.headers);
         async move { session }
-    }),
+    })
+    .merge(rusuna_axum::graphql_ws(
+        schemas,
+        |parts: &axum::http::request::Parts, payload: serde_json::Value| {
+            let session = authenticate_connection(&parts.headers, &payload);
+            async move { session }
+        },
+    )),
 );
 ```
 
@@ -445,6 +464,96 @@ axum::response::Response>`; an error response is sent as is. The route executes 
 request on the schema of the session's role with the session in the request data, and
 answers `access-denied` for a role without a schema. Request parsing and the response
 are [async-graphql-axum](https://docs.rs/async-graphql-axum/7.2.1/async_graphql_axum/).
+
+`rusuna_axum::graphql_ws(HashMap<String, dynamic::Schema>, session)` is a `GET` route that
+upgrades to a WebSocket and speaks the
+[`graphql-transport-ws`](https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md)
+protocol (and the older `graphql-ws` protocol of subscriptions-transport-ws, both through
+async-graphql-axum). The client's first message must be `connection_init`. The session
+function receives the upgrade request's head and that message's payload and returns
+`Result<rusuna::Session, String>`; the session is fixed for the connection, so
+authentication can read either the upgrade headers or the payload. The connection runs
+every operation on the schema of the session's role with the session in the connection
+data. Another first message closes the connection with code 4400; an error or a role
+without a schema closes it with code 4403 and the message.
+
+## Subscriptions
+
+```rust
+let subscriptions = rusuna_sqlx::Subscriptions::new(
+    pool.clone(),
+    rusuna_sqlx::SubscriptionOptions { interval: Duration::from_secs(1), batch_size: 100 },
+);
+let graphql = rusuna_async_graphql::Builder::new(schema.clone(), "user")
+    .build()?
+    .schema()
+    .data(pool.clone())
+    .data(subscriptions.clone())
+    .finish()?;
+```
+
+A subscription root field has the name, arguments and selection of the query root field
+of the same name (`<t>`, `<t>_aggregate`, `<t>_by_pk`). Subscribing sends the field's
+current result, then a new result whenever it changes, like a Hasura v2 live query. The
+statement is the one the query compiles to, so the role's read permissions (row
+conditions and columns) apply to the subscription as they apply to the query, and the
+permission theorems hold for it unchanged.
+
+`rusuna_sqlx::Subscriptions` polls the statements. Subscriptions with the same role and
+the same SQL text form a group: `compile_erase` proves that inputs differing only in
+values (variables and session values) compile to the same text, so these are the
+subscriptions that differ in values only. Every `interval` (default one second) each
+group runs one statement for up to `batch_size` (default 100) subscriptions, and sends a
+subscription its result when it differs from the last result sent to it (JSON
+equality). A new subscription joins its group and starts a run at once, so the first
+result does not wait for the interval. A group exists while it has subscriptions:
+`complete`, a closed connection or dropping a `rusuna_sqlx::Subscription` leaves the group,
+and the last one leaving stops its runs. `Subscriptions::stats()` reports the groups,
+subscriptions, runs and statements.
+
+The statement of a group is `rusuna_sqlx::Multiplexed`. It reads one `jsonb[]` parameter,
+the parameters of each subscription as one JSON array, and runs the compiled statement
+once per array in a `LEFT JOIN LATERAL` subquery. For the role `user` of
+`tests/fixtures/permissions.graphql` and
+`subscription($min: Int!) { article(where: {id: {_gte: $min}}, order_by: {id: asc}) { id title } }`:
+
+```sql
+SELECT "__rusuna_subscription"."id", "__rusuna_result"."value" FROM unnest($1::jsonb[]) WITH ORDINALITY AS "__rusuna_subscription"("args", "id") LEFT JOIN LATERAL (WITH "r0" AS ( SELECT "s".* FROM "public"."article" AS "s" WHERE true AND ( ( true AND ( "s"."id" >= (("__rusuna_subscription"."args"->>0)::int4) ) AND ( "s"."author_id" = (("__rusuna_subscription"."args"->>1)::int4) ) ) ) ORDER BY "s"."id" ASC NULLS LAST ) SELECT coalesce(json_agg( row_to_json((SELECT "%" FROM (SELECT "t0"."id" AS "id" , "t0"."title" AS "title" ) AS "%")) ORDER BY "t0"."id" ASC NULLS LAST ), '[]') FROM "r0" AS "t0") AS "__rusuna_result"("value") ON true ORDER BY "__rusuna_subscription"."id"
+```
+
+with one array per subscription, `["2","3"]` for `$min = 2` and `user_id = 3`. Each
+placeholder `$k` of the compiled statement becomes element `k - 1` of the array, cast to
+the type PostgreSQL infers for `$k` when `Multiplexed::prepare` prepares the compiled
+statement. The values are written as text in the form `rusuna_sqlx::fetch` would send:
+integers and floats in decimal (`float4` values rounded to `f32` first), date and time
+values normalized to ISO 8601. The types are those `fetch` binds; another inferred type
+makes `prepare` fail. A subscription's parameters are checked against these types when it
+subscribes, so an invalid value fails that subscription alone and never the group's
+statement. The rewrite copies single-quoted literals and double-quoted identifiers
+unchanged and requires the placeholders outside them to be exactly `$1` to `$n` in order,
+which `placeholders_numbered` proves for every compiled statement.
+
+On the benchmark data (`bench/seed.sql`), the statement of
+`article(where: {title: {_like: $t}}, order_by: {id: asc}) { id title comments { body } author { name } }`
+for 100 subscriptions with different `user_id` values took 98 to 107 ms in `psql`, under
+`plan_cache_mode = auto` and `force_generic_plan` alike, against 112 ms for the 100 single
+statements under a generic plan. A per-row argument in the lateral subquery uses the index
+on `article.author_id` as a parameter would.
+
+Differences from Hasura v2 live queries:
+
+- Hasura groups the subscriptions with equal variables and session values into cohorts and
+  runs the statement once per cohort; rusuna runs it once per subscription, and compares
+  results per subscription.
+- Hasura compares hashes of the results; rusuna compares the JSON values it keeps for each
+  subscription.
+- The `subscription_root` of Hasura also has `<t>_stream` fields (streaming subscriptions);
+  rusuna has none.
+- A database error of a group's statement is sent to every subscription of the batch as a
+  GraphQL error, and the group keeps polling; a later success is sent again.
+
+Lists without `order_by` follow PostgreSQL's row order, which can differ between runs
+and then sends a result with the same rows in another order.
 
 ## Example server
 
@@ -471,6 +580,27 @@ curl -s http://127.0.0.1:3000/api/graphql -H 'content-type: application/json' -H
 A reader sees published articles only; a writer also sees its own drafts and inserts
 articles as itself. `tools/with-postgres.sh` sets `DATABASE_URL`, which the example
 reads.
+
+The same path serves subscriptions over WebSocket. The example reads the role and the
+user from the `headers` object of the `connection_init` payload. With
+[websocat](https://github.com/vi/websocat) (`nix shell nixpkgs#websocat`), connect and
+send the two messages:
+
+```sh
+websocat --protocol graphql-transport-ws ws://127.0.0.1:3000/api/graphql
+{"type":"connection_init","payload":{"headers":{"x-role":"writer","x-user-id":"2"}}}
+{"id":"1","type":"subscribe","payload":{"query":"subscription { article(order_by: {id: asc}) { id title published } }"}}
+```
+
+The server answers `connection_ack` and the current articles. A change of the result,
+such as publishing the draft of author 2 from another terminal, sends the new list:
+
+```sh
+curl -s http://127.0.0.1:3000/api/graphql -H 'content-type: application/json' -H 'x-role: writer' -H 'x-user-id: 2' \
+  -d '{"query":"mutation { update_article_by_pk(pk_columns: {id: 2}, _set: {published: true}) { id published } }"}'
+```
+
+Send `{"id":"1","type":"complete"}` to end the subscription.
 
 ## CLI
 
@@ -673,7 +803,11 @@ Outside the proofs:
   role-specific SDL rendering and scalar type checking in `src/graphql/`; authentication
   and construction of the session by the caller.
 - `rusuna-sqlx`, `rusuna-async-graphql` and `rusuna-axum`: parameter encoding, the
-  dynamic schema, the selection hand-off, transactions and HTTP. The HTTP tests cover them.
+  dynamic schema, the selection hand-off, transactions, HTTP and WebSocket. The HTTP tests
+  cover them.
+- The multiplexed subscription statement. `rusuna-sqlx` rewrites the placeholders of the
+  SQL text in Rust; `placeholders_numbered` fixes what it expects, and a test runs the
+  rewritten statement of every admin and permission fixture against its single statements.
 - `unquoteChars` as a description of PostgreSQL's reader.
 
 ## Results and speed
@@ -718,6 +852,20 @@ that rolls back the first two, variables with defaults, omitted variables, enum 
 `@skip`, hidden types and root fields per role, and introspection against the expanded
 SDL of 12 role and schema pairs. `crates/rusuna-sqlx/tests` binds every supported
 parameter type and checks the mutation transaction without async-graphql.
+
+The subscription tests in `crates/rusuna-http-tests/tests/subscriptions.rs` run over
+WebSocket. A subscription receives its first result, then the results changed by a
+mutation through rusuna and by plain SQL, and nothing after a write that leaves its result
+unchanged or that touches rows its role and session cannot read. 100 subscriptions with
+four `user_id` values and seven variable values form one group; each receives the result
+of its own session and variables, and `pg_stat_statements` counts exactly one statement per
+run of the group, with the update as the only other statement. 101 subscriptions take two
+statements per run; another role or another statement makes another group; `complete`
+and a closed connection leave the group, and an empty group stops running. A role without
+read permission has no subscription field. The multiplexed statement of each of the 43
+admin and 19 permission fixtures, run for several sessions under custom and generic
+plans, returns the result of each single statement, and every supported parameter type
+keeps its value.
 
 ## Development
 

@@ -1,15 +1,21 @@
-//! An axum route that serves rusuna async-graphql schemas.
+//! axum routes that serve rusuna async-graphql schemas.
 //!
 //! [`graphql`] takes one schema per role and a function that builds a
-//! [`rusuna::Session`] from the request, and returns a `POST` route.
+//! [`rusuna::Session`] from the request, and returns a `POST` route. [`graphql_ws`] serves
+//! the same schemas over WebSocket with the `graphql-transport-ws` protocol, for
+//! subscriptions, queries and mutations.
 
 use async_graphql::dynamic::Schema;
-use async_graphql::{ErrorExtensions, Response as GraphQLBody};
-use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use axum::extract::{FromRequest, Request};
+use async_graphql::http::ALL_WEBSOCKET_PROTOCOLS;
+use async_graphql::{Data, ErrorExtensions, Response as GraphQLBody};
+use async_graphql_axum::{GraphQLProtocol, GraphQLRequest, GraphQLResponse, GraphQLWebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{FromRequest, FromRequestParts, Request};
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{MethodRouter, post};
+use axum::routing::{MethodRouter, get, post};
+use futures_util::{StreamExt, stream};
+use serde_json::Value as Json;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -53,4 +59,96 @@ where
             GraphQLResponse::from(schema.execute(request.data(session)).await).into_response()
         }
     })
+}
+
+/// A `GET` route that upgrades to a WebSocket and speaks `graphql-transport-ws`.
+///
+/// The session function receives the upgrade request's head and the payload of the
+/// client's `connection_init` message, which must be the first message, and returns the
+/// connection's [`rusuna::Session`] or an error message. The connection uses the schema of
+/// the session's role for every operation, with the session in the connection data. An
+/// error, a role without a schema or another first message closes the connection with code
+/// 4403 or 4400.
+pub fn graphql_ws<S, F, Fut>(schemas: HashMap<String, Schema>, session: F) -> MethodRouter<S>
+where
+    S: Clone + Send + Sync + 'static,
+    F: Fn(&Parts, Json) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<rusuna::Session, String>> + Send + 'static,
+{
+    let schemas = Arc::new(schemas);
+    get(move |request: Request| {
+        let schemas = schemas.clone();
+        let session = session.clone();
+        async move {
+            let (mut parts, _) = request.into_parts();
+            let protocol = match GraphQLProtocol::from_request_parts(&mut parts, &()).await {
+                Ok(protocol) => protocol,
+                Err(rejection) => return rejection.into_response(),
+            };
+            let upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+                Ok(upgrade) => upgrade,
+                Err(rejection) => return rejection.into_response(),
+            };
+            upgrade
+                .protocols(ALL_WEBSOCKET_PROTOCOLS)
+                .on_upgrade(move |socket| serve(socket, protocol, parts, schemas, session))
+        }
+    })
+}
+
+async fn close(mut socket: WebSocket, code: u16, reason: String) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        })))
+        .await;
+}
+
+async fn serve<F, Fut>(
+    mut socket: WebSocket,
+    protocol: GraphQLProtocol,
+    parts: Parts,
+    schemas: Arc<HashMap<String, Schema>>,
+    session: F,
+) where
+    F: Fn(&Parts, Json) -> Fut,
+    Fut: Future<Output = Result<rusuna::Session, String>>,
+{
+    let first = loop {
+        match socket.recv().await {
+            Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => break message,
+            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+            Some(Ok(_)) => {}
+        }
+    };
+    let init = serde_json::from_slice::<Json>(&first.clone().into_data())
+        .ok()
+        .filter(|message| message["type"] == "connection_init");
+    let Some(init) = init else {
+        return close(socket, 4400, "expected connection_init".into()).await;
+    };
+    let payload = init.get("payload").cloned().unwrap_or(Json::Null);
+    let session = match session(&parts, payload).await {
+        Ok(session) => session,
+        Err(message) => return close(socket, 4403, message).await,
+    };
+    let Some(schema) = schemas.get(&session.role).cloned() else {
+        return close(
+            socket,
+            4403,
+            format!("no schema serves the role {}", session.role),
+        )
+        .await;
+    };
+    let (sink, rest) = socket.split();
+    let messages = stream::once(async move { Ok(first) }).chain(rest);
+    GraphQLWebSocket::new_with_pair(sink, messages, schema, protocol)
+        .on_connection_init(move |_| async move {
+            let mut data = Data::default();
+            data.insert(session);
+            Ok(data)
+        })
+        .serve()
+        .await
 }

@@ -6,7 +6,12 @@ use axum::response::IntoResponse;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn schema(rusuna: &Arc<rusuna::Schema>, role: &str, pool: &sqlx::PgPool) -> Schema {
+fn schema(
+    rusuna: &Arc<rusuna::Schema>,
+    role: &str,
+    pool: &sqlx::PgPool,
+    subscriptions: &rusuna_sqlx::Subscriptions,
+) -> Schema {
     let parts = rusuna_async_graphql::Builder::new(rusuna.clone(), role)
         .field(
             "article",
@@ -46,12 +51,14 @@ fn schema(rusuna: &Arc<rusuna::Schema>, role: &str, pool: &sqlx::PgPool) -> Sche
         .schema()
         .register(viewer)
         .data(pool.clone())
+        .data(subscriptions.clone())
         .finish()
         .unwrap()
 }
 
-fn session(parts: &Parts) -> Result<rusuna::Session, (StatusCode, &'static str)> {
-    let header = |name: &str| parts.headers.get(name).and_then(|v| v.to_str().ok());
+fn session<'a>(
+    header: impl Fn(&str) -> Option<&'a str>,
+) -> Result<rusuna::Session, (StatusCode, &'static str)> {
     let Some(role) = header("x-role") else {
         return Err((StatusCode::UNAUTHORIZED, "x-role is required"));
     };
@@ -70,16 +77,30 @@ async fn main() {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL is not set");
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let rusuna = Arc::new(rusuna::Schema::from_sdl(include_str!("blog.graphql")).unwrap());
+    let subscriptions =
+        rusuna_sqlx::Subscriptions::new(pool.clone(), rusuna_sqlx::SubscriptionOptions::default());
     let schemas: HashMap<String, Schema> = ["reader", "writer"]
         .into_iter()
-        .map(|role| (role.to_string(), schema(&rusuna, role, &pool)))
+        .map(|role| {
+            let schema = schema(&rusuna, role, &pool, &subscriptions);
+            (role.to_string(), schema)
+        })
         .collect();
     let app = axum::Router::new().route(
         "/api/graphql",
-        rusuna_axum::graphql(schemas, |parts: &Parts| {
-            let result = session(parts).map_err(IntoResponse::into_response);
+        rusuna_axum::graphql(schemas.clone(), |parts: &Parts| {
+            let result = session(|name| parts.headers.get(name).and_then(|v| v.to_str().ok()))
+                .map_err(IntoResponse::into_response);
             async move { result }
-        }),
+        })
+        .merge(rusuna_axum::graphql_ws(
+            schemas,
+            |_: &Parts, payload: serde_json::Value| {
+                let result = session(|name| payload["headers"][name].as_str())
+                    .map_err(|(_, message)| message.to_string());
+                async move { result }
+            },
+        )),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await

@@ -813,11 +813,8 @@ pub(super) fn parse(
             "provide the name of an existing query operation",
         )
     })?;
-    if operation.node.ty == OperationType::Subscription || !operation.node.directives.is_empty() {
-        return Err(error(
-            operation.pos,
-            "query and mutation operations without operation directives are supported",
-        ));
+    if !operation.node.directives.is_empty() {
+        return Err(error(operation.pos, "operation directives are unsupported"));
     }
     let values = variables
         .as_object()
@@ -878,7 +875,7 @@ pub(super) fn parse(
             },
         );
     }
-    context.fields(
+    let fields = context.fields(
         &operation.node.selection_set,
         if operation.node.ty == OperationType::Mutation {
             "Mutation"
@@ -886,7 +883,14 @@ pub(super) fn parse(
             &schema.query
         },
         0,
-    )
+    )?;
+    if operation.node.ty == OperationType::Subscription && fields.len() != 1 {
+        return Err(error(
+            operation.pos,
+            "a subscription selects exactly one root field",
+        ));
+    }
+    Ok(fields)
 }
 
 fn row_values(

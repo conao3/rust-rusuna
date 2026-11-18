@@ -13,11 +13,13 @@ categories = ["database", "web-programming::http-server"]
 [dependencies]
 async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }
-axum = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 rusuna = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 rusuna-async-graphql = { workspace = true }
-serde_json = { workspace = true }
+rusuna-sqlx = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }

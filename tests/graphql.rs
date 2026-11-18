@@ -36,6 +36,63 @@ fn expanded_schema_matches_the_fixture_and_parses() {
 }
 
 #[test]
+fn a_subscription_compiles_to_the_statement_of_the_same_query() {
+    let schema = common::schema();
+    let session = rusuna::Session::new("admin");
+    for case in common::cases() {
+        let query = std::fs::read_to_string(format!(
+            "{}/tests/fixtures/queries/{}.graphql",
+            env!("CARGO_MANIFEST_DIR"),
+            case.name
+        ))
+        .unwrap();
+        assert!(query.starts_with("query"), "{}", case.name);
+        let subscription = query.replacen("query", "subscription", 1);
+        assert_eq!(
+            schema
+                .compile(&subscription, &json!({}), None, &session)
+                .unwrap(),
+            schema.compile(&query, &json!({}), None, &session).unwrap(),
+            "{}",
+            case.name
+        );
+    }
+    let schema = Schema::from_sdl(include_str!("fixtures/permissions.graphql")).unwrap();
+    let session = rusuna::Session::new("user").variable("user_id", rusuna::Value::Int(3));
+    let text = "($limit: Int!) { article(limit: $limit, order_by: {id: asc}) { id title } }";
+    assert_eq!(
+        schema
+            .compile(
+                &format!("subscription S{text}"),
+                &json!({"limit": 2}),
+                None,
+                &session
+            )
+            .unwrap(),
+        schema
+            .compile(
+                &format!("query Q{text}"),
+                &json!({"limit": 2}),
+                None,
+                &session
+            )
+            .unwrap()
+    );
+    let sdl = schema.expanded_sdl("user").unwrap();
+    assert!(
+        sdl.starts_with("schema { query: Query mutation: Mutation subscription: Subscription }")
+    );
+    assert!(sdl.contains("type Subscription {\n  author("));
+    assert!(sdl.contains("\n  article(where: article_bool_exp"));
+    assert!(
+        !schema
+            .expanded_sdl("visitor")
+            .unwrap()
+            .contains("  article(")
+    );
+}
+
+#[test]
 fn variables_defaults_fragments_and_directives_compile_to_the_same_statements() {
     let schema = common::schema();
     let expected = schema
@@ -222,7 +279,11 @@ fn typed_inputs_and_unsupported_operations_are_rejected() {
         "query($v: Int!) { author(limit: $v) { id } }",
         "{ author(limit: $v) { id } }",
         "mutation { author { id } }",
-        "subscription { author { id } }",
+        "subscription { author { id } article { id } }",
+        "subscription { author { id } author_aggregate { aggregate { count } } }",
+        "subscription { a: author { id } b: author { id } }",
+        "subscription { author { id } @skip(if: true) }",
+        "subscription { insert_author_one(object: {id: 1}) { id } }",
         "{ __schema { queryType { name } } }",
         "{ __type(name: \"author\") { name } }",
         "query A { author { id } } query B { article { id } }",

@@ -13,6 +13,7 @@ categories = ["database", "web-programming"]
 [dependencies]
 async-graphql = { workspace = true }
 async-trait = "0.1"
+futures-util = { version = "0.3", default-features = false }
 rusuna = { workspace = true }
 rusuna-sqlx = { workspace = true }
 serde_json = { workspace = true }

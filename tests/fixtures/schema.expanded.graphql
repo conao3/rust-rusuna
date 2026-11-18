@@ -1,4 +1,4 @@
-schema { query: Query mutation: Mutation }
+schema { query: Query mutation: Mutation subscription: Subscription }
 
 input Boolean_comparison_exp {
   _eq: Boolean
@@ -120,6 +120,23 @@ input String_comparison_exp {
   _nlike: String
   _ilike: String
   _nilike: String
+}
+
+type Subscription {
+  author(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): [author!]!
+  author_aggregate(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): author_aggregate!
+  article(where: article_bool_exp, order_by: [article_order_by!], limit: Int, offset: Int): [article!]!
+  article_aggregate(where: article_bool_exp, order_by: [article_order_by!], limit: Int, offset: Int): article_aggregate!
+  comment(where: comment_bool_exp, order_by: [comment_order_by!], limit: Int, offset: Int): [comment!]!
+  comment_aggregate(where: comment_bool_exp, order_by: [comment_order_by!], limit: Int, offset: Int): comment_aggregate!
+  revision(where: revision_bool_exp, order_by: [revision_order_by!], limit: Int, offset: Int): [revision!]!
+  revision_aggregate(where: revision_bool_exp, order_by: [revision_order_by!], limit: Int, offset: Int): revision_aggregate!
+  people(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): [author!]!
+  people_stats(where: author_bool_exp, order_by: [author_order_by!], limit: Int, offset: Int): author_aggregate!
+  article_by_pk(id: Int!): article
+  author_by_pk(id: Int!): author
+  comment_by_pk(id: Int!): comment
+  revision_by_pk(article_id: Int!, author_id: Int!, note: String!): revision
 }
 
 type article {

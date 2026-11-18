@@ -452,8 +452,15 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     }
     let (mutation_roots, primary_roots) =
         writes::definitions(&tables, &scalar_fields, &mut defs, &query)?;
+    let subscription = defs[&query].replacen(&format!("type {query} "), "type Subscription ", 1);
+    insert(
+        &mut defs,
+        "Subscription".into(),
+        subscription,
+        objects[&query].pos,
+    )?;
     let sdl = format!(
-        "schema {{ query: {query} mutation: Mutation }}\n\n{}",
+        "schema {{ query: {query} mutation: Mutation subscription: Subscription }}\n\n{}",
         defs.values().cloned().collect::<Vec<_>>().join("\n")
     );
     let expanded = parse_schema(&sdl).map_err(syntax)?;
@@ -612,7 +619,7 @@ pub(super) fn for_role(
     let names: BTreeSet<_> = document.types.keys().cloned().collect();
     for (name, kind) in &mut document.types {
         if let TypeKind::Object(object) = kind {
-            if name == &document.query {
+            if name == &document.query || name == "Subscription" {
                 object.fields.retain(|f| {
                     visible
                         .roots
@@ -631,7 +638,11 @@ pub(super) fn for_role(
     }
     document.targets.retain(|(parent, field), _| matches!(document.types.get(parent), Some(TypeKind::Object(o)) if o.fields.iter().any(|f| f.node.name.node == field.as_str())));
     let mut reachable = BTreeSet::new();
-    let mut pending = vec![document.query.clone(), "Mutation".to_string()];
+    let mut pending = vec![
+        document.query.clone(),
+        "Mutation".to_string(),
+        "Subscription".to_string(),
+    ];
     while let Some(name) = pending.pop() {
         if !reachable.insert(name.clone()) {
             continue;
@@ -724,7 +735,7 @@ pub(super) fn for_role(
         });
     }
     document.sdl = format!(
-        "schema {{ query: {} mutation: Mutation }}\n\n{}",
+        "schema {{ query: {} mutation: Mutation subscription: Subscription }}\n\n{}",
         document.query,
         rendered.join("\n")
     );
