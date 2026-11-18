@@ -774,6 +774,7 @@ inductive Part where
 inductive Body where
   | relation
   | statement (parts : List Part) (parameters : List String)
+  | function (schema name : String) (parameters : List String)
   deriving DecidableEq, Repr
 
 structure Table where
@@ -793,6 +794,7 @@ structure RootField where
   field : String
   target : String
   kind : RootKind
+  body : Option Body
   deriving DecidableEq, Repr
 
 inductive Operand where
@@ -893,6 +895,7 @@ def argumentValid (v : Value) : Bool := v == .null || scalarValid v
 def bodyParameters : Body → List String
   | .relation => []
   | .statement _ parameters => parameters
+  | .function _ _ parameters => parameters
 
 def partValid (parameters : List String) : Part → Bool
   | .text _ => true
@@ -901,6 +904,7 @@ def partValid (parameters : List String) : Part → Bool
 def bodyValid : Body → Bool
   | .relation => true
   | .statement parts parameters => parts.all (partValid parameters)
+  | .function _ _ _ => true
 
 def acceptsArguments (body : Body) (arguments : List (String × Value)) : Bool :=
   bodyValid body && arguments.map (·.1) == bodyParameters body && arguments.all fun a => argumentValid a.2
@@ -909,9 +913,29 @@ def partToks (arguments : List (String × Value)) : Part → List Tok
   | .text sql => [.lex (.raw sql)]
   | .arg name => [.param ((arguments.lookup name).getD .null)]
 
+def namedToks : List (String × Value) → List Tok
+  | [] => []
+  | [(name, value)] => [.lex (.ident name), .lex (.raw "=>"), .param value]
+  | (name, value) :: rest => [.lex (.ident name), .lex (.raw "=>"), .param value, .lex (.raw ",")] ++ namedToks rest
+
+def callToks (schema name : String) (arguments : List (String × Value)) : List Tok :=
+  lift [sourceLex schema name, .raw "("] ++ namedToks arguments ++ lift [.raw ")"]
+
+theorem namedToks_pair (name : String) (value : Value) (next : String × Value) (rest : List (String × Value)) :
+    namedToks ((name, value) :: next :: rest) =
+      [.lex (.ident name), .lex (.raw "=>"), .param value, .lex (.raw ",")] ++ namedToks (next :: rest) := rfl
+
+theorem namedToks_single (name : String) (value : Value) :
+    namedToks [(name, value)] = [.lex (.ident name), .lex (.raw "=>"), .param value] := rfl
+
+theorem callToks_exact (schema name : String) (arguments : List (String × Value)) :
+    callToks schema name arguments = lift [sourceLex schema name, .raw "("] ++ namedToks arguments ++ lift [.raw ")"] := rfl
+
 def bodySource (table : Table) (arguments : List (String × Value)) : Body → Source
   | .relation => .table table.schema table.table
   | .statement parts _ => .tokens (lift [.raw "("] ++ parts.flatMap (partToks arguments) ++ lift [.raw ")"])
+  | .function schema name parameters =>
+    .tokens (callToks schema name (parameters.map fun p => (p, (arguments.lookup p).getD .null)))
 
 def resolveSource (table : Table) (body : Body) (arguments : List (String × Value)) : Except Error Source :=
   if acceptsArguments body arguments then .ok (bodySource table arguments body)
@@ -922,6 +946,7 @@ def argumentValues (arguments : List (String × Value)) : Body → List Value
   | .statement parts _ => parts.filterMap fun p => match p with
     | .text _ => none
     | .arg name => some ((arguments.lookup name).getD .null)
+  | .function _ _ parameters => parameters.map fun p => (arguments.lookup p).getD .null
 
 def partShape : Part → Tok
   | .text sql => .lex (.raw sql)
@@ -930,13 +955,61 @@ def partShape : Part → Tok
 def templateToks : Body → List Tok
   | .relation => []
   | .statement parts _ => lift [.raw "("] ++ parts.map partShape ++ lift [.raw ")"]
+  | .function schema name parameters => callToks schema name (parameters.map fun p => (p, .int 0))
 
-def sourceDeclared (table : Table) (source : Source) : Bool :=
-  match table.body, source with
+def sourceFits (table : Table) (body : Body) (source : Source) : Bool :=
+  match body, source with
   | .relation, .table schema name => schema == table.schema && name == table.table
   | .relation, .tokens _ => false
   | _, .table _ _ => false
   | body, .tokens toks => toks.map eraseTok == templateToks body
+
+def tableBodies (schema : Schema) (table : Table) : List Body :=
+  table.body :: schema.roots.filterMap fun root => if root.target = table.name then root.body else none
+
+def sourceDeclared (schema : Schema) (table : Table) (source : Source) : Bool :=
+  (tableBodies schema table).any fun body => sourceFits table body source
+
+theorem tableBodies_iff (schema : Schema) (table : Table) (body : Body) :
+    body ∈ tableBodies schema table ↔
+      body = table.body ∨ ∃ root ∈ schema.roots, root.target = table.name ∧ root.body = some body := by
+  simp only [tableBodies, List.mem_cons, List.mem_filterMap]
+  constructor
+  · rintro (h | ⟨root, member, h⟩)
+    · exact Or.inl h
+    · split at h
+      · exact Or.inr ⟨root, member, by assumption, h⟩
+      · cases h
+  · rintro (h | ⟨root, member, target, h⟩)
+    · exact Or.inl h
+    · exact Or.inr ⟨root, member, by simp [target, h]⟩
+
+theorem sourceDeclared_iff (schema : Schema) (table : Table) (source : Source) :
+    sourceDeclared schema table source = true ↔
+      ∃ body ∈ tableBodies schema table, sourceFits table body source = true := by
+  simp [sourceDeclared]
+
+theorem namedToks_values : (arguments : List (String × Value)) →
+    (namedToks arguments).filterMap tokValue = arguments.map (·.2)
+  | [] => rfl
+  | [(_, _)] => rfl
+  | (n, v) :: b :: rest => by
+    have ih := namedToks_values (b :: rest)
+    rw [show namedToks ((n, v) :: b :: rest) =
+      [.lex (.ident n), .lex (.raw "=>"), .param v, .lex (.raw ",")] ++ namedToks (b :: rest) from rfl]
+    simp only [List.cons_append, List.nil_append, List.filterMap_cons, tokValue, ih]
+    rfl
+
+theorem namedToks_erase : (arguments : List (String × Value)) →
+    (namedToks arguments).map eraseTok = namedToks (arguments.map fun a => (a.1, .int 0))
+  | [] => rfl
+  | [(_, _)] => rfl
+  | (n, v) :: b :: rest => by
+    have ih := namedToks_erase (b :: rest)
+    rw [show namedToks ((n, v) :: b :: rest) =
+      [.lex (.ident n), .lex (.raw "=>"), .param v, .lex (.raw ",")] ++ namedToks (b :: rest) from rfl]
+    simp only [List.map_append, ih, List.map_cons]
+    rfl
 
 theorem argumentValid_iff (v : Value) : argumentValid v = true ↔ v = .null ∨ scalarValid v = true := by
   simp [argumentValid]
@@ -961,6 +1034,8 @@ theorem bodySource_values (table : Table) (arguments : List (String × Value)) (
     induction parts with
     | nil => rfl
     | cons p ps ih => cases p <;> simp_all [partToks, tokValue, List.filterMap_cons]
+  | function schema name parameters =>
+    simp [bodySource, sourceValues, argumentValues, callToks, lift_values, namedToks_values]
 
 theorem partToks_erase (arguments : List (String × Value)) (parts : List Part) :
     (parts.flatMap (partToks arguments)).map eraseTok = parts.map partShape := by
@@ -968,12 +1043,14 @@ theorem partToks_erase (arguments : List (String × Value)) (parts : List Part) 
   | nil => rfl
   | cons p ps ih => cases p <;> simp_all [partToks, partShape, eraseTok]
 
-theorem bodySource_declared (table : Table) (arguments : List (String × Value)) :
-    sourceDeclared table (bodySource table arguments table.body) = true := by
-  cases h : table.body with
-  | relation => simp [sourceDeclared, bodySource, h]
+theorem bodySource_fits (table : Table) (arguments : List (String × Value)) (body : Body) :
+    sourceFits table body (bodySource table arguments body) = true := by
+  cases body with
+  | relation => simp [sourceFits, bodySource]
   | statement parts parameters =>
-    simp [sourceDeclared, bodySource, h, templateToks, lift_erase, partToks_erase]
+    simp [sourceFits, bodySource, templateToks, lift_erase, partToks_erase]
+  | function schema name parameters =>
+    simp [sourceFits, bodySource, templateToks, callToks, lift_erase, namedToks_erase, Function.comp_def]
 
 theorem argumentValues_empty (body : Body) (h : acceptsArguments body [] = true) :
     argumentValues [] body = [] := by
@@ -989,6 +1066,12 @@ theorem argumentValues_empty (body : Body) (h : acceptsArguments body [] = true)
     cases p with
     | text sql => rfl
     | arg name => simpa [partValid] using valid _ member
+  | function schema name parameters =>
+    simp only [acceptsArguments, bodyValid, bodyParameters, List.map_nil, Bool.and_eq_true,
+      beq_iff_eq] at h
+    obtain ⟨⟨_, empty⟩, _⟩ := h
+    subst empty
+    rfl
 
 theorem resolveSource_ok (table : Table) (body : Body) (arguments : List (String × Value)) (source : Source)
     (h : resolveSource table body arguments = .ok source) :
@@ -1190,7 +1273,7 @@ def resolveSelection (schema : Schema) (root : Selection) : Except Error Query :
     | some table =>
       if !selectionValid (root.children.map (·.alias)) then .error (.invalidSelection table.name)
       else
-        match resolveScan schema table table.body root.arguments root.conds root.order root.limit root.offset with
+        match resolveScan schema table (field.body.getD table.body) root.arguments root.conds root.order root.limit root.offset with
         | .error e => .error e
         | .ok scan =>
           let kind := match field.kind with
@@ -1219,7 +1302,7 @@ def rootValues (schema : Schema) (root : Selection) : List Value :=
   | none => []
   | some field => match findTable schema field.target with
     | none => []
-    | some table => argumentValues root.arguments table.body
+    | some table => argumentValues root.arguments (field.body.getD table.body)
 
 mutual
 theorem resolveExpression_values (schema : Schema) (table : Table) (depth : Nat)
@@ -1344,7 +1427,7 @@ theorem runSelection_params (schema : Schema) (root : Selection) :
     simp [hq]
 
 def scanDeclared (schema : Schema) (name : String) (source : Source) : Bool :=
-  schema.tables.any fun t => t.name == name && sourceDeclared t source
+  schema.tables.any fun t => t.name == name && sourceDeclared schema t source
 
 mutual
 def expressionDeclared (schema : Schema) : Predicate → Bool
@@ -1359,11 +1442,26 @@ end
 
 theorem source_declared (schema : Schema) (name : String) (table : Table) (body : Body)
     (arguments : List (String × Value)) (source : Source) (hfind : findTable schema name = some table)
-    (hbody : body = table.body) (h : resolveSource table body arguments = .ok source) :
+    (hbody : body ∈ tableBodies schema table) (h : resolveSource table body arguments = .ok source) :
     scanDeclared schema table.name source = true := by
   obtain ⟨_, rfl⟩ := resolveSource_ok _ _ _ _ h
-  subst hbody
-  exact List.any_eq_true.mpr ⟨table, List.mem_of_find?_eq_some hfind, by simp [bodySource_declared]⟩
+  refine List.any_eq_true.mpr ⟨table, List.mem_of_find?_eq_some hfind, ?_⟩
+  simp only [Bool.and_eq_true, beq_self_eq_true, true_and, sourceDeclared, List.any_eq_true]
+  exact ⟨body, hbody, bodySource_fits _ _ _⟩
+
+theorem body_declared (schema : Schema) (table : Table) : table.body ∈ tableBodies schema table := by
+  simp [tableBodies]
+
+theorem root_body (schema : Schema) (name : String) (field : RootField) (table : Table)
+    (hfield : schema.roots.find? (·.field = name) = some field) (htable : findTable schema field.target = some table) :
+    field.body.getD table.body ∈ tableBodies schema table := by
+  have hmem := List.mem_of_find?_eq_some hfield
+  have hname : table.name = field.target := by simpa using List.find?_some htable
+  cases hb : field.body with
+  | none => simp [tableBodies]
+  | some b =>
+    simp only [Option.getD_some, tableBodies, List.mem_cons, List.mem_filterMap]
+    exact Or.inr ⟨field, hmem, by simp [hname, hb]⟩
 
 mutual
 theorem resolveExpression_declared (schema : Schema) (table : Table) (depth : Nat)
@@ -1379,7 +1477,7 @@ theorem resolveExpression_declared (schema : Schema) (table : Table) (depth : Na
     | rfl
     | exact resolveExpression_declared _ _ _ _ _ (by assumption)
     | exact resolveExpressions_declared _ _ _ _ _ (by assumption)
-    | exact ⟨source_declared _ _ _ _ _ _ (by assumption) rfl (by assumption),
+    | exact ⟨source_declared _ _ _ _ _ _ (by assumption) (body_declared _ _) (by assumption),
         resolveExpression_declared _ _ _ _ _ (by assumption)⟩
 theorem resolveExpressions_declared (schema : Schema) (table : Table) (depth : Nat)
     (es : List (Expression String Value)) (out : List (Predicate))
@@ -1418,10 +1516,11 @@ end
 
 def queryScans (query : Query) : List Scan := query.scan :: nodesScans query.children
 
-theorem findTable_declared (schema : Schema) (name : String) (table : Table) (arguments : List (String × Value))
+theorem findTable_declared (schema : Schema) (name : String) (table : Table) (body : Body)
+    (arguments : List (String × Value))
     (conds : Option (Expression String Value)) (order : List Order) (limit offset : Option Nat) (scan : Scan)
-    (hfind : findTable schema name = some table)
-    (hscan : resolveScan schema table table.body arguments conds order limit offset = .ok scan) : declared schema scan = true := by
+    (hfind : findTable schema name = some table) (hbody : body ∈ tableBodies schema table)
+    (hscan : resolveScan schema table body arguments conds order limit offset = .ok scan) : declared schema scan = true := by
   simp only [resolveScan] at hscan
   split at hscan
   · cases hscan
@@ -1433,7 +1532,7 @@ theorem findTable_declared (schema : Schema) (name : String) (table : Table) (ar
       · cases hscan
       · cases hscan
         simp only [declared, Scan.name, Scan.source, Scan.conds, Bool.and_eq_true]
-        exact ⟨source_declared _ _ _ _ _ _ hfind rfl hsource, resolveFilter_declared _ _ _ _ hout⟩
+        exact ⟨source_declared _ _ _ _ _ _ hfind hbody hsource, resolveFilter_declared _ _ _ _ hout⟩
 
 mutual
 theorem resolveNode_declared (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
@@ -1448,7 +1547,7 @@ theorem resolveNode_declared (schema : Schema) (table : Table) (depth : Nat) (mo
   all_goals first
     | rfl
     | exact resolveNodes_declared _ _ _ _ _ _ _ (by assumption)
-    | exact ⟨findTable_declared _ _ _ _ _ _ _ _ _ (by assumption) (by assumption),
+    | exact ⟨findTable_declared _ _ _ _ _ _ _ _ _ _ (by assumption) (body_declared _ _) (by assumption),
         resolveNodes_declared _ _ _ _ _ _ _ (by assumption)⟩
 theorem resolveNodes_declared (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
     (scanOrder : List (String × Direction)) (ss : List Selection)
@@ -1471,8 +1570,9 @@ theorem resolveSelection_declared (schema : Schema) (root : Selection) :
   · rename_i query h
     simp only [resolveSelection] at h
     repeat' first | cases h | split at h
+    rename_i field hfield _ table htable _ _ _ _ _ _ _
     simp only [queryScans, List.all_cons, Bool.and_eq_true]
-    exact ⟨findTable_declared _ _ _ _ _ _ _ _ _ (by assumption) (by assumption),
+    exact ⟨findTable_declared _ _ _ _ _ _ _ _ _ _ htable (root_body _ _ _ _ hfield htable) (by assumption),
       resolveNodes_declared _ _ _ _ _ _ _ (by assumption)⟩
   · trivial
 
@@ -1575,7 +1675,7 @@ def acceptsSelection (schema : Schema) (root : Selection) : Bool :=
   | some field => match findTable schema field.target with
     | none => false
     | some table => selectionValid (root.children.map (·.alias)) &&
-      acceptsScan schema table table.body root.arguments root.conds root.order &&
+      acceptsScan schema table (field.body.getD table.body) root.arguments root.conds root.order &&
       acceptsNodes schema table 0 (if field.kind = .aggregate then .aggregate else .row) root.children
 
 theorem success_map (result : Except ε α) (f : α → β) :
@@ -1782,7 +1882,7 @@ def hasConjunct (condition expression : Predicate) : Bool :=
 def scanPermitted (schema : Schema) (session : Session) (scan : Scan) : Bool :=
   match findTable schema scan.name with
   | none => false
-  | some table => sourceDeclared table scan.source &&
+  | some table => sourceDeclared schema table scan.source &&
     (session.role == "admin" || match roleCondition schema session scan.name with
       | .error _ => false
       | .ok condition => hasConjunct condition scan.conds)
@@ -2224,18 +2324,19 @@ theorem run_params (schema : Schema) (session : Session) (root : Selection) :
   · rename_i e hq
     simp [hq, Except.map]
 
-theorem sourceDeclared_iff (table : Table) (source : Source) :
-    sourceDeclared table source = true ↔
-      (table.body = .relation ∧ source = .table table.schema table.table) ∨
-        (table.body ≠ .relation ∧ (sourceToks source).map eraseTok = templateToks table.body) := by
-  cases h : table.body <;> cases source <;>
-    simp [sourceDeclared, h, sourceToks, templateToks, lift, eraseTok, and_comm]
+theorem sourceFits_iff (table : Table) (body : Body) (source : Source) :
+    sourceFits table body source = true ↔
+      (body = .relation ∧ source = .table table.schema table.table) ∨
+        (body ≠ .relation ∧ (sourceToks source).map eraseTok = templateToks body) := by
+  cases body <;> cases source <;>
+    simp [sourceFits, sourceToks, templateToks, callToks, lift, eraseTok, and_comm]
 
 theorem resolve_declared (schema : Schema) (session : Session) (root : Selection)
     (query : Query) (h : resolve schema session root = .ok query) :
     ∀ scan ∈ allScans query, ∃ table ∈ schema.tables, table.name = scan.name ∧
-      ((table.body = .relation ∧ scan.source = .table table.schema table.table) ∨
-        (table.body ≠ .relation ∧ (sourceToks scan.source).map eraseTok = templateToks table.body)) := by
+      ∃ body ∈ tableBodies schema table,
+        ((body = .relation ∧ scan.source = .table table.schema table.table) ∨
+          (body ≠ .relation ∧ (sourceToks scan.source).map eraseTok = templateToks body)) := by
   intro scan member
   have permitted := List.all_eq_true.mp (resolve_permissions schema session root query h).1 scan member
   simp only [scanPermitted] at permitted
@@ -2244,8 +2345,9 @@ theorem resolve_declared (schema : Schema) (session : Session) (root : Selection
   · rename_i table found
     have mem := List.mem_of_find?_eq_some found
     have name := List.find?_some found
-    simp only [Bool.and_eq_true] at permitted
-    exact ⟨table, mem, by simpa using name, (sourceDeclared_iff table scan.source).mp permitted.1⟩
+    simp only [Bool.and_eq_true, sourceDeclared, List.any_eq_true] at permitted
+    obtain ⟨body, member, fits⟩ := permitted.1
+    exact ⟨table, mem, by simpa using name, body, member, (sourceFits_iff table body scan.source).mp fits⟩
 
 theorem columnPermitted_origin (schema : Schema) (session : Session) (name column : String)
     (h : columnPermitted schema session name column = true) (role : session.role ≠ "admin") :
@@ -2843,7 +2945,7 @@ theorem runWrite_accepts (schema : Schema) (catalog : WriteCatalog) (session : S
 def runPrimaryKey (schema : Schema) (catalog : WriteCatalog) (session : Session) (target : String)
     (values : List (String × Value)) (children : List Selection) : Except Error Compiled := do
   let conds ← keyCondition catalog target values
-  let root : RootField := ⟨"by_pk", target, .single⟩
+  let root : RootField := ⟨"by_pk", target, .single, none⟩
   let query ← resolve { schema with roots := [root] } session ⟨"by_pk", "by_pk", [], some conds, [], none, none, children⟩
   return render (lift [.raw "WITH", .ident (rName 0), .raw "AS ("] ++ scanToks query.scan [.raw "true"] ++
     lift [.raw ") SELECT"] ++ returningToks true query.children)

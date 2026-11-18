@@ -12,7 +12,7 @@ pub(crate) fn argument_name_valid(name: &str) -> bool {
         && !RESERVED.contains(&name)
 }
 
-pub(crate) fn parse(sql: &str, arguments: &[String]) -> Result<Vec<SqlPart>, String> {
+pub(crate) fn check_arguments(arguments: &[String]) -> Result<(), String> {
     if let Some(name) = arguments.iter().find(|a| !argument_name_valid(a)) {
         return Err(format!(
             "argument name `{name}` must be a GraphQL name other than {}",
@@ -27,6 +27,11 @@ pub(crate) fn parse(sql: &str, arguments: &[String]) -> Result<Vec<SqlPart>, Str
     {
         return Err("argument names must be distinct".into());
     }
+    Ok(())
+}
+
+pub(crate) fn parse(sql: &str, arguments: &[String]) -> Result<Vec<SqlPart>, String> {
+    check_arguments(arguments)?;
     if sql.trim().is_empty() {
         return Err("the statement is empty".into());
     }

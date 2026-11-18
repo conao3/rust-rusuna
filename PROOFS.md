@@ -65,12 +65,21 @@ theorem unquote_quoteStringChars (name : List Char) : unquoteStringChars (quoteS
 theorem resolve_declared (schema : Schema) (session : Session) (root : Selection)
     (query : Query) (h : resolve schema session root = .ok query) :
     ∀ scan ∈ allScans query, ∃ table ∈ schema.tables, table.name = scan.name ∧
-      ((table.body = .relation ∧ scan.source = .table table.schema table.table) ∨
-        (table.body ≠ .relation ∧ (sourceToks scan.source).map eraseTok = templateToks table.body))
+      ∃ body ∈ tableBodies schema table,
+        ((body = .relation ∧ scan.source = .table table.schema table.table) ∨
+          (body ≠ .relation ∧ (sourceToks scan.source).map eraseTok = templateToks body))
+```
+
+`tableBodies` is the body of the type and the function bodies of the root fields that return
+it:
+
+```lean
+def tableBodies (schema : Schema) (table : Table) : List Body :=
+  table.body :: schema.roots.filterMap fun root => if root.target = table.name then root.body else none
 ```
 
 `templateToks` is the declared statement of a native query with each `{{name}}` as a
-placeholder:
+placeholder, or the declared call of a function with a placeholder for each argument:
 
 ```lean
 def partShape : Part → Tok
@@ -80,10 +89,12 @@ def partShape : Part → Tok
 def templateToks : Body → List Tok
   | .relation => []
   | .statement parts _ => lift [.raw "("] ++ parts.map partShape ++ lift [.raw ")"]
+  | .function schema name parameters => callToks schema name (parameters.map fun p => (p, .int 0))
 ```
 
 For a table, the conclusion is the one of a scan of the declared SQL table. For a native
-query, the scan's SQL text equals the declared statement and only parameters differ.
+query or a function, the scan's SQL text equals the declared statement or call and only
+parameters differ.
 
 ```lean
 theorem distinct_iff (aliases : List String) : distinct aliases = true ↔ aliases.Nodup
@@ -217,7 +228,7 @@ theorem resolveWrite_declared (schema : Schema) (catalog : WriteCatalog) (sessio
 
 ## Conditions restated next to their implementations
 
-Thirty-one boundary statements. The selection acceptance equalities compare success
+Thirty-six boundary statements. The selection acceptance equalities compare success
 with a separate Boolean traversal. Their seven expression, ordering, scan and node
 lemmas and the existential success form below support the same conditions and are
 not counted again.
@@ -334,10 +345,38 @@ theorem sourceToks_tokens (toks : List Tok) : sourceToks (.tokens toks) = toks
 ```
 
 ```lean
-theorem sourceDeclared_iff (table : Table) (source : Source) :
-    sourceDeclared table source = true ↔
-      (table.body = .relation ∧ source = .table table.schema table.table) ∨
-        (table.body ≠ .relation ∧ (sourceToks source).map eraseTok = templateToks table.body)
+theorem sourceFits_iff (table : Table) (body : Body) (source : Source) :
+    sourceFits table body source = true ↔
+      (body = .relation ∧ source = .table table.schema table.table) ∨
+        (body ≠ .relation ∧ (sourceToks source).map eraseTok = templateToks body)
+```
+
+```lean
+theorem sourceDeclared_iff (schema : Schema) (table : Table) (source : Source) :
+    sourceDeclared schema table source = true ↔
+      ∃ body ∈ tableBodies schema table, sourceFits table body source = true
+```
+
+```lean
+theorem tableBodies_iff (schema : Schema) (table : Table) (body : Body) :
+    body ∈ tableBodies schema table ↔
+      body = table.body ∨ ∃ root ∈ schema.roots, root.target = table.name ∧ root.body = some body
+```
+
+```lean
+theorem namedToks_pair (name : String) (value : Value) (next : String × Value) (rest : List (String × Value)) :
+    namedToks ((name, value) :: next :: rest) =
+      [.lex (.ident name), .lex (.raw "=>"), .param value, .lex (.raw ",")] ++ namedToks (next :: rest)
+```
+
+```lean
+theorem namedToks_single (name : String) (value : Value) :
+    namedToks [(name, value)] = [.lex (.ident name), .lex (.raw "=>"), .param value]
+```
+
+```lean
+theorem callToks_exact (schema name : String) (arguments : List (String × Value)) :
+    callToks schema name arguments = lift [sourceLex schema name, .raw "("] ++ namedToks arguments ++ lift [.raw ")"]
 ```
 
 ```lean
@@ -466,7 +505,7 @@ def acceptsSelection (schema : Schema) (root : Selection) : Bool :=
   | some field => match findTable schema field.target with
     | none => false
     | some table => selectionValid (root.children.map (·.alias)) &&
-      acceptsScan schema table table.body root.arguments root.conds root.order &&
+      acceptsScan schema table (field.body.getD table.body) root.arguments root.conds root.order &&
       acceptsNodes schema table 0 (if field.kind = .aggregate then .aggregate else .row) root.children
 ```
 
@@ -486,15 +525,17 @@ keys and the appended permission conjunct are excluded. `documentValues` walks t
 raw resolved plan in document order and inserts each scan's permission values after
 its user filter; it is not an independent selection acceptance checker.
 For `admin`, `documentValues` is `rootValues schema root ++ selectionValues root`: the values of
-the root's native query arguments, one per `{{name}}` marker in the order of the markers, then
-the filter values of the selection. `bodySource_values` connects the filled statement to
+the root's arguments, one per `{{name}}` marker of a native query in the order of the markers
+or one per declared argument of a function, then the filter values of the selection. `bodySource_values` connects the filled statement to
 `argumentValues`. Arguments are root-only: resolution rejects arguments on any other
 selection, and relationship and `EXISTS` scans read a statement only when it has no
 arguments.
 
-The statement of a native query is trusted input. `resolve_declared` shows that the scan's
-text is the declared statement and `compile_erase` that its arguments do not change the SQL
-text; nothing interprets the statement itself.
+The statement of a native query and the function of `@function` are trusted input.
+`resolve_declared` shows that the scan's text is the declared statement or call and
+`compile_erase` that its arguments do not change the SQL text; nothing interprets the
+statement or the function itself. A root field's body replaces the body of its type for the
+root scan only (`field.body.getD table.body`), and its rows keep the permissions of the type.
 
 `resolveSelection` and `runSelection` have a complete success characterization for
 the schema supplied to them. The choice of an error variant is outside that
@@ -559,18 +600,18 @@ is an instance of `slots_numbered`. These supporting statements are not counted 
 
 ## Mutation audit
 
-The strict audit targets thirty-eight functions: 236 mutations, 161 killed, zero holes,
-23 equivalent on sampled inputs, zero untested, zero timed out and 52 stillborn.
+The strict audit targets forty-two functions: 266 mutations, 182 killed, zero holes,
+23 equivalent on sampled inputs, zero untested, zero timed out and 61 stillborn.
 `make survey` reports the functions outside the strict audit:
 
 | Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
 |---|---|---|---|---|---|---|---|---|
-| SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
-| Selection resolution | 2 | 136 | 40 | 3 | 14 | 0 | 25 | 54 |
-| Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
+| SQL emission | 8 | 180 | 26 | 101 | 2 | 0 | 0 | 51 |
+| Selection resolution | 2 | 139 | 40 | 13 | 30 | 0 | 0 | 56 |
+| Permission resolution | 3 | 2 | 0 | 1 | 1 | 0 | 0 | 0 |
 | Write emission | 2 | 87 | 0 | 73 | 10 | 0 | 0 | 4 |
-| Write resolution | 3 | 56 | 1 | 19 | 32 | 0 | 0 | 4 |
-| Total | 18 | 456 | 64 | 196 | 58 | 0 | 25 | 113 |
+| Write resolution | 3 | 57 | 1 | 20 | 32 | 0 | 0 | 4 |
+| Total | 18 | 465 | 67 | 208 | 75 | 0 | 0 | 115 |
 
 The survey uses 1000 samples and a 30-second deadline per mutation. Equivalence is sampled output equality, not a proved equivalence.
 
@@ -578,7 +619,7 @@ The write emission group (`writeBodyToks`, `emitWrite`) is checked by `emitWrite
 which fixes placeholder numbering only. No write statement corresponds to
 `compile_params`, so its 73 holes change SQL text or drop and reorder parameters. The write
 resolution group (`resolveWriteRaw`, `resolveWrite`, `runWrite`) is checked by
-`resolveWrite_secure` and `runWrite_accepts`; its 19 holes change which inputs are
+`resolveWrite_secure` and `runWrite_accepts`; its 20 holes change which inputs are
 accepted, because these statements constrain successful plans rather than write
 acceptance. `runWrite := fun _ _ _ _ => default` is killed by `runWrite_accepts`.
 

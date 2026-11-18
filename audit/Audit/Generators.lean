@@ -45,6 +45,7 @@ def genBody : Gen Body := do
   match (← Gen.choose Nat 0 5 (by omega)).val with
   | 0 => pure (.statement (← genList 3 genPart) (← genParameters))
   | 1 => pure (.statement [.text "SELECT * FROM t"] [])
+  | 2 => pure (.function (← genOf ["public", "s"]) (← genOf ["f", "g\"h"]) (← genParameters))
   | _ => pure .relation
 
 def genArguments : Gen (List (String × Value)) := do
@@ -156,7 +157,7 @@ def genPermission (target role : String) : Gen Permission := do
   let value ← if (← Gen.choose Nat 0 1 (by omega)).val = 0 then pure (.session "id") else pure (.literal (← Arbitrary.arbitrary))
   pure ⟨target, role, .compare "a" .eq value, ["a", "b"], true, (← Arbitrary.arbitrary)⟩
 
-instance : Arbitrary Schema := ⟨do pure { tables := [← genTable "t" "u", ← genTable "u" "t"], permissions := [← genPermission "t" "user", ← genPermission "u" "user", ← genPermission "t" "other", ← genPermission "u" "other"], roots := [⟨"t", "t", .list⟩, ⟨"u", "u", .list⟩, ⟨"t_aggregate", "t", .aggregate⟩] }⟩
+instance : Arbitrary Schema := ⟨do pure { tables := [← genTable "t" "u", ← genTable "u" "t"], permissions := [← genPermission "t" "user", ← genPermission "u" "user", ← genPermission "t" "other", ← genPermission "u" "other"], roots := [⟨"t", "t", .list, none⟩, ⟨"u", "u", .list, none⟩, ⟨"t_aggregate", "t", .aggregate, none⟩, ⟨"t_search", "t", .list, some (.function "public" "f" ["p"])⟩] }⟩
 instance : Shrinkable Schema := ⟨fun _ => []⟩
 
 partial def genSelection (fuel index : Nat) : Gen Selection := do
@@ -192,7 +193,7 @@ def genRoot : Gen Selection := do
       ⟨"nodes", "nodes", [], none, [], none, none, [⟨"a", "a", [], none, [], none, none, []⟩]⟩] }
   else
     let arguments ← if (← Gen.choose Nat 0 2 (by omega)).val = 0 then genArguments else pure []
-    pure { selection with name := (← genOf ["t", "t", "t", "u", "u", "zz"]), children, arguments }
+    pure { selection with name := (← genOf ["t", "t", "t", "u", "u", "zz", "t_search"]), children, arguments }
 
 instance : Arbitrary Selection := ⟨genRoot⟩
 instance : Shrinkable Selection := ⟨fun _ => []⟩

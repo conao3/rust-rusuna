@@ -29,6 +29,7 @@ pub(super) fn directives<'a>(
             "list" => &[],
             "permission" => &["role", "where", "columns", "allow_aggregations", "limit"],
             "native_query" => &["sql", "arguments"],
+            "function" => &["name", "schema", "arguments"],
             _ => unreachable!(),
         };
         let mut seen = BTreeSet::new();
@@ -100,6 +101,14 @@ fn args(target: &str, arguments: &[(String, String)]) -> String {
     format!(
         "({declared}where: {target}_bool_exp, order_by: [{target}_order_by!], limit: Int, offset: Int)"
     )
+}
+
+fn function_schema(d: &ConstDirective) -> Result<String, Error> {
+    if d.get_argument("schema").is_some() {
+        string(d, "schema")
+    } else {
+        Ok("public".into())
+    }
 }
 
 fn native_arguments(
@@ -212,7 +221,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             .node
             .directives
             .iter()
-            .find(|d| d.node.name.node == "native_query")
+            .find(|d| ["native_query", "function"].contains(&d.node.name.node.as_str()))
         {
             natives.insert(name.clone(), native_arguments(&d.node, &scalars)?);
         }
@@ -246,7 +255,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             if root {
                 &[]
             } else {
-                &["table", "primary_key", "native_query"]
+                &["table", "primary_key", "native_query", "function"]
             },
         )?;
         if root
@@ -264,6 +273,22 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
         }
         let mut table = if root {
             Table::new(name, "", "")
+        } else if let Some(function) = d.get("function") {
+            if d.contains_key("table")
+                || d.contains_key("primary_key")
+                || d.contains_key("native_query")
+            {
+                return Err(error(
+                    t.pos,
+                    "@function types take neither @table, @primary_key nor @native_query",
+                ));
+            }
+            Table::function(
+                name,
+                function_schema(function)?,
+                string(function, "name")?,
+                natives[name].iter().map(|(n, _)| n.clone()),
+            )
         } else if let Some(native) = d.get("native_query") {
             if d.contains_key("table") || d.contains_key("primary_key") {
                 return Err(error(
@@ -278,9 +303,12 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             )
             .map_err(|e| error(t.pos, e.to_string()))?
         } else {
-            let mapping = d
-                .get("table")
-                .ok_or_else(|| error(t.pos, "row types require @table or @native_query"))?;
+            let mapping = d.get("table").ok_or_else(|| {
+                error(
+                    t.pos,
+                    "row types require @table, @native_query or @function",
+                )
+            })?;
             Table::new(
                 name,
                 if mapping.get_argument("schema").is_some() {
@@ -328,7 +356,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             let d = directives(
                 &f.node.directives,
                 if root {
-                    &["list", "aggregate"]
+                    &["list", "aggregate", "function"]
                 } else {
                     &["column", "relation", "aggregate"]
                 },
@@ -375,8 +403,13 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                         "incompatible mapping directives or field type",
                     ));
                 }
+                let mut declared = if root {
+                    natives.get(&target).cloned().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 if root {
-                    roots.push(RootField::new(
+                    let mut root_field = RootField::new(
                         &field,
                         &target,
                         if aggregate.is_some() {
@@ -384,7 +417,22 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                         } else {
                             RootKind::List
                         },
-                    ));
+                    );
+                    if let Some(function) = d.get("function") {
+                        if natives.contains_key(&target) {
+                            return Err(error(
+                                f.pos,
+                                "a root @function returns the rows of a @table type",
+                            ));
+                        }
+                        declared = native_arguments(function, &scalars)?;
+                        root_field = root_field.body(crate::Body::Function {
+                            schema: function_schema(function)?,
+                            name: string(function, "name")?,
+                            arguments: declared.iter().map(|(n, _)| n.clone()).collect(),
+                        });
+                    }
+                    roots.push(root_field);
                 } else {
                     let relation = relation.unwrap();
                     let columns = strings(relation, "columns")?;
@@ -415,17 +463,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                 }
                 if root || list || aggregate.is_some() {
                     targets.insert((name.clone(), field.clone()), target.clone());
-                    rendered.push_str(&format!(
-                        "  {field}{}: {ty}\n",
-                        args(
-                            &target,
-                            if root {
-                                natives.get(&target).map(Vec::as_slice).unwrap_or_default()
-                            } else {
-                                &[]
-                            }
-                        )
-                    ));
+                    rendered.push_str(&format!("  {field}{}: {ty}\n", args(&target, &declared)));
                 } else {
                     rendered.push_str(&format!("  {field}: {ty}\n"));
                 }

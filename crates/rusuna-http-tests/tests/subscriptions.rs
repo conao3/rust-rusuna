@@ -798,3 +798,60 @@ async fn statement_roots_are_subscribed_with_their_arguments() {
         json!({"article_search": [{"id": 10}, {"id": 11}, {"id": 99}]})
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn function_roots_are_subscribed_with_their_arguments() {
+    let pool = database(
+        "http_subscription_functions",
+        &["schema.sql", "seed.sql", "functions.sql"],
+    )
+    .await;
+    let schema = rusuna::Schema::from_sdl(&fixture("functions.graphql")).unwrap();
+    let compiled: Vec<rusuna::Compiled> = [
+        "{ search_articles(search: \"title%\", since_id: 3, order_by: {id: asc}) { id title } }",
+        "{ search_articles(search: \"title 1%\", order_by: {id: asc}) { id title } }",
+        "{ search_articles(search: \"none\", since_id: 1, order_by: {id: asc}) { id title } }",
+    ]
+    .iter()
+    .map(|query| {
+        schema
+            .compile(
+                query,
+                &json!({}),
+                None,
+                &rusuna::Session::new("user").variable("user_id", rusuna::Value::Int(3)),
+            )
+            .unwrap()
+            .remove(0)
+            .compiled
+    })
+    .collect();
+    multiplexed_matches(&pool, &compiled, &[], "search_articles").await;
+    let subscriptions = Subscriptions::new(pool.clone(), options());
+    let address = serve_ws(role_schemas(
+        &fixture("functions.graphql"),
+        &pool,
+        &subscriptions,
+    ))
+    .await;
+    let mut client = Client::connect(address, json!({"role": "admin"})).await;
+    client
+        .subscribe(
+            "1",
+            "subscription($min: Int!) { author_totals(min_articles: $min, order_by: {author_id: asc}) { author_id articles } }",
+            json!({"min": 3}),
+        )
+        .await;
+    assert_eq!(
+        client.data("1").await,
+        json!({"author_totals": [{"author_id": 1, "articles": 3}, {"author_id": 3, "articles": 4}]})
+    );
+    sqlx::raw_sql("INSERT INTO article VALUES (99, 5, 'title 99', '2020-01-02 00:00+00')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.data("1").await,
+        json!({"author_totals": [{"author_id": 1, "articles": 3}, {"author_id": 3, "articles": 4}, {"author_id": 5, "articles": 3}]})
+    );
+}

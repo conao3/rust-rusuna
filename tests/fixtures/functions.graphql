@@ -1,0 +1,47 @@
+scalar DateTime
+
+type author @table(name: "author")
+  @permission(role: "user", columns: ["id", "name"], where: {}) {
+  id: Int!
+  name: String!
+  latest: latest_titles @relation(columns: ["id"], references: ["author_id"])
+}
+
+type article @table(name: "article")
+  @permission(role: "user", columns: ["id", "author_id", "title"], where: {author_id: {_eq: "$user_id"}}, allow_aggregations: true, limit: 3) {
+  id: Int!
+  author_id: Int!
+  title: String!
+  author: author! @relation(columns: ["author_id"], references: ["id"])
+  comments: [comment!]! @relation(columns: ["id"], references: ["article_id"])
+}
+
+type comment @table(name: "comment") {
+  id: Int!
+  article_id: Int!
+  body: String!
+}
+
+type author_totals @function(name: "author totals", arguments: {min_articles: "Int!"})
+  @permission(role: "user", columns: ["author_id", "articles"], where: {author_id: {_neq: 1}}, allow_aggregations: true) {
+  author_id: Int!
+  articles: Int!
+  first_title: String!
+  author: author! @relation(columns: ["author_id"], references: ["id"])
+}
+
+type latest_titles @function(name: "latest_titles", schema: "public")
+  @permission(role: "user", columns: ["author_id", "title"], where: {}) {
+  author_id: Int!
+  title: String!
+}
+
+type Query {
+  article: [article!]! @list
+  search_articles: [article!]! @list @function(name: "search_articles", arguments: {search: "String!", since_id: "Int"})
+  search_articles_aggregate: article_aggregate! @aggregate(target: "article") @function(name: "search_articles", arguments: {search: "String!", since_id: "Int"})
+  author: [author!]! @list
+  author_totals: [author_totals!]! @list
+  author_totals_aggregate: author_totals_aggregate! @aggregate(target: "author_totals")
+  latest_titles: [latest_titles!]! @list
+}

@@ -130,6 +130,66 @@ pub enum Body {
         parts: Vec<SqlPart>,
         arguments: Vec<String>,
     },
+    /// The rows a PostgreSQL function returns (`SETOF <table>` or `TABLE(...)`), called as
+    /// `schema`.`name`(argument => $n, …) with every argument of the root field, in this order.
+    Function {
+        schema: String,
+        name: String,
+        arguments: Vec<String>,
+    },
+}
+
+fn body_model(body: Body) -> model::Body {
+    match body {
+        Body::Table => model::Body::Relation,
+        Body::Statement { parts, arguments } => model::Body::Statement {
+            parts: parts
+                .into_iter()
+                .map(|part| match part {
+                    SqlPart::Text(sql) => model::Part::Text { sql },
+                    SqlPart::Argument(name) => model::Part::Arg { name },
+                })
+                .collect(),
+            parameters: arguments,
+        },
+        Body::Function {
+            schema,
+            name,
+            arguments,
+        } => model::Body::Function {
+            schema,
+            name,
+            parameters: arguments,
+        },
+    }
+}
+
+fn check_body(owner: &str, body: &Body) -> Result<(), Error> {
+    let invalid = |message: String| Error::InvalidStatement {
+        table: owner.to_string(),
+        message,
+    };
+    match body {
+        Body::Table => Ok(()),
+        Body::Statement { parts, arguments } => {
+            statement::check_arguments(arguments).map_err(invalid)?;
+            match parts.iter().find_map(|part| match part {
+                SqlPart::Argument(name) if !arguments.contains(name) => Some(name),
+                _ => None,
+            }) {
+                Some(name) => Err(invalid(format!("`{name}` is no declared argument"))),
+                None => Ok(()),
+            }
+        }
+        Body::Function {
+            name, arguments, ..
+        } => {
+            if name.is_empty() {
+                return Err(invalid("the function name is empty".into()));
+            }
+            statement::check_arguments(arguments).map_err(invalid)
+        }
+    }
 }
 
 /// A table exposed under the GraphQL type `name` and targeted by roots and relations.
@@ -188,6 +248,24 @@ impl Table {
         let mut table = Self::new(name, "", "").read_only();
         table.body = Body::Statement { parts, arguments };
         Ok(table)
+    }
+
+    /// A read-only type whose rows are the result of the PostgreSQL function
+    /// `schema`.`function`, a function returning `TABLE(...)` or `SETOF` a row type. Its root
+    /// fields take `arguments`, passed by name.
+    pub fn function(
+        name: impl Into<String>,
+        schema: impl Into<String>,
+        function: impl Into<String>,
+        arguments: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let mut table = Self::new(name, "", "").read_only();
+        table.body = Body::Function {
+            schema: schema.into(),
+            name: function.into(),
+            arguments: arguments.into_iter().map(Into::into).collect(),
+        };
+        table
     }
 
     /// Marks the table as read-only.
@@ -478,7 +556,7 @@ pub enum Error {
     InvalidArguments {
         table: String,
     },
-    /// The statement of a type cannot be read.
+    /// The statement or function call of a type or root field cannot be read.
     InvalidStatement {
         table: String,
         message: String,
@@ -509,7 +587,10 @@ impl fmt::Display for Error {
                 )
             }
             Self::InvalidStatement { table, message } => {
-                write!(f, "the statement of `{table}` is invalid: {message}")
+                write!(
+                    f,
+                    "the statement or function of `{table}` is invalid: {message}"
+                )
             }
             Self::UnknownRoot { name } => write!(f, "no root field is named `{name}`"),
             Self::UnknownType { name } => write!(f, "no table is named `{name}`"),
@@ -569,6 +650,10 @@ pub struct RootField {
     pub field: String,
     pub target: String,
     pub kind: RootKind,
+    /// Reads the rows of the root from this body instead of the target's, as from a function
+    /// that returns `SETOF` the target's rows. The rows keep the target's relationships and
+    /// permissions.
+    pub body: Option<Body>,
 }
 
 impl RootField {
@@ -577,7 +662,13 @@ impl RootField {
             field: field.into(),
             target: target.into(),
             kind,
+            body: None,
         }
+    }
+
+    pub fn body(mut self, body: Body) -> Self {
+        self.body = Some(body);
+        self
     }
 }
 
@@ -592,6 +683,14 @@ pub struct Schema {
 
 impl Schema {
     pub fn new(tables: Vec<Table>, roots: Vec<RootField>) -> Result<Self, Error> {
+        for table in &tables {
+            check_body(&table.name, &table.body)?;
+        }
+        for root in &roots {
+            if let Some(body) = &root.body {
+                check_body(&root.field, body)?;
+            }
+        }
         let permissions = tables
             .iter()
             .flat_map(|t| t.permissions.iter().map(move |p| (t, p)))
@@ -635,6 +734,7 @@ impl Schema {
                             RootKind::List => model::RootKind::List,
                             RootKind::Aggregate => model::RootKind::Aggregate,
                         },
+                        body: root.body.map(body_model),
                     })
                     .collect(),
             },
@@ -702,19 +802,7 @@ fn table_model(table: Table) -> model::Table {
                 child: relation.references,
             })
             .collect(),
-        body: match table.body {
-            Body::Table => model::Body::Relation,
-            Body::Statement { parts, arguments } => model::Body::Statement {
-                parts: parts
-                    .into_iter()
-                    .map(|part| match part {
-                        SqlPart::Text(sql) => model::Part::Text { sql },
-                        SqlPart::Argument(name) => model::Part::Arg { name },
-                    })
-                    .collect(),
-                parameters: arguments,
-            },
-        },
+        body: body_model(table.body),
     }
 }
 

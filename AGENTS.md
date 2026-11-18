@@ -104,8 +104,11 @@ The block has four parts.
   a native query statement, whose arguments are `Tok.param`. `emit` turns a plan into tokens. Functions that return `List Lex` cannot
   emit a parameter; `expressionToks` emits filter values through `Tok.param`, including predicates in `EXISTS`.
 - Resolution. `resolveSelection` builds the raw plan from a `Selection` and the role's
-  visible schema. A `Table` has a `Body`: `relation` (its SQL table) or `statement`
-  (the parts of a native query and its argument names). `resolveSource` fills a statement with
+  visible schema. A `Table` has a `Body`: `relation` (its SQL table), `statement`
+  (the parts of a native query and its argument names) or `function` (a schema, a function
+  name and its argument names, called with named arguments). A `RootField` may carry a body
+  that replaces its target's for the root scan (`SETOF` functions); `tableBodies` lists the
+  bodies a scan of a type may read, and `scanPermitted` checks the source against them. `resolveSource` fills a statement with
   the arguments of the root selection; every other selection must have no arguments, so
   relationship and `EXISTS` scans read only statements without arguments. `rootValues`
   gives the root's argument values in the order of the markers. `resolve` inserts permissions and validates all scans and user column
@@ -159,8 +162,8 @@ broken versions. `lake -d audit build --wfail` fails when no broken version of a
 is refuted, when a broken version satisfies every theorem but changes the output (a
 hole), or when no input satisfies a theorem's hypotheses.
 
-The audit covers thirty-eight functions: 236 broken versions, 161 refuted, 23 with the same output
-on every input tried, 52 that do not typecheck, no hole, no untested version and no timeout.
+The audit covers forty-two functions: 266 broken versions, 182 refuted, 23 with the same output
+on every input tried, 61 that do not typecheck, no hole, no untested version and no timeout.
 
 - Properties: `quoteChars` and `quoteStringChars` (`unquote_quote`, `unquote_quoteChars`: reading a quoted name
   back gives the name; `unquote_quoteString` and `unquote_quoteStringChars` do the
@@ -177,8 +180,10 @@ on every input tried, 52 that do not typecheck, no hole, no untested version and
   written independently.
 - `sourceToks` uses `sourceToks_table` and `sourceToks_tokens`; `argumentValid` and
   `acceptsArguments` use `argumentValid_iff` and `acceptsArguments_iff`; `bodySource`,
-  `partToks`, `templateToks` and `partShape` use `bodySource_values` and `bodySource_declared`;
-  `sourceDeclared` uses `sourceDeclared_iff`; `resolveSource` uses `resolveSource_exact`.
+  `partToks`, `templateToks` and `partShape` use `bodySource_values` and `bodySource_fits`;
+  `namedToks` and `callToks` use `namedToks_pair`, `namedToks_single` and `callToks_exact`;
+  `sourceFits` uses `sourceFits_iff`; `sourceDeclared` and `tableBodies` use
+  `sourceDeclared_iff` and `tableBodies_iff`; `resolveSource` uses `resolveSource_exact`.
   `Audit.AcceptanceGenerators` gives standalone tables random bodies so that these reach
   statements.
 - `capLimit` uses `capLimit_cap`, `capLimit_user` and `capLimit_choice` (at most the
@@ -210,12 +215,12 @@ completed groups can be reused independently.
 
 | Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
 |---|---|---|---|---|---|---|---|---|
-| SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
-| Selection resolution | 2 | 136 | 40 | 3 | 14 | 0 | 25 | 54 |
-| Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
+| SQL emission | 8 | 180 | 26 | 101 | 2 | 0 | 0 | 51 |
+| Selection resolution | 2 | 139 | 40 | 13 | 30 | 0 | 0 | 56 |
+| Permission resolution | 3 | 2 | 0 | 1 | 1 | 0 | 0 | 0 |
 | Write emission | 2 | 87 | 0 | 73 | 10 | 0 | 0 | 4 |
-| Write resolution | 3 | 56 | 1 | 19 | 32 | 0 | 0 | 4 |
-| Total | 18 | 456 | 64 | 196 | 58 | 0 | 25 | 113 |
+| Write resolution | 3 | 57 | 1 | 20 | 32 | 0 | 0 | 4 |
+| Total | 18 | 465 | 67 | 208 | 75 | 0 | 0 | 115 |
 
 - The SQL emission group is `paramToks`, `expressionToks`, `expressionsToks`,
   `scanToks`, `joinToks`, `joinsToks`, `emit` and `compile`. Parameter preservation,
@@ -223,10 +228,11 @@ completed groups can be reused independently.
   differential test and `tests/fixtures/expected/`.
 - The selection group is `resolveExpression` and `resolveNode`. Success equivalences use `acceptsSelection` and
   its traversal helpers alongside the value and declaration theorems.
-  `resolveExpression` has three holes: predicate constructor choices and different
-  error variants can change output without changing success or parameters. These
-  require output properties beyond success equivalence. `resolveNode` has no
-  observed hole, but twenty-five timed-out mutations leave its audit unresolved.
+  `resolveExpression` has two holes (the `_and` and `_or` size checks) and `resolveNode`
+  eleven (the conjunctions of the argument checks and the choice between `nodes` and a group):
+  they change errors or node constructors without changing success or parameters on the
+  sampled inputs. These require output properties beyond success equivalence. No
+  mutation timed out.
   Rejection and differential tests exercise the input rules and emitted statements.
 - `guardQuery`, `resolve` and `run` use `resolve_values` and `run_params`. The changed
   role comparison in `resolve` changes acceptance while preserving successful
@@ -239,7 +245,7 @@ completed groups can be reused independently.
   `WritePlan` generator mixes primary-key lists with returning relationships that
   read the modified table again.
 - The write resolution group is `resolveWriteRaw`, `resolveWrite` and `runWrite` with
-  `resolveWrite_secure` and `runWrite_accepts`. Its 19 holes in `resolveWriteRaw` and
+  `resolveWrite_secure` and `runWrite_accepts`. Its 20 holes in `resolveWriteRaw` and
   `resolveWrite` change which inputs are accepted, including a constant error; the
   statements constrain successful plans, not write acceptance.
 
@@ -266,7 +272,7 @@ rejection tests. Value traversal, erasure and declared-reference helpers state a
 support the preservation theorems; they are not independent acceptance checks.
 
 The reported properties are thirteen independent properties, stated by twenty-four boundary
-theorems; thirty-one boundary conditions restated next to the implementation; and zero variable-free
+theorems; thirty-six boundary conditions restated next to the implementation; and zero variable-free
 checks. `PROOFS.md` lists every counted statement verbatim. Intermediate value,
 declaration and permission traversal lemmas support those properties and are not counted
 again. The permission guarantees are each non-admin scan's role condition and the
@@ -320,8 +326,8 @@ again.
 
 `MutationArguments` and `OnConflict` carry typed input data to `runWrite`. The
 `WriteCatalog` holds primary keys and operation-specific permissions independently of
-the read schema. Native query types are read-only tables, and `resolveWriteRaw` also rejects a target whose
-body is not a table. Read-only tables (`@table(read_only: true)`, views) are a Rust check:
+the read schema. Native query and function types are read-only tables, and `resolveWriteRaw` also rejects a
+target whose body is not a table. Read-only tables (`@table(read_only: true)`, views) are a Rust check:
 the SDL emits no mutation roots for them, `Schema::new` rejects their write permissions
 and `compile_mutation` rejects them as targets before calling Lean. SDL declares `@primary_key`, `@insert_permission`,
 `@update_permission` and `@delete_permission`. The parser uses the expanded mutation
@@ -424,6 +430,13 @@ are also tested in autocommit mode without a caller rollback.
   `crates/rusuna-http-tests/tests/natives.rs` repeats them over `POST` with variables, for
   every scalar argument type and null, and as a REST endpoint; `subscriptions.rs` runs the
   multiplexed statement of a native query whose text contains `'$1'` and a live subscription.
+- `tests/functions.rs` compares function roots (`tests/fixtures/functions.graphql`, created by
+  `tests/fixtures/functions.sql`) with statements that call the functions directly: a `SETOF`
+  table function with relationships, aggregates and the table's permissions, a `TABLE(...)`
+  function type, a relationship and an `EXISTS` predicate on a function without arguments,
+  quoted names, named parameters and rejections. `crates/rusuna-http-tests/tests/functions.rs`
+  repeats them over `POST` and as a REST endpoint; `subscriptions.rs` multiplexes and subscribes
+  to function roots.
 - `tests/limits.rs` compares 17 queries of the roles `limited` and `zero`
   (`tests/fixtures/limits.graphql`, `tests/fixtures/limits/`, with the Hasura metadata) with
   the Hasura v2.51.6 statements and their SQL snapshots, and three mutations with Hasura's

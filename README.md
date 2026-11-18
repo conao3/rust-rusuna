@@ -22,6 +22,7 @@ documents to SQL. `rusuna-events` runs event triggers and cron triggers beside i
 | Insert, update, delete, primary-key roots and write permissions | available |
 | Views and materialized views as read-only tables | available |
 | Native queries: SELECT statements in SDL as root fields with arguments | available |
+| PostgreSQL functions returning `SETOF` a table or `TABLE(...)` as root fields with arguments | available |
 | Execution with sqlx, parts for an `async-graphql` schema and `axum` routes | available |
 | Subscriptions over WebSocket, polled with one statement per group of subscriptions | available |
 | REST endpoints from named GraphQL documents | available |
@@ -235,6 +236,54 @@ type Query {
 The lower-level API builds such a type with `Table::statement(name, sql, arguments)`, which
 sets `Table::body` to `Body::Statement { parts, arguments }`; a `Selection` passes the root
 arguments with `Selection::argument(name, value)` in the declared order.
+
+### Functions
+
+A PostgreSQL function that returns `SETOF` a table's rows or `TABLE(...)` becomes a root field
+with arguments, like Hasura's custom SQL functions on the query side:
+
+```sql
+CREATE FUNCTION search_articles(search text, since_id int) RETURNS SETOF article
+  LANGUAGE sql STABLE AS $$ SELECT * FROM article WHERE title LIKE search AND id >= since_id $$;
+CREATE FUNCTION author_totals(min_articles int) RETURNS TABLE(author_id int, articles int)
+  LANGUAGE sql STABLE AS $$ SELECT author_id, count(*)::int FROM article GROUP BY author_id HAVING count(*) >= min_articles $$;
+```
+
+```graphql
+type author_totals @function(name: "author_totals", arguments: {min_articles: "Int!"}) {
+  author_id: Int!
+  articles: Int!
+  author: author! @relation(columns: ["author_id"], references: ["id"])
+}
+type Query {
+  search_articles: [article!]! @list @function(name: "search_articles", arguments: {search: "String!", since_id: "Int"})
+  search_articles_aggregate: article_aggregate! @aggregate(target: "article") @function(name: "search_articles", arguments: {search: "String!", since_id: "Int"})
+  author_totals: [author_totals!]! @list
+}
+```
+
+- `@function(name: String!, schema: String, arguments: {…})` on a root field with `@list` or
+  `@aggregate` reads the rows of a `@table` type from the function: `SETOF <table>`. The rows
+  keep the type's relationships and read permissions (row condition, columns and `limit`),
+  and a role sees the root field when it may read the type, as in Hasura with inferred
+  function permissions.
+- `@function(…)` on a type, in place of `@table`, declares the row type of a function that
+  returns `TABLE(...)`; its fields map to the result columns. Such a type is read-only, like
+  a native query type, and takes its own `@permission`.
+- `schema` defaults to `public`. The function name is quoted as an identifier. The
+  arguments are passed by name in their declared order, `"public"."search_articles"("search"
+  => $1, "since_id" => $2)`; the names must be the function's parameter names. An omitted
+  nullable argument is passed as `null`, so PostgreSQL parameter defaults do not apply.
+- Root fields take the arguments as native query roots do. Relationships to a function type
+  and relationship predicates on it need a function without arguments.
+
+Outside this feature: volatile functions as mutation roots, computed fields (functions of a
+row exposed as fields of its type), function permissions separate from the permissions of
+the returned type, and session arguments.
+
+The lower-level API sets `RootField::body(Body::Function { schema, name, arguments })` for a
+`SETOF` function and builds a `TABLE(...)` type with `Table::function(name, schema, function,
+arguments)`.
 
 ## Read permissions
 
@@ -1173,7 +1222,8 @@ query errors, and 255 for other failures. Diagnostics go to stderr.
 
 The lower-level `Schema::new(tables: Vec<Table>, roots: Vec<RootField>)` returns `Result<Schema, Error>` and declares root fields explicitly. `Schema::compile_selection(&Selection, &Session)` invokes the Lean core directly; typed text compilation requires `Schema::from_sdl`.
 `RootField::new(field, target, RootKind::List | RootKind::Aggregate)` targets a table's
-GraphQL type name. `Table::name` is the row's `__typename`; it is independent of the root
+GraphQL type name. `RootField::body` replaces the rows of the root with a function call
+(see Functions). `Table::name` is the row's `__typename`; it is independent of the root
 field and SQL table names. Each `Relation` declares its field, target, column mapping and
 `Kind::Object`, `Kind::Array` or `Kind::Aggregate`. Declare an aggregate relationship as a
 separate field, for example `articles_aggregate`.
@@ -1251,6 +1301,7 @@ levels plus 32 `EXISTS` levels and a maximum-depth 1000-term permission (65,001 
   rows of the ordered aggregate: `array_to_json((array_agg(… ORDER BY …))[1:n])`.
 - A native query is read as `(<statement>) AS "s"`, with each `{{name}}` replaced by a
   parameter.
+- A function is read as `"schema"."name"("argument" => $n, …) AS "s"`.
 - Comparison values are statement parameters, including each element of `_in` and `_nin`.
   `limit` and `offset` are non-negative integers written into the statement. `_is_null`
   selects `IS NULL` or `IS NOT NULL`. Empty `_in` is false and empty `_nin` is true.
@@ -1282,7 +1333,7 @@ Properties:
 | `placeholders_numbered`, `slots_numbered` | The placeholders are `$1` … `$n`, in the order of the parameters. |
 | `unquote_quote`, `unquote_quoteChars` | `unquoteChars`, a reader of a double-quoted identifier written after PostgreSQL's lexical rules, reads a quoted name back as the name and stops at its closing quote. |
 | `unquote_quoteString`, `unquote_quoteStringChars` | Reading a quoted string literal returns the original string and stops at the closing quote. |
-| `resolve_declared` | Every scan in the plan, including relationship predicates inside `EXISTS`, reads a declared type: a table scan its declared SQL table, a native query scan a text equal to the declared statement once the values are erased. |
+| `resolve_declared` | Every scan in the plan, including relationship predicates inside `EXISTS`, reads a declared type: a table scan its declared SQL table, a native query or function scan a text equal to the declared statement or call (of the type or of a root field returning it) once the values are erased. |
 | `distinct_iff` | The check for repeated aliases accepts exactly the lists without duplicates. |
 | `resolve_scan_conditions`, `resolve_tables` | Every non-admin scan, including scans inside permission predicates, contains the bound condition of that role and has a permission definition. |
 | `resolve_columns` | User column references in selections, filters, ordering and aggregates belong to the role's visible columns; join keys and policy columns are excluded. |
@@ -1302,7 +1353,8 @@ Conditions written a second time, as an equivalence next to the definition:
 | `predicateEq_iff`, `predicatesEq_iff`, `hasConjunct_iff` | Structural expression equality and immediate conjunct membership have their stated meanings. |
 | `appendCondition_exact`, `addPermission_condition` | The inserted scan is exactly the original scan with the requested role condition appended; binding errors are preserved. |
 | `limitScan_exact`, `listScan_array`, `listScan_other`, `limitNodes_limit`, `listChildren_limits`, `listChildren_other` | A row limit is applied to the scan of a list and the `nodes` of an aggregate, and nothing else changes. |
-| `sourceToks_table`, `sourceToks_tokens`, `sourceDeclared_iff` | A scan emits its table or the tokens of its statement, and the declaration check accepts exactly the declared table or the declared statement with its values erased. |
+| `sourceToks_table`, `sourceToks_tokens`, `sourceFits_iff`, `sourceDeclared_iff`, `tableBodies_iff` | A scan emits its table or the tokens of its statement or call, and the declaration check accepts exactly the declared table, statement or call of the type or of a root field returning it, with the values erased. |
+| `namedToks_pair`, `namedToks_single`, `callToks_exact` | A function call names each argument and passes its value as a parameter, in the declared order. |
 | `argumentValid_iff`, `acceptsArguments_iff`, `resolveSource_exact` | Root arguments are accepted when their names are the declared ones in order and no value is a nonfinite float; the statement is then filled with them. |
 | `resolveWrite_permissions`, `resolveWrite_user_columns` | Aborting checks, operation row conditions and authorized writes; user columns exclude presets. |
 | `resolveWrite_declared`, `resolveWrite_tables` | Physical write targets are declared and have the requested operation permission. |
@@ -1310,9 +1362,9 @@ Conditions written a second time, as an equivalence next to the definition:
 | `resolveSelection_accepts`, `runSelection_accepts` | Pre-permission resolution and compilation succeed exactly when the Boolean `acceptsSelection` accepts the schema and selection. |
 
 [leanassay](https://github.com/conao3/lean-leanassay/tree/fc0d05473917864cedb6d27e208c81de3e2a11af) checks which theorems rule out
-broken implementations: the audit covers thirty-eight functions, with 236 mutations, 161 killed,
-23 equivalent on the sampled inputs, 52 stillborn, zero holes, zero untested and zero timed out.
-There are thirteen independent properties (twenty-four principal theorem statements), thirty-one
+broken implementations: the audit covers forty-two functions, with 266 mutations, 182 killed,
+23 equivalent on the sampled inputs, 61 stillborn, zero holes, zero untested and zero timed out.
+There are thirteen independent properties (twenty-four principal theorem statements), thirty-six
 restated conditions and zero variable-free checks. The executable audit checks full
 scan equalities as well as their limit projection. AGENTS.md lists the functions it covers and the ones it does not.
 
@@ -1332,12 +1384,12 @@ A manual mutation failed both the insertion and parameter-preservation proofs.
 
 | Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
 |---|---|---|---|---|---|---|---|---|
-| SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
-| Selection resolution | 2 | 136 | 40 | 3 | 14 | 0 | 25 | 54 |
-| Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
+| SQL emission | 8 | 180 | 26 | 101 | 2 | 0 | 0 | 51 |
+| Selection resolution | 2 | 139 | 40 | 13 | 30 | 0 | 0 | 56 |
+| Permission resolution | 3 | 2 | 0 | 1 | 1 | 0 | 0 | 0 |
 | Write emission | 2 | 87 | 0 | 73 | 10 | 0 | 0 | 4 |
-| Write resolution | 3 | 56 | 1 | 19 | 32 | 0 | 0 | 4 |
-| Total | 18 | 456 | 64 | 196 | 58 | 0 | 25 | 113 |
+| Write resolution | 3 | 57 | 1 | 20 | 32 | 0 | 0 | 4 |
+| Total | 18 | 465 | 67 | 208 | 75 | 0 | 0 | 115 |
 
 The survey uses 1000 samples and a 30-second deadline per mutation. Timeouts are
 unresolved and depend on machine load. Equivalent means equal outputs on the sampled
@@ -1371,9 +1423,9 @@ Outside the proofs:
   SQL text in Rust; `placeholders_numbered` fixes what it expects, and a test runs the
   rewritten statement of every admin and permission fixture against its single statements.
 - `unquoteChars` as a description of PostgreSQL's reader.
-- The statements of native queries. They are trusted input of the schema author; the proofs
-  show that their text reaches the SQL unchanged and their arguments only as parameters, not
-  what PostgreSQL computes from them.
+- The statements of native queries and the functions of `@function`. They are trusted input of
+  the schema author; the proofs show that their text and calls reach the SQL as declared and
+  their arguments only as parameters, not what PostgreSQL computes from them.
 - `rusuna-events`: the trigger function, the claim and lease statements, cron occurrences
   and webhook delivery. The tests in `crates/rusuna-events/tests` cover them on PostgreSQL.
 
