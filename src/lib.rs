@@ -24,6 +24,7 @@
 mod compiler;
 mod graphql;
 mod mutation;
+mod statement;
 pub use mutation::*;
 
 pub use graphql::{CompiledField, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_DEPTH};
@@ -108,6 +109,29 @@ impl Relation {
     }
 }
 
+/// A piece of a statement written by the schema author.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlPart {
+    /// SQL text, emitted as it is.
+    Text(String),
+    /// The value of the named argument, sent as a statement parameter.
+    Argument(String),
+}
+
+/// Where the rows of a type come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Body {
+    /// The SQL table, view or materialized view `schema`.`table`.
+    Table,
+    /// A statement written by the schema author and read as a subquery. Root fields of the
+    /// type take `arguments`, in this order, and each [`SqlPart::Argument`] becomes a
+    /// parameter.
+    Statement {
+        parts: Vec<SqlPart>,
+        arguments: Vec<String>,
+    },
+}
+
 /// A table exposed under the GraphQL type `name` and targeted by roots and relations.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Table {
@@ -122,6 +146,7 @@ pub struct Table {
     /// A table that is only read, such as a view or a materialized view: it has no
     /// mutation roots and no write permissions.
     pub read_only: bool,
+    pub body: Body,
 }
 
 impl Table {
@@ -140,7 +165,29 @@ impl Table {
             write_permissions: Vec::new(),
             primary_key: None,
             read_only: false,
+            body: Body::Table,
         }
+    }
+
+    /// A read-only type whose rows are the result of `sql`, a single SELECT statement in which
+    /// `{{name}}` stands for the value of the argument `name`. The statement is trusted input
+    /// of the schema author; it may not contain `$`, `;`, comments or backslashes, and
+    /// `{{` only outside quoted text.
+    pub fn statement(
+        name: impl Into<String>,
+        sql: &str,
+        arguments: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, Error> {
+        let name = name.into();
+        let arguments: Vec<String> = arguments.into_iter().map(Into::into).collect();
+        let parts =
+            statement::parse(sql, &arguments).map_err(|message| Error::InvalidStatement {
+                table: name.clone(),
+                message,
+            })?;
+        let mut table = Self::new(name, "", "").read_only();
+        table.body = Body::Statement { parts, arguments };
+        Ok(table)
     }
 
     /// Marks the table as read-only.
@@ -308,6 +355,9 @@ pub struct Selection {
     pub fields: Vec<Selection>,
     pub mutation: Option<MutationArguments>,
     pub primary_key: Option<(String, Vec<(String, Value)>)>,
+    /// The arguments of a root field whose type is read from a statement, in the order the
+    /// type declares them.
+    pub arguments: Vec<(String, Value)>,
 }
 
 impl Selection {
@@ -323,7 +373,13 @@ impl Selection {
             fields: Vec::new(),
             mutation: None,
             primary_key: None,
+            arguments: Vec::new(),
         }
+    }
+
+    pub fn argument(mut self, name: impl Into<String>, value: Value) -> Self {
+        self.arguments.push((name.into(), value));
+        self
     }
 
     pub fn alias(mut self, alias: impl Into<String>) -> Self {
@@ -417,6 +473,16 @@ pub enum Error {
     InvalidPermission {
         name: String,
     },
+    /// The arguments of a root field differ from the ones its type declares, or another field
+    /// was given arguments of a statement.
+    InvalidArguments {
+        table: String,
+    },
+    /// The statement of a type cannot be read.
+    InvalidStatement {
+        table: String,
+        message: String,
+    },
     /// The table is read-only and cannot be the target of a mutation or a write permission.
     ReadOnly {
         table: String,
@@ -436,6 +502,15 @@ impl fmt::Display for Error {
                 write!(f, "permission requirements for `{name}` are not satisfied")
             }
             Self::ReadOnly { table } => write!(f, "`{table}` is read-only"),
+            Self::InvalidArguments { table } => {
+                write!(
+                    f,
+                    "the arguments of `{table}` differ from its declared arguments"
+                )
+            }
+            Self::InvalidStatement { table, message } => {
+                write!(f, "the statement of `{table}` is invalid: {message}")
+            }
             Self::UnknownRoot { name } => write!(f, "no root field is named `{name}`"),
             Self::UnknownType { name } => write!(f, "no table is named `{name}`"),
             Self::UnknownField { table, field } => write!(f, "`{table}` has no field `{field}`"),
@@ -627,6 +702,19 @@ fn table_model(table: Table) -> model::Table {
                 child: relation.references,
             })
             .collect(),
+        body: match table.body {
+            Body::Table => model::Body::Relation,
+            Body::Statement { parts, arguments } => model::Body::Statement {
+                parts: parts
+                    .into_iter()
+                    .map(|part| match part {
+                        SqlPart::Text(sql) => model::Part::Text { sql },
+                        SqlPart::Argument(name) => model::Part::Arg { name },
+                    })
+                    .collect(),
+                parameters: arguments,
+            },
+        },
     }
 }
 
@@ -637,6 +725,11 @@ fn selection_model(selection: &Selection, depth: usize) -> Result<model::Selecti
     Ok(model::Selection {
         alias: selection.alias.clone(),
         name: selection.name.clone(),
+        arguments: selection
+            .arguments
+            .iter()
+            .map(|(name, value)| (name.clone(), value_model(value)))
+            .collect(),
         conds: selection
             .filter
             .as_ref()
@@ -847,6 +940,7 @@ fn error_from_model(error: model::Error) -> Error {
         model::Error::InvalidSelection { r#type } => Error::InvalidSelection { table: r#type },
         model::Error::MissingSession { name } => Error::MissingSession { name },
         model::Error::InvalidPermission { name } => Error::InvalidPermission { name },
+        model::Error::InvalidArguments { r#type } => Error::InvalidArguments { table: r#type },
         model::Error::TooDeep => Error::TooDeep,
         model::Error::InvalidFilter => Error::InvalidFilter,
     }

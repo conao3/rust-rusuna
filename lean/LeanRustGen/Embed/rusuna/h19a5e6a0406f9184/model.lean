@@ -186,13 +186,6 @@ inductive Comparison where
   | eq | neq | gt | gte | lt | lte | like | nlike | ilike | nilike
   deriving DecidableEq, Repr
 
-structure Reference where
-  schema : String
-  table : String
-  parent : List String
-  child : List String
-  deriving DecidableEq, Repr
-
 inductive Expression (R V : Type) where
   | compare (field : String) (op : Comparison) (value : V)
   | member (field : String) (negated : Bool) (values : List V)
@@ -229,6 +222,19 @@ def eraseExpressions {R : Type} : List (Expression R Value) → List (Expression
   | e :: es => eraseExpression e :: eraseExpressions es
 end
 
+inductive Source where
+  | table (schema table : String)
+  | tokens (toks : List Tok)
+  deriving DecidableEq, Repr
+
+def sourceValues : Source → List Value
+  | .table _ _ => []
+  | .tokens toks => toks.filterMap tokValue
+
+def eraseSource : Source → Source
+  | .table schema table => .table schema table
+  | .tokens toks => .tokens (toks.map eraseTok)
+
 mutual
 inductive Predicate where
   | compare (field : String) (op : Comparison) (value : Value)
@@ -240,18 +246,17 @@ inductive Predicate where
   | exists (scan : Scan) (parent child : List String)
   deriving Repr
 inductive Scan where
-  | mk (name schema table : String) (conds : Predicate) (order : List (String × Direction))
+  | mk (name : String) (source : Source) (conds : Predicate) (order : List (String × Direction))
       (limit offset : Option Nat)
   deriving Repr
 end
 
-def Scan.name : Scan → String | .mk name _ _ _ _ _ _ => name
-def Scan.schema : Scan → String | .mk _ schema _ _ _ _ _ => schema
-def Scan.table : Scan → String | .mk _ _ table _ _ _ _ => table
-def Scan.conds : Scan → Predicate | .mk _ _ _ conds _ _ _ => conds
-def Scan.order : Scan → List (String × Direction) | .mk _ _ _ _ order _ _ => order
-def Scan.limit : Scan → Option Nat | .mk _ _ _ _ _ limit _ => limit
-def Scan.offset : Scan → Option Nat | .mk _ _ _ _ _ _ offset => offset
+def Scan.name : Scan → String | .mk name _ _ _ _ _ => name
+def Scan.source : Scan → Source | .mk _ source _ _ _ _ => source
+def Scan.conds : Scan → Predicate | .mk _ _ conds _ _ _ => conds
+def Scan.order : Scan → List (String × Direction) | .mk _ _ _ order _ _ => order
+def Scan.limit : Scan → Option Nat | .mk _ _ _ _ limit _ => limit
+def Scan.offset : Scan → Option Nat | .mk _ _ _ _ _ offset => offset
 
 mutual
 def predicateValues : Predicate → List Value
@@ -260,7 +265,7 @@ def predicateValues : Predicate → List Value
   | .isNull _ _ => []
   | .and es | .or es => predicatesValues es
   | .not e => predicateValues e
-  | .exists (.mk _ _ _ conds _ _ _) _ _ => predicateValues conds
+  | .exists (.mk _ source conds _ _ _) _ _ => sourceValues source ++ predicateValues conds
 def predicatesValues : List Predicate → List Value
   | [] => []
   | e :: es => predicateValues e ++ predicatesValues es
@@ -274,8 +279,8 @@ def erasePredicate : Predicate → Predicate
   | .and es => .and (erasePredicates es)
   | .or es => .or (erasePredicates es)
   | .not e => .not (erasePredicate e)
-  | .exists (.mk name schema table conds order limit offset) parent child =>
-    .exists (.mk name schema table (erasePredicate conds) order limit offset) parent child
+  | .exists (.mk name source conds order limit offset) parent child =>
+    .exists (.mk name (eraseSource source) (erasePredicate conds) order limit offset) parent child
 def erasePredicates : List Predicate → List Predicate
   | [] => []
   | e :: es => erasePredicate e :: erasePredicates es
@@ -292,6 +297,20 @@ def paramToks : List Value → List Tok
 def sourceLex (schema table : String) : Lex :=
   if schema == "" then .ident table else .col schema table
 
+def sourceToks : Source → List Tok
+  | .table schema table => lift [sourceLex schema table]
+  | .tokens toks => toks
+
+theorem sourceToks_table (schema table : String) : sourceToks (.table schema table) = [.lex (sourceLex schema table)] := rfl
+
+theorem sourceToks_tokens (toks : List Tok) : sourceToks (.tokens toks) = toks := rfl
+
+theorem sourceToks_values (source : Source) : (sourceToks source).filterMap tokValue = sourceValues source := by
+  cases source <;> simp [sourceToks, sourceValues, lift_values]
+
+theorem sourceToks_erase (source : Source) : (sourceToks source).map eraseTok = sourceToks (eraseSource source) := by
+  cases source <;> simp [sourceToks, eraseSource, lift_erase]
+
 mutual
 def expressionToks (depth : Nat) (qualifier : String) : Predicate → List Tok
   | .compare field op v => lift [.col qualifier field, .raw (comparisonText op)] ++ [.param v]
@@ -303,9 +322,9 @@ def expressionToks (depth : Nat) (qualifier : String) : Predicate → List Tok
   | .and es => lift [.raw "( true"] ++ expressionsToks depth qualifier "AND" es ++ lift [.raw ")"]
   | .or es => lift [.raw "( false"] ++ expressionsToks depth qualifier "OR" es ++ lift [.raw ")"]
   | .not e => lift [.raw "NOT ("] ++ expressionToks depth qualifier e ++ lift [.raw ")"]
-  | .exists (.mk _ schema table e _ _ _) parent child =>
+  | .exists (.mk _ source e _ _ _) parent child =>
     let alias := "e" ++ toString depth
-    lift ([.raw "EXISTS (SELECT 1 FROM", sourceLex schema table, .raw "AS", .ident alias,
+    lift [.raw "EXISTS (SELECT 1 FROM"] ++ sourceToks source ++ lift ([.raw "AS", .ident alias,
       .raw "WHERE true"] ++ (parent.zip child).flatMap (fun pair =>
         [.raw "AND", .col alias pair.2, .raw "=", .col qualifier pair.1]) ++ [.raw "AND ("])
       ++ expressionToks (depth + 1) alias e ++ lift [.raw "))"]
@@ -328,7 +347,7 @@ theorem expressionToks_values (depth : Nat) (q : String) (e : Predicate) :
   cases e
   case «exists» scan parent child =>
     cases scan
-    simp [expressionToks, predicateValues, lift_values, expressionToks_values]
+    simp [expressionToks, predicateValues, lift_values, sourceToks_values, expressionToks_values]
   all_goals simp only [expressionToks, predicateValues]
   all_goals try split
   all_goals simp_all [lift_values, paramToks_values, tokValue, List.filterMap, expressionToks_values, expressionsToks_values]
@@ -343,7 +362,7 @@ theorem expressionToks_erase (depth : Nat) (q : String) (e : Predicate) :
   cases e
   case «exists» scan parent child =>
     cases scan
-    simp [expressionToks, erasePredicate, lift_erase, expressionToks_erase]
+    simp [expressionToks, erasePredicate, lift_erase, sourceToks_erase, expressionToks_erase]
   all_goals simp only [expressionToks, erasePredicate]
   all_goals try split
   all_goals simp_all [lift_erase, paramToks_erase, eraseTok, expressionToks_erase, expressionsToks_erase]
@@ -420,7 +439,7 @@ def offsetLex : Option Nat → List Lex
   | some n => [.raw "OFFSET", .nat n]
 
 def scanToks (scan : Scan) (link : List Lex) : List Tok :=
-  lift ([.raw "SELECT \"s\".* FROM", sourceLex scan.schema scan.table, .raw "AS \"s\" WHERE"] ++ link)
+  lift [.raw "SELECT \"s\".* FROM"] ++ sourceToks scan.source ++ lift ([.raw "AS \"s\" WHERE"] ++ link)
     ++ lift [.raw "AND ("] ++ expressionToks 0 "s" scan.conds ++ lift [.raw ")"]
     ++ lift (orderLex "s" scan.order ++ limitLex scan.limit ++ offsetLex scan.offset)
 
@@ -492,7 +511,7 @@ def groupLex (depth : Nat) (child : List String) : List Lex :=
 
 def lateralScan (kind : Kind) (scan : Scan) : Scan :=
   match kind with
-  | .object => ⟨scan.name, scan.schema, scan.table, scan.conds, [], some 1, none⟩
+  | .object => ⟨scan.name, scan.source, scan.conds, [], some 1, none⟩
   | .array | .aggregate => scan
 
 def lateralAgg (depth : Nat) (kind : Kind) (scan : Scan) (children : List Node) : List Lex :=
@@ -547,7 +566,7 @@ def compile (query : Query) : Compiled := render (emit query)
 
 def placeholders (query : Query) : List Nat := slots (emit query)
 
-def scanValues (scan : Scan) : List Value := predicateValues scan.conds
+def scanValues (scan : Scan) : List Value := sourceValues scan.source ++ predicateValues scan.conds
 
 mutual
 def nodeValues : Node → List Value
@@ -561,7 +580,7 @@ end
 
 def queryValues (query : Query) : List Value := scanValues query.scan ++ nodesValues query.children
 
-def eraseScan (scan : Scan) : Scan := ⟨scan.name, scan.schema, scan.table, erasePredicate scan.conds, scan.order, scan.limit, scan.offset⟩
+def eraseScan (scan : Scan) : Scan := ⟨scan.name, eraseSource scan.source, erasePredicate scan.conds, scan.order, scan.limit, scan.offset⟩
 
 mutual
 def eraseNode : Node → Node
@@ -580,12 +599,12 @@ def eraseQuery (query : Query) : Query :=
 
 theorem scanToks_values (scan : Scan) (link : List Lex) :
     (scanToks scan link).filterMap tokValue = scanValues scan := by
-  simp [scanToks, scanValues, lift_values, expressionToks_values]
+  simp [scanToks, scanValues, lift_values, sourceToks_values, expressionToks_values]
 
 theorem scanToks_erase (scan : Scan) (link : List Lex) :
     (scanToks scan link).map eraseTok = scanToks (eraseScan scan) link := by
   cases scan
-  simp [scanToks, eraseScan, lift_erase, expressionToks_erase, Scan.schema, Scan.table, Scan.conds, Scan.order, Scan.limit, Scan.offset]
+  simp [scanToks, eraseScan, lift_erase, sourceToks_erase, expressionToks_erase, Scan.source, Scan.conds, Scan.order, Scan.limit, Scan.offset]
 
 theorem lateralScan_values (kind : Kind) (scan : Scan) :
     scanValues (lateralScan kind scan) = scanValues scan := by
@@ -724,7 +743,7 @@ theorem placeholders_numbered (query : Query) :
   simp [placeholders, slots_numbered, h]
 
 theorem lateralScan_object (scan : Scan) :
-    lateralScan .object scan = ⟨scan.name, scan.schema, scan.table, scan.conds, [], some 1, none⟩ := rfl
+    lateralScan .object scan = ⟨scan.name, scan.source, scan.conds, [], some 1, none⟩ := rfl
 
 theorem lateralScan_limit (kind : Kind) (scan : Scan) :
     (lateralScan kind scan).limit = (if kind = .object then some 1 else scan.limit) := by
@@ -747,12 +766,23 @@ structure Relation where
   child : List String
   deriving DecidableEq, Repr
 
+inductive Part where
+  | text (sql : String)
+  | arg (name : String)
+  deriving DecidableEq, Repr
+
+inductive Body where
+  | relation
+  | statement (parts : List Part) (parameters : List String)
+  deriving DecidableEq, Repr
+
 structure Table where
   name : String
   schema : String
   table : String
   columns : List Column
   relations : List Relation
+  body : Body
   deriving DecidableEq, Repr
 
 inductive RootKind where
@@ -798,6 +828,7 @@ structure Order where
 structure Selection where
   alias : String
   name : String
+  arguments : List (String × Value)
   conds : Option (Expression String Value)
   order : List Order
   limit : Option Nat
@@ -816,6 +847,7 @@ inductive Error where
   | invalidFilter
   | missingSession (name : String)
   | invalidPermission (name : String)
+  | invalidArguments (type : String)
   | tooDeep
   deriving DecidableEq, Repr
 
@@ -856,6 +888,128 @@ def membershipValid (vs : List Value) : Bool :=
 def relationValid (relation : Relation) : Bool :=
   !relation.parent.isEmpty && relation.parent.length == relation.child.length
 
+def argumentValid (v : Value) : Bool := v == .null || scalarValid v
+
+def bodyParameters : Body → List String
+  | .relation => []
+  | .statement _ parameters => parameters
+
+def partValid (parameters : List String) : Part → Bool
+  | .text _ => true
+  | .arg name => parameters.contains name
+
+def bodyValid : Body → Bool
+  | .relation => true
+  | .statement parts parameters => parts.all (partValid parameters)
+
+def acceptsArguments (body : Body) (arguments : List (String × Value)) : Bool :=
+  bodyValid body && arguments.map (·.1) == bodyParameters body && arguments.all fun a => argumentValid a.2
+
+def partToks (arguments : List (String × Value)) : Part → List Tok
+  | .text sql => [.lex (.raw sql)]
+  | .arg name => [.param ((arguments.lookup name).getD .null)]
+
+def bodySource (table : Table) (arguments : List (String × Value)) : Body → Source
+  | .relation => .table table.schema table.table
+  | .statement parts _ => .tokens (lift [.raw "("] ++ parts.flatMap (partToks arguments) ++ lift [.raw ")"])
+
+def resolveSource (table : Table) (body : Body) (arguments : List (String × Value)) : Except Error Source :=
+  if acceptsArguments body arguments then .ok (bodySource table arguments body)
+  else .error (.invalidArguments table.name)
+
+def argumentValues (arguments : List (String × Value)) : Body → List Value
+  | .relation => []
+  | .statement parts _ => parts.filterMap fun p => match p with
+    | .text _ => none
+    | .arg name => some ((arguments.lookup name).getD .null)
+
+def partShape : Part → Tok
+  | .text sql => .lex (.raw sql)
+  | .arg _ => .param (.int 0)
+
+def templateToks : Body → List Tok
+  | .relation => []
+  | .statement parts _ => lift [.raw "("] ++ parts.map partShape ++ lift [.raw ")"]
+
+def sourceDeclared (table : Table) (source : Source) : Bool :=
+  match table.body, source with
+  | .relation, .table schema name => schema == table.schema && name == table.table
+  | .relation, .tokens _ => false
+  | _, .table _ _ => false
+  | body, .tokens toks => toks.map eraseTok == templateToks body
+
+theorem argumentValid_iff (v : Value) : argumentValid v = true ↔ v = .null ∨ scalarValid v = true := by
+  simp [argumentValid]
+
+theorem acceptsArguments_iff (body : Body) (arguments : List (String × Value)) :
+    acceptsArguments body arguments = true ↔
+      bodyValid body = true ∧ arguments.map (·.1) = bodyParameters body ∧
+        ∀ argument ∈ arguments, argumentValid argument.2 = true := by
+  simp [acceptsArguments, and_assoc]
+
+theorem resolveSource_exact (table : Table) (body : Body) (arguments : List (String × Value)) :
+    resolveSource table body arguments =
+      if acceptsArguments body arguments then .ok (bodySource table arguments body)
+      else .error (.invalidArguments table.name) := rfl
+
+theorem bodySource_values (table : Table) (arguments : List (String × Value)) (body : Body) :
+    sourceValues (bodySource table arguments body) = argumentValues arguments body := by
+  cases body with
+  | relation => rfl
+  | statement parts parameters =>
+    simp only [bodySource, sourceValues, argumentValues, List.filterMap_append, lift_values, List.nil_append, List.append_nil]
+    induction parts with
+    | nil => rfl
+    | cons p ps ih => cases p <;> simp_all [partToks, tokValue, List.filterMap_cons]
+
+theorem partToks_erase (arguments : List (String × Value)) (parts : List Part) :
+    (parts.flatMap (partToks arguments)).map eraseTok = parts.map partShape := by
+  induction parts with
+  | nil => rfl
+  | cons p ps ih => cases p <;> simp_all [partToks, partShape, eraseTok]
+
+theorem bodySource_declared (table : Table) (arguments : List (String × Value)) :
+    sourceDeclared table (bodySource table arguments table.body) = true := by
+  cases h : table.body with
+  | relation => simp [sourceDeclared, bodySource, h]
+  | statement parts parameters =>
+    simp [sourceDeclared, bodySource, h, templateToks, lift_erase, partToks_erase]
+
+theorem argumentValues_empty (body : Body) (h : acceptsArguments body [] = true) :
+    argumentValues [] body = [] := by
+  cases body with
+  | relation => rfl
+  | statement parts parameters =>
+    simp only [acceptsArguments, bodyValid, bodyParameters, List.map_nil, Bool.and_eq_true,
+      List.all_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨valid, empty⟩, _⟩ := h
+    subst empty
+    simp only [argumentValues, List.filterMap_eq_nil_iff]
+    intro p member
+    cases p with
+    | text sql => rfl
+    | arg name => simpa [partValid] using valid _ member
+
+theorem resolveSource_ok (table : Table) (body : Body) (arguments : List (String × Value)) (source : Source)
+    (h : resolveSource table body arguments = .ok source) :
+    acceptsArguments body arguments = true ∧ source = bodySource table arguments body := by
+  simp only [resolveSource] at h
+  split at h
+  · cases h; exact ⟨by assumption, rfl⟩
+  · cases h
+
+theorem resolveSource_error (table : Table) (body : Body) (arguments : List (String × Value)) (e : Error)
+    (h : resolveSource table body arguments = .error e) : acceptsArguments body arguments = false := by
+  simp only [resolveSource] at h
+  split at h
+  · cases h
+  · simp_all
+
+theorem resolveSource_empty (table : Table) (body : Body) (source : Source)
+    (h : resolveSource table body [] = .ok source) : sourceValues source = [] := by
+  obtain ⟨accepted, rfl⟩ := resolveSource_ok table body [] source h
+  rw [bodySource_values, argumentValues_empty body accepted]
+
 mutual
 def resolveExpression (schema : Schema) (table : Table) (depth : Nat)
     (e : Expression String Value) : Except Error (Predicate) :=
@@ -891,8 +1045,11 @@ def resolveExpression (schema : Schema) (table : Table) (depth : Nat)
         else match findTable schema relation.target with
         | none => .error (.unknownType relation.target)
         | some target =>
-          (resolveExpression schema target (depth + 1) e).map fun out =>
-            .exists ⟨target.name, target.schema, target.table, out, [], none, none⟩ relation.parent relation.child
+          match resolveSource target target.body [] with
+          | .error err => .error err
+          | .ok source =>
+            (resolveExpression schema target (depth + 1) e).map fun out =>
+              .exists ⟨target.name, source, out, [], none, none⟩ relation.parent relation.child
 termination_by sizeOf e
 def resolveExpressions (schema : Schema) (table : Table) (depth : Nat)
     (es : List (Expression String Value)) : Except Error (List (Predicate)) :=
@@ -920,14 +1077,18 @@ def resolveOrder (table : Table) : List Order → Except Error (List (String × 
       | .error e => .error e
       | .ok rest => .ok ((column, o.direction) :: rest)
 
-def resolveScan (schema : Schema) (table : Table) (conds : Option (Expression String Value)) (order : List Order) (limit offset : Option Nat) :
+def resolveScan (schema : Schema) (table : Table) (body : Body) (arguments : List (String × Value))
+    (conds : Option (Expression String Value)) (order : List Order) (limit offset : Option Nat) :
     Except Error Scan :=
-  match resolveFilter schema table conds with
+  match resolveSource table body arguments with
   | .error e => .error e
-  | .ok conds =>
-    match resolveOrder table order with
+  | .ok source =>
+    match resolveFilter schema table conds with
     | .error e => .error e
-    | .ok order => .ok ⟨table.name, table.schema, table.table, conds, order, limit, offset⟩
+    | .ok conds =>
+      match resolveOrder table order with
+      | .error e => .error e
+      | .ok order => .ok ⟨table.name, source, conds, order, limit, offset⟩
 
 def aliasValid (alias : String) : Bool :=
   alias ≠ "" && alias ≠ rowAlias && alias.utf8ByteSize ≤ 63
@@ -970,7 +1131,8 @@ def childMode (mode : Mode) (name : String) : Option Mode :=
 mutual
 def resolveNode (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
     (scanOrder : List (String × Direction)) : Selection → Except Error Node
-  | ⟨alias, name, conds, order, limit, offset, children⟩ =>
+  | ⟨alias, name, arguments, conds, order, limit, offset, children⟩ =>
+    if !arguments.isEmpty then .error (.invalidArguments table.name) else
     match modeLeaf table mode name with
     | some column =>
       if conds.isNone && order.isEmpty && limit.isNone && offset.isNone && children.isEmpty then
@@ -1001,7 +1163,7 @@ def resolveNode (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
             else if !relationValid relation then .error (.invalidRelation table.name name)
             else if !selectionValid (children.map (·.alias)) then .error (.invalidSelection target.name)
             else
-              match resolveScan schema target conds order limit offset with
+              match resolveScan schema target target.body [] conds order limit offset with
               | .error e => .error e
               | .ok scan =>
                 match resolveNodes schema target (depth + 1) (relationMode relation.kind) scan.order children with
@@ -1028,7 +1190,7 @@ def resolveSelection (schema : Schema) (root : Selection) : Except Error Query :
     | some table =>
       if !selectionValid (root.children.map (·.alias)) then .error (.invalidSelection table.name)
       else
-        match resolveScan schema table root.conds root.order root.limit root.offset with
+        match resolveScan schema table table.body root.arguments root.conds root.order root.limit root.offset with
         | .error e => .error e
         | .ok scan =>
           let kind := match field.kind with
@@ -1046,11 +1208,18 @@ def runSelection (schema : Schema) (root : Selection) : Except Error Compiled :=
 
 mutual
 def selectionValues : Selection → List Value
-  | ⟨_, _, conds, _, _, _, children⟩ => filterValues conds ++ selectionsValues children
+  | ⟨_, _, _, conds, _, _, _, children⟩ => filterValues conds ++ selectionsValues children
 def selectionsValues : List Selection → List Value
   | [] => []
   | s :: ss => selectionValues s ++ selectionsValues ss
 end
+
+def rootValues (schema : Schema) (root : Selection) : List Value :=
+  match schema.roots.find? (·.field = root.name) with
+  | none => []
+  | some field => match findTable schema field.target with
+    | none => []
+    | some table => argumentValues root.arguments table.body
 
 mutual
 theorem resolveExpression_values (schema : Schema) (table : Table) (depth : Nat)
@@ -1064,6 +1233,8 @@ theorem resolveExpression_values (schema : Schema) (table : Table) (depth : Nat)
   all_goals simp only [expressionValues, predicateValues]
   all_goals first
     | rfl
+    | (rw [resolveSource_empty _ _ _ (by assumption), List.nil_append]
+       exact resolveExpression_values _ _ _ _ _ (by assumption))
     | exact resolveExpression_values _ _ _ _ _ (by assumption)
     | exact resolveExpressions_values _ _ _ _ _ (by assumption)
 theorem resolveExpressions_values (schema : Schema) (table : Table) (depth : Nat)
@@ -1088,24 +1259,39 @@ theorem resolveFilter_values (schema : Schema) (table : Table) (f : Option (Expr
   | none => cases h; rfl
   | some e => simpa [resolveFilter, filterValues] using resolveExpression_values schema table 0 e out h
 
-theorem resolveScan_values (schema : Schema) (table : Table) (conds : Option (Expression String Value)) (order : List Order)
-    (limit offset : Option Nat) (scan : Scan) (h : resolveScan schema table conds order limit offset = .ok scan) :
-    scanValues scan = filterValues conds := by
+theorem resolveScan_values (schema : Schema) (table : Table) (body : Body) (arguments : List (String × Value))
+    (conds : Option (Expression String Value)) (order : List Order)
+    (limit offset : Option Nat) (scan : Scan) (h : resolveScan schema table body arguments conds order limit offset = .ok scan) :
+    scanValues scan = argumentValues arguments body ++ filterValues conds := by
   simp only [resolveScan] at h
   split at h
   · cases h
-  · rename_i out hout
+  · rename_i source hsource
     split at h
     · cases h
-    · cases h
-      simpa [scanValues, Scan.conds] using resolveFilter_values schema table conds out hout
+    · rename_i out hout
+      split at h
+      · cases h
+      · cases h
+        obtain ⟨_, rfl⟩ := resolveSource_ok _ _ _ _ hsource
+        simp only [scanValues, Scan.source, Scan.conds, bodySource_values]
+        rw [resolveFilter_values schema table conds out hout]
+
+theorem resolveScan_arguments (schema : Schema) (table : Table) (body : Body) (arguments : List (String × Value))
+    (conds : Option (Expression String Value)) (order : List Order)
+    (limit offset : Option Nat) (scan : Scan) (h : resolveScan schema table body arguments conds order limit offset = .ok scan) :
+    acceptsArguments body arguments = true := by
+  simp only [resolveScan] at h
+  split at h
+  · cases h
+  · exact (resolveSource_ok _ _ _ _ (by assumption)).1
 
 mutual
 theorem resolveNode_values (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
     (scanOrder : List (String × Direction)) (s : Selection)
     (n : Node) (h : resolveNode schema table depth mode scanOrder s = .ok n) :
     nodeValues n = selectionValues s := by
-  obtain ⟨alias, name, conds, order, limit, offset, children⟩ := s
+  obtain ⟨alias, name, arguments, conds, order, limit, offset, children⟩ := s
   simp only [resolveNode] at h
   all_goals repeat' first | cases h | split at h
   all_goals simp_all
@@ -1115,7 +1301,8 @@ theorem resolveNode_values (schema : Schema) (table : Table) (depth : Nat) (mode
   all_goals first
     | rfl
     | exact resolveNodes_values _ _ _ _ _ _ _ (by assumption)
-    | rw [resolveScan_values _ _ _ _ _ _ _ (by assumption),
+    | rw [resolveScan_values _ _ _ _ _ _ _ _ _ (by assumption),
+        argumentValues_empty _ (resolveScan_arguments _ _ _ _ _ _ _ _ _ (by assumption)),
         resolveNodes_values _ _ _ _ _ _ _ (by assumption)]; rfl
 theorem resolveNodes_values (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
     (scanOrder : List (String × Direction)) (ss : List Selection)
@@ -1132,21 +1319,21 @@ end
 
 theorem resolveSelection_values (schema : Schema) (root : Selection) :
     match resolveSelection schema root with
-    | .ok query => queryValues query = selectionValues root
+    | .ok query => queryValues query = rootValues schema root ++ selectionValues root
     | .error _ => True := by
   split
   · rename_i query h
     simp only [resolveSelection] at h
     repeat' first | cases h | split at h
-    simp only [queryValues]
-    rw [resolveScan_values _ _ _ _ _ _ _ (by assumption),
-      resolveNodes_values _ _ _ _ _ _ _ (by assumption)]
-    cases root; rfl
+    rename_i field hfield _ table htable _ _ scan hscan _ children hchildren
+    simp only [queryValues, rootValues, hfield, htable]
+    rw [resolveScan_values _ _ _ _ _ _ _ _ _ hscan, resolveNodes_values _ _ _ _ _ _ _ hchildren]
+    cases root; simp [selectionValues]
   · trivial
 
 theorem runSelection_params (schema : Schema) (root : Selection) :
     match runSelection schema root with
-    | .ok compiled => compiled.params = selectionValues root
+    | .ok compiled => compiled.params = rootValues schema root ++ selectionValues root
     | .error _ => True := by
   have h := resolveSelection_values schema root
   simp only [runSelection]
@@ -1156,25 +1343,27 @@ theorem runSelection_params (schema : Schema) (root : Selection) :
   · rename_i e hq
     simp [hq]
 
-def referenceDeclared (schema : Schema) (ref : Reference) : Bool :=
-  schema.tables.any fun t => t.schema = ref.schema && t.table = ref.table
+def scanDeclared (schema : Schema) (name : String) (source : Source) : Bool :=
+  schema.tables.any fun t => t.name == name && sourceDeclared t source
 
 mutual
 def expressionDeclared (schema : Schema) : Predicate → Bool
   | .compare _ _ _ | .member _ _ _ | .isNull _ _ => true
   | .and es | .or es => expressionsDeclared schema es
   | .not e => expressionDeclared schema e
-  | .exists (.mk _ ns table e _ _ _) parent child => referenceDeclared schema ⟨ns, table, parent, child⟩ && expressionDeclared schema e
+  | .exists (.mk name source e _ _ _) _ _ => scanDeclared schema name source && expressionDeclared schema e
 def expressionsDeclared (schema : Schema) : List (Predicate) → Bool
   | [] => true
   | e :: es => expressionDeclared schema e && expressionsDeclared schema es
 end
 
-theorem found_reference (schema : Schema) (name : String) (table : Table)
-    (parent child : List String) (h : findTable schema name = some table) :
-    referenceDeclared schema ⟨table.schema, table.table, parent, child⟩ = true := by
-  have hmem := List.mem_of_find?_eq_some h
-  exact List.any_eq_true.mpr ⟨table, hmem, by simp⟩
+theorem source_declared (schema : Schema) (name : String) (table : Table) (body : Body)
+    (arguments : List (String × Value)) (source : Source) (hfind : findTable schema name = some table)
+    (hbody : body = table.body) (h : resolveSource table body arguments = .ok source) :
+    scanDeclared schema table.name source = true := by
+  obtain ⟨_, rfl⟩ := resolveSource_ok _ _ _ _ h
+  subst hbody
+  exact List.any_eq_true.mpr ⟨table, List.mem_of_find?_eq_some hfind, by simp [bodySource_declared]⟩
 
 mutual
 theorem resolveExpression_declared (schema : Schema) (table : Table) (depth : Nat)
@@ -1190,7 +1379,7 @@ theorem resolveExpression_declared (schema : Schema) (table : Table) (depth : Na
     | rfl
     | exact resolveExpression_declared _ _ _ _ _ (by assumption)
     | exact resolveExpressions_declared _ _ _ _ _ (by assumption)
-    | exact ⟨found_reference _ _ _ _ _ (by assumption),
+    | exact ⟨source_declared _ _ _ _ _ _ (by assumption) rfl (by assumption),
         resolveExpression_declared _ _ _ _ _ (by assumption)⟩
 theorem resolveExpressions_declared (schema : Schema) (table : Table) (depth : Nat)
     (es : List (Expression String Value)) (out : List (Predicate))
@@ -1215,7 +1404,7 @@ theorem resolveFilter_declared (schema : Schema) (table : Table) (f : Option (Ex
   | some e => exact resolveExpression_declared schema table 0 e out h
 
 def declared (schema : Schema) (scan : Scan) : Bool :=
-  referenceDeclared schema ⟨scan.schema, scan.table, [], []⟩ && expressionDeclared schema scan.conds
+  scanDeclared schema scan.name scan.source && expressionDeclared schema scan.conds
 
 mutual
 def nodeScans : Node → List Scan
@@ -1229,26 +1418,29 @@ end
 
 def queryScans (query : Query) : List Scan := query.scan :: nodesScans query.children
 
-theorem findTable_declared (schema : Schema) (name : String) (table : Table)
+theorem findTable_declared (schema : Schema) (name : String) (table : Table) (arguments : List (String × Value))
     (conds : Option (Expression String Value)) (order : List Order) (limit offset : Option Nat) (scan : Scan)
     (hfind : findTable schema name = some table)
-    (hscan : resolveScan schema table conds order limit offset = .ok scan) : declared schema scan = true := by
+    (hscan : resolveScan schema table table.body arguments conds order limit offset = .ok scan) : declared schema scan = true := by
   simp only [resolveScan] at hscan
   split at hscan
   · cases hscan
-  · rename_i out hout
+  · rename_i source hsource
     split at hscan
     · cases hscan
-    · cases hscan
-      simp only [declared, Scan.schema, Scan.table, Scan.conds, Bool.and_eq_true]
-      exact ⟨found_reference _ _ _ _ _ hfind, resolveFilter_declared _ _ _ _ hout⟩
+    · rename_i out hout
+      split at hscan
+      · cases hscan
+      · cases hscan
+        simp only [declared, Scan.name, Scan.source, Scan.conds, Bool.and_eq_true]
+        exact ⟨source_declared _ _ _ _ _ _ hfind rfl hsource, resolveFilter_declared _ _ _ _ hout⟩
 
 mutual
 theorem resolveNode_declared (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
     (scanOrder : List (String × Direction)) (s : Selection)
     (n : Node) (h : resolveNode schema table depth mode scanOrder s = .ok n) :
     (nodeScans n).all (declared schema) = true := by
-  obtain ⟨alias, name, conds, order, limit, offset, children⟩ := s
+  obtain ⟨alias, name, arguments, conds, order, limit, offset, children⟩ := s
   simp only [resolveNode] at h
   all_goals repeat' first | cases h | split at h
   all_goals try split
@@ -1256,7 +1448,7 @@ theorem resolveNode_declared (schema : Schema) (table : Table) (depth : Nat) (mo
   all_goals first
     | rfl
     | exact resolveNodes_declared _ _ _ _ _ _ _ (by assumption)
-    | exact ⟨findTable_declared _ _ _ _ _ _ _ _ (by assumption) (by assumption),
+    | exact ⟨findTable_declared _ _ _ _ _ _ _ _ _ (by assumption) (by assumption),
         resolveNodes_declared _ _ _ _ _ _ _ (by assumption)⟩
 theorem resolveNodes_declared (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
     (scanOrder : List (String × Direction)) (ss : List Selection)
@@ -1280,7 +1472,7 @@ theorem resolveSelection_declared (schema : Schema) (root : Selection) :
     simp only [resolveSelection] at h
     repeat' first | cases h | split at h
     simp only [queryScans, List.all_cons, Bool.and_eq_true]
-    exact ⟨findTable_declared _ _ _ _ _ _ _ _ (by assumption) (by assumption),
+    exact ⟨findTable_declared _ _ _ _ _ _ _ _ _ (by assumption) (by assumption),
       resolveNodes_declared _ _ _ _ _ _ _ (by assumption)⟩
   · trivial
 
@@ -1327,7 +1519,7 @@ def acceptsExpression (schema : Schema) (table : Table) (depth : Nat)
     | some relation => decide (relation.kind ≠ .aggregate) && relationValid relation &&
       match findTable schema relation.target with
       | none => false
-      | some target => acceptsExpression schema target (depth + 1) e
+      | some target => acceptsArguments target.body [] && acceptsExpression schema target (depth + 1) e
 termination_by sizeOf e
 def acceptsExpressions (schema : Schema) (table : Table) (depth : Nat)
     (es : List (Expression String Value)) : Bool :=
@@ -1343,16 +1535,16 @@ def acceptsFilter (schema : Schema) (table : Table) (conds : Option (Expression 
 def acceptsOrder (table : Table) (order : List Order) : Bool :=
   order.all fun o => (findColumn table o.field).isSome
 
-def acceptsScan (schema : Schema) (table : Table) (conds : Option (Expression String Value))
-    (order : List Order) : Bool :=
-  acceptsFilter schema table conds && acceptsOrder table order
+def acceptsScan (schema : Schema) (table : Table) (body : Body) (arguments : List (String × Value))
+    (conds : Option (Expression String Value)) (order : List Order) : Bool :=
+  acceptsArguments body arguments && acceptsFilter schema table conds && acceptsOrder table order
 
 mutual
 def acceptsNode (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
     (selection : Selection) : Bool :=
   let arguments := selection.conds.isNone && selection.order.isEmpty &&
     selection.limit.isNone && selection.offset.isNone
-  match modeLeaf table mode selection.name with
+  selection.arguments.isEmpty && match modeLeaf table mode selection.name with
   | some _ => arguments && selection.children.isEmpty
   | none => match childMode mode selection.name with
     | some next => depth < maxDepth + 3 && arguments &&
@@ -1364,7 +1556,7 @@ def acceptsNode (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
         | none => false
         | some target => depth < maxDepth && (decide (relation.kind ≠ .object) || arguments) &&
           relationValid relation && selectionValid (selection.children.map (·.alias)) &&
-          acceptsScan schema target selection.conds selection.order &&
+          acceptsScan schema target target.body [] selection.conds selection.order &&
           acceptsNodes schema target (depth + 1) (relationMode relation.kind) selection.children
 termination_by sizeOf selection
 decreasing_by all_goals cases selection <;> simp_all <;> omega
@@ -1383,7 +1575,7 @@ def acceptsSelection (schema : Schema) (root : Selection) : Bool :=
   | some field => match findTable schema field.target with
     | none => false
     | some table => selectionValid (root.children.map (·.alias)) &&
-      acceptsScan schema table root.conds root.order &&
+      acceptsScan schema table table.body root.arguments root.conds root.order &&
       acceptsNodes schema table 0 (if field.kind = .aggregate then .aggregate else .row) root.children
 
 theorem success_map (result : Except ε α) (f : α → β) :
@@ -1396,6 +1588,8 @@ theorem resolveExpression_accepts (schema : Schema) (table : Table) (depth : Nat
   cases e <;> simp only [resolveExpression, acceptsExpression]
   all_goals repeat' split
   all_goals try simp only [success_map]
+  all_goals try (have := (resolveSource_ok _ _ _ _ (by assumption)).1)
+  all_goals try (have := resolveSource_error _ _ _ _ (by assumption))
   all_goals simp_all [Except.isOk, Except.toBool, Bool.and_eq_true]
   all_goals first
     | omega
@@ -1431,13 +1625,16 @@ theorem resolveOrder_accepts (table : Table) (order : List Order) :
     · simp_all [Except.isOk, Except.toBool]
     · split <;> simp_all [Except.isOk, Except.toBool, acceptsOrder]
 
-theorem resolveScan_accepts (schema : Schema) (table : Table) (conds : Option (Expression String Value))
-    (order : List Order) (limit offset : Option Nat) :
-    (resolveScan schema table conds order limit offset).isOk = acceptsScan schema table conds order := by
+theorem resolveScan_accepts (schema : Schema) (table : Table) (body : Body) (arguments : List (String × Value))
+    (conds : Option (Expression String Value)) (order : List Order) (limit offset : Option Nat) :
+    (resolveScan schema table body arguments conds order limit offset).isOk =
+      acceptsScan schema table body arguments conds order := by
   have hf := resolveFilter_accepts schema table conds
   have ho := resolveOrder_accepts table order
   simp only [resolveScan, acceptsScan]
   repeat' split
+  all_goals try (have := (resolveSource_ok _ _ _ _ (by assumption)).1)
+  all_goals try (have := resolveSource_error _ _ _ _ (by assumption))
   all_goals simp_all [Except.isOk, Except.toBool]
 
 mutual
@@ -1446,9 +1643,9 @@ theorem resolveNode_accepts (schema : Schema) (table : Table) (depth : Nat) (mod
     (resolveNode schema table depth mode scanOrder selection).isOk =
       acceptsNode schema table depth mode selection := by
   cases selection with
-  | mk alias name conds order limit offset children =>
+  | mk alias name arguments conds order limit offset children =>
     have ih := fun t d m os => resolveNodes_accepts schema t d m os children
-    have hs := fun t => resolveScan_accepts schema t conds order limit offset
+    have hs := fun t b a => resolveScan_accepts schema t b a conds order limit offset
     simp only [resolveNode, acceptsNode]
     repeat' split
     all_goals simp_all [Except.isOk, Except.toBool, Bool.and_eq_true]
@@ -1471,7 +1668,7 @@ end
 
 theorem resolveSelection_accepts (schema : Schema) (root : Selection) :
     (resolveSelection schema root).isOk = acceptsSelection schema root := by
-  have hs := fun t => resolveScan_accepts schema t root.conds root.order root.limit root.offset
+  have hs := fun t b a => resolveScan_accepts schema t b a root.conds root.order root.limit root.offset
   have hn := fun t m os => resolveNodes_accepts schema t 0 m os root.children
   simp only [resolveSelection, acceptsSelection]
   repeat' split
@@ -1559,8 +1756,8 @@ def predicateEq : Predicate → Predicate → Bool
   | .isNull f b, .isNull g c => f == g && b == c
   | .and es, .and fs | .or es, .or fs => predicatesEq es fs
   | .not e, .not f => predicateEq e f
-  | .exists (.mk name ns t e os l o) ps cs, .exists (.mk name' ns' t' f os' l' o') ps' cs' =>
-    name == name' && ns == ns' && t == t' && predicateEq e f && os == os' && l == l' && o == o' && ps == ps' && cs == cs'
+  | .exists (.mk name src e os l o) ps cs, .exists (.mk name' src' f os' l' o') ps' cs' =>
+    name == name' && src == src' && predicateEq e f && os == os' && l == l' && o == o' && ps == ps' && cs == cs'
   | _, _ => false
 def predicatesEq : List Predicate → List Predicate → Bool
   | [], [] => true
@@ -1585,7 +1782,7 @@ def hasConjunct (condition expression : Predicate) : Bool :=
 def scanPermitted (schema : Schema) (session : Session) (scan : Scan) : Bool :=
   match findTable schema scan.name with
   | none => false
-  | some table => table.schema == scan.schema && table.table == scan.table &&
+  | some table => sourceDeclared table scan.source &&
     (session.role == "admin" || match roleCondition schema session scan.name with
       | .error _ => false
       | .ok condition => hasConjunct condition scan.conds)
@@ -1595,7 +1792,7 @@ def predicateScans : Predicate → List Scan
   | .compare _ _ _ | .member _ _ _ | .isNull _ _ => []
   | .and es | .or es => predicatesScans es
   | .not e => predicateScans e
-  | .exists (.mk name ns t e os l o) _ _ => .mk name ns t e os l o :: predicateScans e
+  | .exists (.mk name src e os l o) _ _ => .mk name src e os l o :: predicateScans e
 def predicatesScans : List Predicate → List Scan
   | [] => []
   | e :: es => predicateScans e ++ predicatesScans es
@@ -1620,9 +1817,9 @@ def predicatesReads (name : String) : List Predicate → List (String × String)
   | [] => []
   | e :: es => predicateReads name e ++ predicatesReads name es
 def scanReads : Scan → List (String × String)
-  | .mk name _ _ (.and [user, _]) order _ _ =>
+  | .mk name _ (.and [user, _]) order _ _ =>
     predicateReads name user ++ order.map (fun o => (name, o.1))
-  | .mk name _ _ e order _ _ => predicateReads name e ++ order.map (fun o => (name, o.1))
+  | .mk name _ e order _ _ => predicateReads name e ++ order.map (fun o => (name, o.1))
 end
 
 def leafReads (name : String) : Leaf → List (String × String)
@@ -1648,11 +1845,11 @@ def queryPermitted (schema : Schema) (session : Session) (query : Query) : Bool 
     (queryReads query).all (fun c => columnPermitted schema session c.1 c.2)
 
 def appendCondition (scan : Scan) (condition : Predicate) : Scan :=
-  ⟨scan.name, scan.schema, scan.table, .and [scan.conds, condition], scan.order, scan.limit, scan.offset⟩
+  ⟨scan.name, scan.source, .and [scan.conds, condition], scan.order, scan.limit, scan.offset⟩
 
 theorem appendCondition_exact (scan : Scan) (condition : Predicate) :
     appendCondition scan condition =
-      .mk scan.name scan.schema scan.table (.and [scan.conds, condition]) scan.order scan.limit scan.offset := by
+      .mk scan.name scan.source (.and [scan.conds, condition]) scan.order scan.limit scan.offset := by
   rfl
 
 def addPermission (schema : Schema) (session : Session) (scan : Scan) : Except Error Scan := do
@@ -1670,7 +1867,7 @@ def capLimit (cap limit : Option Nat) : Option Nat :=
     | some l => min l c)
 
 def limitScan (cap : Option Nat) (scan : Scan) : Scan :=
-  .mk scan.name scan.schema scan.table scan.conds scan.order (capLimit cap scan.limit) scan.offset
+  .mk scan.name scan.source scan.conds scan.order (capLimit cap scan.limit) scan.offset
 
 def limitNodes (cap : Option Nat) : Node → Node
   | .nodes alias order limit children => .nodes alias order (capLimit cap limit) children
@@ -1699,7 +1896,7 @@ theorem capLimit_choice (cap limit : Option Nat) :
   cases cap <;> cases limit <;> simp [capLimit] <;> omega
 
 theorem limitScan_exact (cap : Option Nat) (scan : Scan) :
-    limitScan cap scan = .mk scan.name scan.schema scan.table scan.conds scan.order (capLimit cap scan.limit) scan.offset := rfl
+    limitScan cap scan = .mk scan.name scan.source scan.conds scan.order (capLimit cap scan.limit) scan.offset := rfl
 
 theorem listScan_array (cap : Option Nat) (scan : Scan) : listScan .array cap scan = limitScan cap scan := rfl
 
@@ -1751,9 +1948,9 @@ def guardPredicates (schema : Schema) (session : Session) : List Predicate → E
   | [] => .ok []
   | e :: es => do return (← guardPredicate schema session e) :: (← guardPredicates schema session es)
 def guardScan (schema : Schema) (session : Session) : Scan → Except Error Scan
-  | .mk name ns t e os l o => do
+  | .mk name src e os l o => do
     let e ← guardPredicate schema session e
-    addPermission schema session ⟨name, ns, t, e, os, l, o⟩
+    addPermission schema session ⟨name, src, e, os, l, o⟩
 end
 
 mutual
@@ -1816,7 +2013,7 @@ def run (schema : Schema) (session : Session) (root : Selection) : Except Error 
 
 theorem addPermission_condition (schema : Schema) (session : Session) (scan : Scan) :
     addPermission schema session scan = (roleCondition schema session scan.name).map
-      (fun condition => .mk scan.name scan.schema scan.table (.and [scan.conds, condition]) scan.order scan.limit scan.offset) := by
+      (fun condition => .mk scan.name scan.source (.and [scan.conds, condition]) scan.order scan.limit scan.offset) := by
   simp only [addPermission]
   cases roleCondition schema session scan.name <;> rfl
 
@@ -1901,7 +2098,7 @@ def guardedPredicatesValues (schema : Schema) (session : Session) : List Predica
   | [] => []
   | e :: es => guardedPredicateValues schema session e ++ guardedPredicatesValues schema session es
 def guardedScanValues (schema : Schema) (session : Session) : Scan → List Value
-  | .mk name _ _ e _ _ _ => guardedPredicateValues schema session e ++ roleValues schema session name
+  | .mk name src e _ _ _ => sourceValues src ++ guardedPredicateValues schema session e ++ roleValues schema session name
 end
 
 mutual
@@ -1918,7 +2115,7 @@ def guardedQueryValues (schema : Schema) (session : Session) (query : Query) : L
   guardedScanValues schema session query.scan ++ guardedNodesValues schema session query.children
 
 def documentValues (schema : Schema) (session : Session) (root : Selection) : List Value :=
-  if session.role == "admin" then selectionValues root else
+  if session.role == "admin" then rootValues schema root ++ selectionValues root else
   match resolveSelection (visibleSchema schema session.role) root with
   | .ok query => guardedQueryValues schema session query
   | .error _ => []
@@ -1930,7 +2127,7 @@ theorem addPermission_values (schema : Schema) (session : Session) (scan out : S
   split at h
   · cases h
   · cases h
-    simp_all [appendCondition, scanValues, Scan.conds, roleValues, predicateValues, predicatesValues]
+    simp_all [appendCondition, scanValues, Scan.source, Scan.conds, roleValues, predicateValues, predicatesValues]
 
 mutual
 theorem guardPredicate_values (schema : Schema) (session : Session) (e out : Predicate)
@@ -1962,7 +2159,7 @@ theorem guardScan_values (schema : Schema) (session : Session) (scan out : Scan)
   split at h
   · cases h
   · rw [addPermission_values _ _ _ _ h]
-    simp only [scanValues, Scan.conds, Scan.name, guardedScanValues]
+    simp only [scanValues, Scan.source, Scan.conds, Scan.name, guardedScanValues]
     rw [guardPredicate_values _ _ _ _ (by assumption)]
 end
 
@@ -2008,7 +2205,10 @@ theorem resolve_values (schema : Schema) (session : Session) (root : Selection) 
     all_goals simp only [documentValues]
     all_goals split
     all_goals first
-      | (simpa [*] using resolveSelection_values (visibleSchema schema session.role) root)
+      | (have hv := resolveSelection_values schema root
+         have hs : visibleSchema schema "admin" = schema := by simp [visibleSchema]
+         simp_all
+         done)
       | (simp_all <;> exact guardQuery_values _ _ _ _ (by assumption))
   · trivial
 
@@ -2024,10 +2224,18 @@ theorem run_params (schema : Schema) (session : Session) (root : Selection) :
   · rename_i e hq
     simp [hq, Except.map]
 
+theorem sourceDeclared_iff (table : Table) (source : Source) :
+    sourceDeclared table source = true ↔
+      (table.body = .relation ∧ source = .table table.schema table.table) ∨
+        (table.body ≠ .relation ∧ (sourceToks source).map eraseTok = templateToks table.body) := by
+  cases h : table.body <;> cases source <;>
+    simp [sourceDeclared, h, sourceToks, templateToks, lift, eraseTok, and_comm]
+
 theorem resolve_declared (schema : Schema) (session : Session) (root : Selection)
     (query : Query) (h : resolve schema session root = .ok query) :
-    ∀ scan ∈ allScans query, ∃ table ∈ schema.tables,
-      table.name = scan.name ∧ table.schema = scan.schema ∧ table.table = scan.table := by
+    ∀ scan ∈ allScans query, ∃ table ∈ schema.tables, table.name = scan.name ∧
+      ((table.body = .relation ∧ scan.source = .table table.schema table.table) ∨
+        (table.body ≠ .relation ∧ (sourceToks scan.source).map eraseTok = templateToks table.body)) := by
   intro scan member
   have permitted := List.all_eq_true.mp (resolve_permissions schema session root query h).1 scan member
   simp only [scanPermitted] at permitted
@@ -2036,8 +2244,8 @@ theorem resolve_declared (schema : Schema) (session : Session) (root : Selection
   · rename_i table found
     have mem := List.mem_of_find?_eq_some found
     have name := List.find?_some found
-    simp only [Bool.and_eq_true, beq_iff_eq] at permitted
-    exact ⟨table, mem, by simpa using name, permitted.1.1, permitted.1.2⟩
+    simp only [Bool.and_eq_true] at permitted
+    exact ⟨table, mem, by simpa using name, (sourceDeclared_iff table scan.source).mp permitted.1⟩
 
 theorem columnPermitted_origin (schema : Schema) (session : Session) (name column : String)
     (h : columnPermitted schema session name column = true) (role : session.role ≠ "admin") :
@@ -2327,6 +2535,7 @@ def resolveWriteRaw (schema : Schema) (catalog : WriteCatalog) (session : Sessio
   let table ← match findTable schema input.target with
     | none => .error (.unknownType input.target)
     | some table => .ok table
+  if table.body != .relation then .error (.unknownRoot input.target) else
   let permission := if session.role == "admin" then none else findWritePermission catalog session.role input.target input.kind
   if (input.kind != .insert && (!input.objects.isEmpty || input.conflict.isSome)) ||
       (input.kind != .update && !(input.sets ++ input.increments).isEmpty) ||
@@ -2493,8 +2702,8 @@ def snapshotPredicates (target : String) : List Predicate → List Predicate
   | [] => []
   | e :: es => snapshotPredicate target e :: snapshotPredicates target es
 def snapshotScan (target : String) : Scan → Scan
-  | .mk name ns table conds order limit offset =>
-    .mk name (if name == target then "" else ns) (if name == target then "w0" else table)
+  | .mk name source conds order limit offset =>
+    .mk name (if name == target then .table "" "w0" else source)
       (snapshotPredicate target conds) order limit offset
 end
 
@@ -2635,7 +2844,7 @@ def runPrimaryKey (schema : Schema) (catalog : WriteCatalog) (session : Session)
     (values : List (String × Value)) (children : List Selection) : Except Error Compiled := do
   let conds ← keyCondition catalog target values
   let root : RootField := ⟨"by_pk", target, .single⟩
-  let query ← resolve { schema with roots := [root] } session ⟨"by_pk", "by_pk", some conds, [], none, none, children⟩
+  let query ← resolve { schema with roots := [root] } session ⟨"by_pk", "by_pk", [], some conds, [], none, none, children⟩
   return render (lift [.raw "WITH", .ident (rName 0), .raw "AS ("] ++ scanToks query.scan [.raw "true"] ++
     lift [.raw ") SELECT"] ++ returningToks true query.children)
 

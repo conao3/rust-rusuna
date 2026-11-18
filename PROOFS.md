@@ -64,9 +64,26 @@ theorem unquote_quoteStringChars (name : List Char) : unquoteStringChars (quoteS
 ```lean
 theorem resolve_declared (schema : Schema) (session : Session) (root : Selection)
     (query : Query) (h : resolve schema session root = .ok query) :
-    ∀ scan ∈ allScans query, ∃ table ∈ schema.tables,
-      table.name = scan.name ∧ table.schema = scan.schema ∧ table.table = scan.table
+    ∀ scan ∈ allScans query, ∃ table ∈ schema.tables, table.name = scan.name ∧
+      ((table.body = .relation ∧ scan.source = .table table.schema table.table) ∨
+        (table.body ≠ .relation ∧ (sourceToks scan.source).map eraseTok = templateToks table.body))
 ```
+
+`templateToks` is the declared statement of a native query with each `{{name}}` as a
+placeholder:
+
+```lean
+def partShape : Part → Tok
+  | .text sql => .lex (.raw sql)
+  | .arg _ => .param (.int 0)
+
+def templateToks : Body → List Tok
+  | .relation => []
+  | .statement parts _ => lift [.raw "("] ++ parts.map partShape ++ lift [.raw ")"]
+```
+
+For a table, the conclusion is the one of a scan of the declared SQL table. For a native
+query, the scan's SQL text equals the declared statement and only parameters differ.
 
 ```lean
 theorem distinct_iff (aliases : List String) : distinct aliases = true ↔ aliases.Nodup
@@ -200,7 +217,7 @@ theorem resolveWrite_declared (schema : Schema) (catalog : WriteCatalog) (sessio
 
 ## Conditions restated next to their implementations
 
-Twenty-five boundary statements. The selection acceptance equalities compare success
+Thirty-one boundary statements. The selection acceptance equalities compare success
 with a separate Boolean traversal. Their seven expression, ordering, scan and node
 lemmas and the existential success form below support the same conditions and are
 not counted again.
@@ -225,7 +242,7 @@ theorem relationValid_iff (relation : Relation) :
 
 ```lean
 theorem lateralScan_object (scan : Scan) :
-    lateralScan .object scan = ⟨scan.name, scan.schema, scan.table, scan.conds, [], some 1, none⟩
+    lateralScan .object scan = ⟨scan.name, scan.source, scan.conds, [], some 1, none⟩
 ```
 
 ```lean
@@ -270,18 +287,18 @@ theorem hasConjunct_iff (condition expression : Predicate) :
 ```lean
 theorem addPermission_condition (schema : Schema) (session : Session) (scan : Scan) :
     addPermission schema session scan = (roleCondition schema session scan.name).map
-      (fun condition => .mk scan.name scan.schema scan.table (.and [scan.conds, condition]) scan.order scan.limit scan.offset)
+      (fun condition => .mk scan.name scan.source (.and [scan.conds, condition]) scan.order scan.limit scan.offset)
 ```
 
 ```lean
 theorem appendCondition_exact (scan : Scan) (condition : Predicate) :
     appendCondition scan condition =
-      .mk scan.name scan.schema scan.table (.and [scan.conds, condition]) scan.order scan.limit scan.offset
+      .mk scan.name scan.source (.and [scan.conds, condition]) scan.order scan.limit scan.offset
 ```
 
 ```lean
 theorem limitScan_exact (cap : Option Nat) (scan : Scan) :
-    limitScan cap scan = .mk scan.name scan.schema scan.table scan.conds scan.order (capLimit cap scan.limit) scan.offset
+    limitScan cap scan = .mk scan.name scan.source scan.conds scan.order (capLimit cap scan.limit) scan.offset
 ```
 
 ```lean
@@ -306,6 +323,39 @@ theorem listChildren_limits (cap : Option Nat) (children : List Node) :
 ```lean
 theorem listChildren_other (kind : Kind) (cap : Option Nat) (children : List Node) (h : kind ≠ .aggregate) :
     listChildren kind cap children = children
+```
+
+```lean
+theorem sourceToks_table (schema table : String) : sourceToks (.table schema table) = [.lex (sourceLex schema table)]
+```
+
+```lean
+theorem sourceToks_tokens (toks : List Tok) : sourceToks (.tokens toks) = toks
+```
+
+```lean
+theorem sourceDeclared_iff (table : Table) (source : Source) :
+    sourceDeclared table source = true ↔
+      (table.body = .relation ∧ source = .table table.schema table.table) ∨
+        (table.body ≠ .relation ∧ (sourceToks source).map eraseTok = templateToks table.body)
+```
+
+```lean
+theorem argumentValid_iff (v : Value) : argumentValid v = true ↔ v = .null ∨ scalarValid v = true
+```
+
+```lean
+theorem acceptsArguments_iff (body : Body) (arguments : List (String × Value)) :
+    acceptsArguments body arguments = true ↔
+      bodyValid body = true ∧ arguments.map (·.1) = bodyParameters body ∧
+        ∀ argument ∈ arguments, argumentValid argument.2 = true
+```
+
+```lean
+theorem resolveSource_exact (table : Table) (body : Body) (arguments : List (String × Value)) :
+    resolveSource table body arguments =
+      if acceptsArguments body arguments then .ok (bodySource table arguments body)
+      else .error (.invalidArguments table.name)
 ```
 
 ```lean
@@ -341,8 +391,8 @@ None. Unit tests and fixtures are not counted as theorems.
 ## Selection acceptance
 
 This checker describes pre-permission resolution. It shares pure name and mode
-lookups and the verified scalar, membership, alias and relationship checks with the
-resolver. It calls no resolver or exception-returning helper and constructs no
+lookups and the verified scalar, membership, alias, relationship and argument checks with
+the resolver. It calls no resolver or exception-returning helper and constructs no
 `Query`, `Node` or `Scan`. Child aliases are checked by their containing selection.
 
 ```lean
@@ -360,7 +410,7 @@ def acceptsExpression (schema : Schema) (table : Table) (depth : Nat)
     | some relation => decide (relation.kind ≠ .aggregate) && relationValid relation &&
       match findTable schema relation.target with
       | none => false
-      | some target => acceptsExpression schema target (depth + 1) e
+      | some target => acceptsArguments target.body [] && acceptsExpression schema target (depth + 1) e
 termination_by sizeOf e
 def acceptsExpressions (schema : Schema) (table : Table) (depth : Nat)
     (es : List (Expression String Value)) : Bool :=
@@ -376,16 +426,16 @@ def acceptsFilter (schema : Schema) (table : Table) (conds : Option (Expression 
 def acceptsOrder (table : Table) (order : List Order) : Bool :=
   order.all fun o => (findColumn table o.field).isSome
 
-def acceptsScan (schema : Schema) (table : Table) (conds : Option (Expression String Value))
-    (order : List Order) : Bool :=
-  acceptsFilter schema table conds && acceptsOrder table order
+def acceptsScan (schema : Schema) (table : Table) (body : Body) (arguments : List (String × Value))
+    (conds : Option (Expression String Value)) (order : List Order) : Bool :=
+  acceptsArguments body arguments && acceptsFilter schema table conds && acceptsOrder table order
 
 mutual
 def acceptsNode (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
     (selection : Selection) : Bool :=
   let arguments := selection.conds.isNone && selection.order.isEmpty &&
     selection.limit.isNone && selection.offset.isNone
-  match modeLeaf table mode selection.name with
+  selection.arguments.isEmpty && match modeLeaf table mode selection.name with
   | some _ => arguments && selection.children.isEmpty
   | none => match childMode mode selection.name with
     | some next => depth < maxDepth + 3 && arguments &&
@@ -397,7 +447,7 @@ def acceptsNode (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
         | none => false
         | some target => depth < maxDepth && (decide (relation.kind ≠ .object) || arguments) &&
           relationValid relation && selectionValid (selection.children.map (·.alias)) &&
-          acceptsScan schema target selection.conds selection.order &&
+          acceptsScan schema target target.body [] selection.conds selection.order &&
           acceptsNodes schema target (depth + 1) (relationMode relation.kind) selection.children
 termination_by sizeOf selection
 decreasing_by all_goals cases selection <;> simp_all <;> omega
@@ -416,7 +466,7 @@ def acceptsSelection (schema : Schema) (root : Selection) : Bool :=
   | some field => match findTable schema field.target with
     | none => false
     | some table => selectionValid (root.children.map (·.alias)) &&
-      acceptsScan schema table root.conds root.order &&
+      acceptsScan schema table table.body root.arguments root.conds root.order &&
       acceptsNodes schema table 0 (if field.kind = .aggregate then .aggregate else .row) root.children
 ```
 
@@ -435,6 +485,16 @@ interpret PostgreSQL or show that a permission expresses its author's intended p
 keys and the appended permission conjunct are excluded. `documentValues` walks the
 raw resolved plan in document order and inserts each scan's permission values after
 its user filter; it is not an independent selection acceptance checker.
+For `admin`, `documentValues` is `rootValues schema root ++ selectionValues root`: the values of
+the root's native query arguments, one per `{{name}}` marker in the order of the markers, then
+the filter values of the selection. `bodySource_values` connects the filled statement to
+`argumentValues`. Arguments are root-only: resolution rejects arguments on any other
+selection, and relationship and `EXISTS` scans read a statement only when it has no
+arguments.
+
+The statement of a native query is trusted input. `resolve_declared` shows that the scan's
+text is the declared statement and `compile_erase` that its arguments do not change the SQL
+text; nothing interprets the statement itself.
 
 `resolveSelection` and `runSelection` have a complete success characterization for
 the schema supplied to them. The choice of an error variant is outside that
@@ -499,8 +559,8 @@ is an instance of `slots_numbered`. These supporting statements are not counted 
 
 ## Mutation audit
 
-The strict audit targets twenty-nine functions: 183 mutations, 125 killed, zero holes,
-21 equivalent on sampled inputs, zero untested, zero timed out and 37 stillborn.
+The strict audit targets thirty-eight functions: 236 mutations, 161 killed, zero holes,
+23 equivalent on sampled inputs, zero untested, zero timed out and 52 stillborn.
 `make survey` reports the functions outside the strict audit:
 
 | Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |

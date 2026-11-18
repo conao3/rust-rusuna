@@ -1,0 +1,57 @@
+scalar DateTime
+
+type author @table(name: "author")
+  @permission(role: "user", columns: ["id", "name"], where: {}) {
+  id: Int!
+  name: String!
+  stats: [author_stats!]! @relation(columns: ["id"], references: ["author_id"])
+  stats_aggregate: author_stats_aggregate! @aggregate(target: "author_stats") @relation(columns: ["id"], references: ["author_id"])
+}
+
+type comment @table(name: "comment")
+  @permission(role: "user", columns: ["id", "article_id", "body"], where: {}, allow_aggregations: true) {
+  id: Int!
+  article_id: Int!
+  body: String!
+}
+
+type article_search @native_query(
+  sql: "SELECT a.id, a.author_id, a.title, length(a.title) AS size FROM article AS a WHERE (a.id >= {{min_id}} AND a.title LIKE {{pattern}}) OR a.id = {{min_id}} * 100 OR a.title = '{x}' || '$1'",
+  arguments: {min_id: "Int!", pattern: "String"})
+  @permission(role: "user", columns: ["id", "title", "size"], where: {author_id: {_eq: "$user_id"}}, allow_aggregations: true) {
+  id: Int!
+  author_id: Int!
+  title: String!
+  size: Int!
+  author: author! @relation(columns: ["author_id"], references: ["id"])
+  comments: [comment!]! @relation(columns: ["id"], references: ["article_id"])
+  comments_aggregate: comment_aggregate! @aggregate(target: "comment") @relation(columns: ["id"], references: ["article_id"])
+  stats: author_stats @relation(columns: ["author_id"], references: ["author_id"])
+}
+
+type author_stats @native_query(sql: "SELECT author_id, count(*)::int AS articles, max(published_at) AS latest FROM article GROUP BY author_id")
+  @permission(role: "user", columns: ["author_id", "articles"], where: {articles: {_gte: 2}}, allow_aggregations: true) {
+  author_id: Int!
+  articles: Int!
+  latest: DateTime!
+  author: author! @relation(columns: ["author_id"], references: ["id"])
+}
+
+type typed @native_query(
+  sql: "SELECT {{i}}::int AS i, {{f}}::float8 AS f, {{s}}::text AS s, {{b}}::boolean AS b, {{d}}::timestamptz AS d, {{n}}::int AS n",
+  arguments: {i: "Int!", f: "Float!", s: "String!", b: "Boolean!", d: "DateTime!", n: "Int"}) {
+  i: Int!
+  f: Float!
+  s: String!
+  b: Boolean!
+  d: DateTime!
+  n: Int
+}
+
+type Query {
+  author: [author!]! @list
+  article_search: [article_search!]! @list
+  article_search_aggregate: article_search_aggregate! @aggregate(target: "article_search")
+  author_stats: [author_stats!]! @list
+  typed: [typed!]! @list
+}

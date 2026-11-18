@@ -28,6 +28,7 @@ pub(super) fn directives<'a>(
             "aggregate" => &["target"],
             "list" => &[],
             "permission" => &["role", "where", "columns", "allow_aggregations", "limit"],
+            "native_query" => &["sql", "arguments"],
             _ => unreachable!(),
         };
         let mut seen = BTreeSet::new();
@@ -91,8 +92,44 @@ pub(super) fn insert(
     Ok(())
 }
 
-fn args(target: &str) -> String {
-    format!("(where: {target}_bool_exp, order_by: [{target}_order_by!], limit: Int, offset: Int)")
+fn args(target: &str, arguments: &[(String, String)]) -> String {
+    let declared: String = arguments
+        .iter()
+        .map(|(name, ty)| format!("{name}: {ty}, "))
+        .collect();
+    format!(
+        "({declared}where: {target}_bool_exp, order_by: [{target}_order_by!], limit: Int, offset: Int)"
+    )
+}
+
+fn native_arguments(
+    d: &ConstDirective,
+    scalars: &BTreeSet<String>,
+) -> Result<Vec<(String, String)>, Error> {
+    match d.get_argument("arguments") {
+        None => Ok(Vec::new()),
+        Some(Positioned {
+            node: ConstValue::Object(fields),
+            pos,
+        }) => fields
+            .iter()
+            .map(|(name, ty)| match ty {
+                ConstValue::String(ty) if scalars.contains(ty.strip_suffix('!').unwrap_or(ty)) => {
+                    Ok((name.to_string(), ty.clone()))
+                }
+                _ => Err(error(
+                    *pos,
+                    format!(
+                        "the type of argument {name} must name a scalar, as \"Int\" or \"Int!\""
+                    ),
+                )),
+            })
+            .collect(),
+        Some(value) => Err(error(
+            value.pos,
+            "arguments must be an object from argument names to scalar type names",
+        )),
+    }
 }
 
 pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
@@ -169,6 +206,17 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
         return Err(error(Pos::default(), "query root type is missing"));
     }
     let table_names: BTreeSet<_> = objects.keys().filter(|n| **n != query).cloned().collect();
+    let mut natives: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for (name, t) in &objects {
+        if let Some(d) = t
+            .node
+            .directives
+            .iter()
+            .find(|d| d.node.name.node == "native_query")
+        {
+            natives.insert(name.clone(), native_arguments(&d.node, &scalars)?);
+        }
+    }
     let mut tables = Vec::new();
     let mut roots = Vec::new();
     let mut targets = BTreeMap::new();
@@ -195,7 +243,11 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             .collect();
         let d = directives(
             &mappings,
-            if root { &[] } else { &["table", "primary_key"] },
+            if root {
+                &[]
+            } else {
+                &["table", "primary_key", "native_query"]
+            },
         )?;
         if root
             && t.node.directives.iter().any(|d| {
@@ -212,10 +264,23 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
         }
         let mut table = if root {
             Table::new(name, "", "")
+        } else if let Some(native) = d.get("native_query") {
+            if d.contains_key("table") || d.contains_key("primary_key") {
+                return Err(error(
+                    t.pos,
+                    "@native_query types take neither @table nor @primary_key",
+                ));
+            }
+            Table::statement(
+                name,
+                &string(native, "sql")?,
+                natives[name].iter().map(|(n, _)| n.clone()),
+            )
+            .map_err(|e| error(t.pos, e.to_string()))?
         } else {
             let mapping = d
                 .get("table")
-                .ok_or_else(|| error(t.pos, "row types require @table"))?;
+                .ok_or_else(|| error(t.pos, "row types require @table or @native_query"))?;
             Table::new(
                 name,
                 if mapping.get_argument("schema").is_some() {
@@ -294,6 +359,12 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                 if !table_names.contains(&target) {
                     return Err(error(f.pos, format!("unknown table type {target}")));
                 }
+                if !root && natives.get(&target).is_some_and(|a| !a.is_empty()) {
+                    return Err(error(
+                        f.pos,
+                        format!("{target} takes arguments and can only be read from root fields"),
+                    ));
+                }
                 if d.contains_key("column")
                     || (root && (d.contains_key("list") == aggregate.is_some()))
                     || (!root && relation.is_none())
@@ -344,7 +415,17 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                 }
                 if root || list || aggregate.is_some() {
                     targets.insert((name.clone(), field.clone()), target.clone());
-                    rendered.push_str(&format!("  {field}{}: {ty}\n", args(&target)));
+                    rendered.push_str(&format!(
+                        "  {field}{}: {ty}\n",
+                        args(
+                            &target,
+                            if root {
+                                natives.get(&target).map(Vec::as_slice).unwrap_or_default()
+                            } else {
+                                &[]
+                            }
+                        )
+                    ));
                 } else {
                     rendered.push_str(&format!("  {field}: {ty}\n"));
                 }

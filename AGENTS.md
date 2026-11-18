@@ -15,6 +15,8 @@ commit the workflow and `actions.lock` together.
 
 - `src/compiler.rs`: the `lean!` block `model`, the whole compiler core.
 - `src/lib.rs`: the public Rust types and their conversion to and from `model`.
+- `src/statement.rs`: the reader of native query statements: `{{name}}` markers become
+  `SqlPart::Argument`, and text the subscription multiplexer cannot read is rejected.
 - `src/graphql.rs` and `src/graphql/`: SDL loading, deterministic expansion, typed GraphQL
   parsing with async-graphql-parser 7 and conversion to `Selection`.
 - `crates/rusuna-cli/`: the clap CLI `rusuna` (not published): `schema expand-sdl`,
@@ -97,11 +99,16 @@ The block has four parts.
 - SQL tokens. A statement is a list of `Tok`: a `Lex` (raw text, an identifier, a
   qualified column, a number or a quoted string literal) or a parameter. `render` prints the tokens and numbers the
   parameters. Only a `Tok.param` carries a value of the query.
-- The plan. `Query`, `Node` and `Predicate.exists` hold one `Scan` per table reference (GraphQL name, SQL table, recursive filter,
-  order, limit and offset). `emit` turns a plan into tokens. Functions that return `List Lex` cannot
+- The plan. `Query`, `Node` and `Predicate.exists` hold one `Scan` per table reference (GraphQL name,
+  `Source`, recursive filter, order, limit and offset). A `Source` is a SQL table or the tokens of
+  a native query statement, whose arguments are `Tok.param`. `emit` turns a plan into tokens. Functions that return `List Lex` cannot
   emit a parameter; `expressionToks` emits filter values through `Tok.param`, including predicates in `EXISTS`.
 - Resolution. `resolveSelection` builds the raw plan from a `Selection` and the role's
-  visible schema. `resolve` inserts permissions and validates all scans and user column
+  visible schema. A `Table` has a `Body`: `relation` (its SQL table) or `statement`
+  (the parts of a native query and its argument names). `resolveSource` fills a statement with
+  the arguments of the root selection; every other selection must have no arguments, so
+  relationship and `EXISTS` scans read only statements without arguments. `rootValues`
+  gives the root's argument values in the order of the markers. `resolve` inserts permissions and validates all scans and user column
   references. `run` is `resolve` followed by `compile`.
 - Permissions. `Permission` holds a role, target, `Expression String Operand`, visible
   column fields, an aggregation flag and an optional row limit. `guardNode` and `guardQuery`
@@ -152,8 +159,8 @@ broken versions. `lake -d audit build --wfail` fails when no broken version of a
 is refuted, when a broken version satisfies every theorem but changes the output (a
 hole), or when no input satisfies a theorem's hypotheses.
 
-The audit covers twenty-nine functions: 183 broken versions, 125 refuted, 21 with the same output
-on every input tried, 37 that do not typecheck, no hole, no untested version and no timeout.
+The audit covers thirty-eight functions: 236 broken versions, 161 refuted, 23 with the same output
+on every input tried, 52 that do not typecheck, no hole, no untested version and no timeout.
 
 - Properties: `quoteChars` and `quoteStringChars` (`unquote_quote`, `unquote_quoteChars`: reading a quoted name
   back gives the name; `unquote_quoteString` and `unquote_quoteStringChars` do the
@@ -168,6 +175,12 @@ on every input tried, 37 that do not typecheck, no hole, no untested version and
   the audit checks the complete scan equalities as well as the limit projection.
   They stop an edit of one side only; they do not connect the definition to anything
   written independently.
+- `sourceToks` uses `sourceToks_table` and `sourceToks_tokens`; `argumentValid` and
+  `acceptsArguments` use `argumentValid_iff` and `acceptsArguments_iff`; `bodySource`,
+  `partToks`, `templateToks` and `partShape` use `bodySource_values` and `bodySource_declared`;
+  `sourceDeclared` uses `sourceDeclared_iff`; `resolveSource` uses `resolveSource_exact`.
+  `Audit.AcceptanceGenerators` gives standalone tables random bodies so that these reach
+  statements.
 - `capLimit` uses `capLimit_cap`, `capLimit_user` and `capLimit_choice` (at most the
   permission's limit, at most the query's, and one of the two). `limitScan`, `listScan`,
   `limitNodes` and `listChildren` use `limitScan_exact`, `listScan_array`, `listScan_other`,
@@ -253,7 +266,7 @@ rejection tests. Value traversal, erasure and declared-reference helpers state a
 support the preservation theorems; they are not independent acceptance checks.
 
 The reported properties are thirteen independent properties, stated by twenty-four boundary
-theorems; twenty-five boundary conditions restated next to the implementation; and zero variable-free
+theorems; thirty-one boundary conditions restated next to the implementation; and zero variable-free
 checks. `PROOFS.md` lists every counted statement verbatim. Intermediate value,
 declaration and permission traversal lemmas support those properties and are not counted
 again. The permission guarantees are each non-admin scan's role condition and the
@@ -294,6 +307,9 @@ scan/read traversal helpers state the invariants; they are not a second policy l
 `permissionLimit`, `nodesLimit`, `listLimits`, `nodeLimits`, `nodesLimits`, `queryLimits`,
 `withinLimit` and `queryLimited` state and check the row-limit property; the limit fixtures
 exercise them.
+`sourceValues`, `eraseSource`, `bodyParameters`, `partValid`, `bodyValid`, `argumentValues`,
+`rootValues` and `scanDeclared` state the values and declarations of sources for the value
+and declaration theorems; the native query tests exercise them.
 
 When a proof is written, check it in a file of its own before building: wrap the
 definitions in `namespace model` and run `lean` on the file. A build that fails in Lean
@@ -304,7 +320,8 @@ again.
 
 `MutationArguments` and `OnConflict` carry typed input data to `runWrite`. The
 `WriteCatalog` holds primary keys and operation-specific permissions independently of
-the read schema. Read-only tables (`@table(read_only: true)`, views) are a Rust check:
+the read schema. Native query types are read-only tables, and `resolveWriteRaw` also rejects a target whose
+body is not a table. Read-only tables (`@table(read_only: true)`, views) are a Rust check:
 the SDL emits no mutation roots for them, `Schema::new` rejects their write permissions
 and `compile_mutation` rejects them as targets before calling Lean. SDL declares `@primary_key`, `@insert_permission`,
 `@update_permission` and `@delete_permission`. The parser uses the expanded mutation
@@ -401,6 +418,12 @@ are also tested in autocommit mode without a caller rollback.
   response keys, hand-written fields in both directions,
   hidden roles and introspection with the expanded SDL of each role. Pruned empty types
   are listed by hand in `tests/introspection.rs`.
+- `tests/natives.rs` compares native query roots (`tests/fixtures/natives.graphql`) with
+  hand-written statements on the seed: arguments, filters, ordering, pagination, aggregates,
+  relationships in both directions, `EXISTS`, permissions, parameter order and rejections.
+  `crates/rusuna-http-tests/tests/natives.rs` repeats them over `POST` with variables, for
+  every scalar argument type and null, and as a REST endpoint; `subscriptions.rs` runs the
+  multiplexed statement of a native query whose text contains `'$1'` and a live subscription.
 - `tests/limits.rs` compares 17 queries of the roles `limited` and `zero`
   (`tests/fixtures/limits.graphql`, `tests/fixtures/limits/`, with the Hasura metadata) with
   the Hasura v2.51.6 statements and their SQL snapshots, and three mutations with Hasura's

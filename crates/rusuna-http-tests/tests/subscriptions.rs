@@ -745,3 +745,56 @@ async fn limited_subscriptions_send_at_most_the_permitted_rows() {
         json!({"author_aggregate": {"aggregate": {"count": 7}, "nodes": [{"id": 99}, {"id": 6}]}})
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn statement_roots_are_subscribed_with_their_arguments() {
+    let pool = database("http_subscription_natives", &["schema.sql", "seed.sql"]).await;
+    let schema = rusuna::Schema::from_sdl(&fixture("natives.graphql")).unwrap();
+    let compiled: Vec<rusuna::Compiled> = [(1, "title%"), (4, "title 1%"), (2, "nothing")]
+        .iter()
+        .map(|(min, pattern)| {
+            schema
+                .compile(
+                    &format!(
+                        "{{ article_search(min_id: {min}, pattern: \"{pattern}\", order_by: {{id: asc}}) {{ id title }} }}"
+                    ),
+                    &json!({}),
+                    None,
+                    &rusuna::Session::new("admin"),
+                )
+                .unwrap()
+                .remove(0)
+                .compiled
+        })
+        .collect();
+    assert!(compiled[0].sql.contains("'$1'"));
+    multiplexed_matches(&pool, &compiled, &[], "article_search").await;
+    let subscriptions = Subscriptions::new(pool.clone(), options());
+    let address = serve_ws(role_schemas(
+        &fixture("natives.graphql"),
+        &pool,
+        &subscriptions,
+    ))
+    .await;
+    let mut client =
+        Client::connect(address, json!({"role": "user", "session": {"user_id": 5}})).await;
+    client
+        .subscribe(
+            "1",
+            "subscription($min: Int!) { article_search(min_id: $min, pattern: \"title%\", order_by: {id: asc}) { id } }",
+            json!({"min": 10}),
+        )
+        .await;
+    assert_eq!(
+        client.data("1").await,
+        json!({"article_search": [{"id": 10}, {"id": 11}]})
+    );
+    sqlx::raw_sql("INSERT INTO article VALUES (99, 5, 'title 99', '2020-01-02 00:00+00')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.data("1").await,
+        json!({"article_search": [{"id": 10}, {"id": 11}, {"id": 99}]})
+    );
+}

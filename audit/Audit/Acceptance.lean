@@ -9,3 +9,8 @@ instance : Inhabited (Except Error Compiled) := ⟨.error .invalidFilter⟩
 #assay resolveFilter using resolveFilter_accepts resolveSelection_accepts runSelection_accepts resolveSelection_values runSelection_params resolveSelection_declared
 #assay resolveNodes using resolveNodes_accepts resolveSelection_accepts runSelection_accepts resolveSelection_values runSelection_params resolveSelection_declared
 #assay resolveExpressions using resolveExpressions_accepts resolveSelection_accepts runSelection_accepts resolveSelection_values runSelection_params resolveSelection_declared
+#assay sourceToks using sourceToks_table sourceToks_tokens
+#assay argumentValid acceptsArguments using argumentValid_iff acceptsArguments_iff
+#assay bodySource partToks templateToks partShape using bodySource_values bodySource_declared
+#assay sourceDeclared using sourceDeclared_iff
+#assay resolveSource using resolveSource_exact

@@ -17,7 +17,7 @@ instance : Arbitrary WriteInput := ⟨do
   pure { target, conflict := none, kind, single := false, byKey := false, keys := []
          objects := if kind == .insert then [[(column, value)]] else []
          sets := if kind == .update then [(column, value)] else [], increments := []
-         conds := none, children := [⟨"affected_rows", "affected_rows", none, [], none, none, []⟩] }⟩
+         conds := none, children := [⟨"affected_rows", "affected_rows", [], none, [], none, none, []⟩] }⟩
 
 instance : Shrinkable WriteInput := ⟨fun _ => []⟩
 instance : Inhabited (Except Error WritePlan) := ⟨.error .invalidFilter⟩

@@ -362,6 +362,7 @@ impl Context<'_> {
         });
         let mut keys = Vec::new();
         let mut present = BTreeSet::new();
+        let mut declared = BTreeMap::new();
         let mut arguments = BTreeSet::new();
         for (key, value) in &f.arguments {
             if !arguments.insert(key.node.as_str()) {
@@ -472,7 +473,12 @@ impl Context<'_> {
                     )?);
                 }
                 "order_by" => selection.order_by = order(&value, key.pos)?,
-                _ => unreachable!(),
+                _ => {
+                    declared.insert(
+                        key.node.to_string(),
+                        scalar(&value, named(&arg.node.ty.node), key.pos)?,
+                    );
+                }
             }
         }
         for arg in &spec.node.arguments {
@@ -482,6 +488,16 @@ impl Context<'_> {
                     format!("required argument {} is missing", arg.node.name.node),
                 ));
             }
+        }
+        if writes.is_none() && primary.is_none() {
+            selection.arguments = spec
+                .node
+                .arguments
+                .iter()
+                .map(|a| a.node.name.node.as_str())
+                .filter(|a| !["where", "order_by", "limit", "offset"].contains(a))
+                .map(|a| (a.to_string(), declared.remove(a).unwrap_or(Value::Null)))
+                .collect();
         }
         selection.mutation = writes;
         selection.primary_key = primary.map(|target| (target, keys));

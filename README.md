@@ -21,6 +21,7 @@ documents to SQL. `rusuna-events` runs event triggers and cron triggers beside i
 | Row limits of read permissions on lists and aggregate `nodes` | available |
 | Insert, update, delete, primary-key roots and write permissions | available |
 | Views and materialized views as read-only tables | available |
+| Native queries: SELECT statements in SDL as root fields with arguments | available |
 | Execution with sqlx, parts for an `async-graphql` schema and `axum` routes | available |
 | Subscriptions over WebSocket, polled with one statement per group of subscriptions | available |
 | REST endpoints from named GraphQL documents | available |
@@ -177,6 +178,63 @@ type author_stats @table(name: "author_stats", read_only: true) @primary_key(col
   VIEW` changes it; changes of its base tables do not reach it before.
 
 The lower-level API sets `Table::read_only` (`Table::new(…).read_only()`).
+
+### Native queries
+
+A type declared with `@native_query` reads its rows from a SELECT statement written in the
+SDL, like Hasura's native queries:
+
+```graphql
+type article_search @native_query(
+  sql: "SELECT a.id, a.author_id, a.title FROM article AS a WHERE a.id >= {{min_id}} AND a.title LIKE {{pattern}}",
+  arguments: {min_id: "Int!", pattern: "String"})
+  @permission(role: "user", columns: ["id", "title"], where: {author_id: {_eq: "$user_id"}}) {
+  id: Int!
+  author_id: Int!
+  title: String!
+  author: author! @relation(columns: ["author_id"], references: ["id"])
+}
+type author_stats @native_query(sql: "SELECT author_id, count(*)::int AS articles FROM article GROUP BY author_id") {
+  author_id: Int!
+  articles: Int!
+}
+type Query {
+  article_search: [article_search!]! @list
+  article_search_aggregate: article_search_aggregate! @aggregate(target: "article_search")
+}
+```
+
+```graphql
+{ article_search(min_id: 3, pattern: "title%", where: {id: {_lt: 10}}, order_by: {id: desc}, limit: 5) { id title author { name } } }
+```
+
+- `@native_query(sql: String!, arguments: {name: "Scalar" | "Scalar!", …})` replaces
+  `@table`; the type takes no `@primary_key`. Columns map to the statement's result columns.
+  The type is read-only: it has no mutation roots, and write permissions on it are errors.
+- `{{name}}` in the statement stands for the argument `name`. Each occurrence becomes a
+  statement parameter `$n`, in the order of the occurrences; no value is written into the SQL
+  text. PostgreSQL infers the type of each parameter from its context; write a cast
+  (`{{since}}::timestamptz`) where the context does not decide it.
+- The list and aggregate root fields of the type take the declared arguments before `where`,
+  `order_by`, `limit` and `offset`; a non-null argument is required and an omitted nullable one
+  is `null`. Argument names are GraphQL names other than `where`, `order_by`, `limit` and
+  `offset`.
+- The statement is embedded as `FROM (<statement>) AS "s"`, so filters, ordering, pagination,
+  aggregates, relationships, read permissions (row conditions, columns and `limit`),
+  subscriptions, the async-graphql schema and REST endpoints work as on a table.
+- Relationships from a native query type to tables and to other native query types work in
+  every direction rusuna supports for tables. A relationship to a native query type, and a
+  relationship predicate in `where` or in a permission, need a type without arguments:
+  arguments are given on root fields only, and the SDL rejects a relationship to a type with
+  arguments.
+- The statement is trusted input of the schema author, like the rest of the SDL. rusuna does
+  not parse it beyond its quotes: it must be one statement without `;`, `$`, comments or
+  backslashes, with `{{` only outside quoted text, so that the subscription multiplexer can
+  read the placeholders of the compiled statement.
+
+The lower-level API builds such a type with `Table::statement(name, sql, arguments)`, which
+sets `Table::body` to `Body::Statement { parts, arguments }`; a `Selection` passes the root
+arguments with `Selection::argument(name, value)` in the declared order.
 
 ## Read permissions
 
@@ -1121,9 +1179,10 @@ field and SQL table names. Each `Relation` declares its field, target, column ma
 separate field, for example `articles_aggregate`.
 
 A `Selection` has public `alias`, `name`, `filter: Option<Filter>`,
-`order_by: Vec<Order>`, `limit: Option<u64>`, `offset: Option<u64>` and
-`fields: Vec<Selection>`. Its builders are `alias`, `filter`, `order_by`, `limit`,
-`offset` and `field`. `filter` sets the entire expression; combine predicates explicitly:
+`order_by: Vec<Order>`, `limit: Option<u64>`, `offset: Option<u64>`,
+`fields: Vec<Selection>` and `arguments: Vec<(String, Value)>` (the arguments of a native
+query root, in declared order). Its builders are `alias`, `filter`, `order_by`, `limit`,
+`offset`, `field` and `argument`. `filter` sets the entire expression; combine predicates explicitly:
 
 ```rust
 use rusuna::{Comparison, Filter, Selection, Value};
@@ -1190,6 +1249,8 @@ levels plus 32 `EXISTS` levels and a maximum-depth 1000-term permission (65,001 
 - A role's permission `limit` becomes the `LIMIT` of a list root or an array relationship,
   which is then read like one with a query `limit`. A bounded `nodes` list takes the first
   rows of the ordered aggregate: `array_to_json((array_agg(… ORDER BY …))[1:n])`.
+- A native query is read as `(<statement>) AS "s"`, with each `{{name}}` replaced by a
+  parameter.
 - Comparison values are statement parameters, including each element of `_in` and `_nin`.
   `limit` and `offset` are non-negative integers written into the statement. `_is_null`
   selects `IS NULL` or `IS NOT NULL`. Empty `_in` is false and empty `_nin` is true.
@@ -1216,12 +1277,12 @@ Properties:
 
 | Theorem | Statement |
 |---|---|
-| `run_params`, `compile_params`, `resolve_values` | Parameters follow document order, including each scan's bound permission values after its user filter. |
+| `run_params`, `compile_params`, `resolve_values` | Parameters follow document order: the arguments of a native query root in the order of their markers, then the filter values, with each scan's bound permission values after its user filter. |
 | `compile_erase` | Resolved plans that differ only in their query or session-derived values produce the same SQL text. |
 | `placeholders_numbered`, `slots_numbered` | The placeholders are `$1` … `$n`, in the order of the parameters. |
 | `unquote_quote`, `unquote_quoteChars` | `unquoteChars`, a reader of a double-quoted identifier written after PostgreSQL's lexical rules, reads a quoted name back as the name and stops at its closing quote. |
 | `unquote_quoteString`, `unquote_quoteStringChars` | Reading a quoted string literal returns the original string and stops at the closing quote. |
-| `resolve_declared` | Every table in the plan, including relationship predicates inside `EXISTS`, is declared in the schema. |
+| `resolve_declared` | Every scan in the plan, including relationship predicates inside `EXISTS`, reads a declared type: a table scan its declared SQL table, a native query scan a text equal to the declared statement once the values are erased. |
 | `distinct_iff` | The check for repeated aliases accepts exactly the lists without duplicates. |
 | `resolve_scan_conditions`, `resolve_tables` | Every non-admin scan, including scans inside permission predicates, contains the bound condition of that role and has a permission definition. |
 | `resolve_columns` | User column references in selections, filters, ordering and aggregates belong to the role's visible columns; join keys and policy columns are excluded. |
@@ -1241,15 +1302,17 @@ Conditions written a second time, as an equivalence next to the definition:
 | `predicateEq_iff`, `predicatesEq_iff`, `hasConjunct_iff` | Structural expression equality and immediate conjunct membership have their stated meanings. |
 | `appendCondition_exact`, `addPermission_condition` | The inserted scan is exactly the original scan with the requested role condition appended; binding errors are preserved. |
 | `limitScan_exact`, `listScan_array`, `listScan_other`, `limitNodes_limit`, `listChildren_limits`, `listChildren_other` | A row limit is applied to the scan of a list and the `nodes` of an aggregate, and nothing else changes. |
+| `sourceToks_table`, `sourceToks_tokens`, `sourceDeclared_iff` | A scan emits its table or the tokens of its statement, and the declaration check accepts exactly the declared table or the declared statement with its values erased. |
+| `argumentValid_iff`, `acceptsArguments_iff`, `resolveSource_exact` | Root arguments are accepted when their names are the declared ones in order and no value is a nonfinite float; the statement is then filled with them. |
 | `resolveWrite_permissions`, `resolveWrite_user_columns` | Aborting checks, operation row conditions and authorized writes; user columns exclude presets. |
 | `resolveWrite_declared`, `resolveWrite_tables` | Physical write targets are declared and have the requested operation permission. |
 | `resolveWrite_returning_conditions` | Relationship and predicate scans in returning carry their read permission conditions. |
 | `resolveSelection_accepts`, `runSelection_accepts` | Pre-permission resolution and compilation succeed exactly when the Boolean `acceptsSelection` accepts the schema and selection. |
 
 [leanassay](https://github.com/conao3/lean-leanassay/tree/fc0d05473917864cedb6d27e208c81de3e2a11af) checks which theorems rule out
-broken implementations: the audit covers twenty-nine functions, with 183 mutations, 125 killed,
-21 equivalent on the sampled inputs, 37 stillborn, zero holes, zero untested and zero timed out.
-There are thirteen independent properties (twenty-four principal theorem statements), twenty-five
+broken implementations: the audit covers thirty-eight functions, with 236 mutations, 161 killed,
+23 equivalent on the sampled inputs, 52 stillborn, zero holes, zero untested and zero timed out.
+There are thirteen independent properties (twenty-four principal theorem statements), thirty-one
 restated conditions and zero variable-free checks. The executable audit checks full
 scan equalities as well as their limit projection. AGENTS.md lists the functions it covers and the ones it does not.
 
@@ -1308,6 +1371,9 @@ Outside the proofs:
   SQL text in Rust; `placeholders_numbered` fixes what it expects, and a test runs the
   rewritten statement of every admin and permission fixture against its single statements.
 - `unquoteChars` as a description of PostgreSQL's reader.
+- The statements of native queries. They are trusted input of the schema author; the proofs
+  show that their text reaches the SQL unchanged and their arguments only as parameters, not
+  what PostgreSQL computes from them.
 - `rusuna-events`: the trigger function, the claim and lease statements, cron occurrences
   and webhook delivery. The tests in `crates/rusuna-events/tests` cover them on PostgreSQL.
 
