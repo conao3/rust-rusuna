@@ -332,9 +332,9 @@ Conditions written a second time, as an equivalence next to the definition:
 | `predicateEq_iff`, `predicatesEq_iff`, `hasConjunct_iff` | Structural expression equality and immediate conjunct membership have their stated meanings. |
 | `appendCondition_exact`, `addPermission_condition` | The inserted scan is exactly the original scan with the requested role condition appended; binding errors are preserved. |
 
-[leanassay](https://github.com/conao3/lean-leanassay) checks which theorems rule out
+[leanassay](https://github.com/conao3/lean-leanassay/tree/fc0d05473917864cedb6d27e208c81de3e2a11af) checks which theorems rule out
 broken implementations: the audit covers fourteen functions, with 101 mutations, 78 killed,
-16 equivalent on the sampled inputs, 7 ill-typed, zero holes and zero untested.
+16 equivalent on the sampled inputs, 7 stillborn, zero holes, zero untested and zero timed out.
 There are nine independent properties (fifteen principal theorem statements), fourteen
 restated conditions and zero variable-free checks. The executable audit checks full
 scan equalities as well as their limit projection. AGENTS.md lists the functions it covers and the ones it does not.
@@ -353,19 +353,18 @@ A manual mutation failed both the insertion and parameter-preservation proofs.
 
 `make survey` examines functions outside that audit with the boundary theorems:
 
-| Group | Mutations | Killed | Holes | Equivalent on sampled inputs | Timed out | Ill-typed |
-|---|---|---|---|---|---|---|
-| SQL emission | 295 | 26 | 172 | 4 | 0 | 93 |
-| Selection resolution | 304 | 4 | 100 | 47 | 27 | 126 |
-| Permission resolution | 1 | 0 | 1 | 0 | 0 | 0 |
-| Total | 600 | 30 | 273 | 51 | 27 | 219 |
+| Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
+|---|---|---|---|---|---|---|---|---|
+| SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
+| Selection resolution | 9 | 178 | 5 | 50 | 17 | 0 | 26 | 80 |
+| Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
+| Total | 20 | 355 | 28 | 151 | 19 | 0 | 26 | 131 |
 
-The survey targets twenty functions; this revision generates no mutation for
-`guardQuery` or `run`. No group has an untested mutation. The filter survey has
-27 unresolved timeouts at the default 30-second deadline per mutation in this run
-with concurrent machine load. These are not counted as equivalent or killed.
-The holes change SQL text or acceptance rules outside the properties proved above;
-the tests cover these by example.
+The survey uses 1000 samples and a 30-second deadline per mutation. Timeouts are
+unresolved and depend on machine load. Equivalent means equal outputs on the sampled
+inputs; untested means an output comparison could not be performed. Stillborn
+mutations do not typecheck. The holes concern SQL text and acceptance rules outside
+the properties proved above; the tests cover these by example.
 
 Outside the proofs:
 

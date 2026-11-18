@@ -103,7 +103,7 @@ is refuted, when a broken version satisfies every theorem but changes the output
 hole), or when no input satisfies a theorem's hypotheses.
 
 The audit covers fourteen functions: 101 broken versions, 78 refuted, 16 with the same output
-on every input tried, 7 that do not typecheck, no hole and no untested version.
+on every input tried, 7 that do not typecheck, no hole, no untested version and no timeout.
 
 - Properties: `quoteChars` and `quoteStringChars` (`unquote_quote`, `unquote_quoteChars`: reading a quoted name
   back gives the name; `unquote_quoteString` and `unquote_quoteStringChars` do the
@@ -115,7 +115,7 @@ on every input tried, 7 that do not typecheck, no hole and no untested version.
   `relationValid_iff`), `scalarValid` and `membershipValid` (`scalarValid_iff`,
   `membershipValid_iff`), and `lateralScan` (`lateralScan_limit`). The full scan equalities
   `lateralScan_object`, `lateralScan_array` and `lateralScan_aggregate` are proved too;
-  the audit now checks the complete scan equalities as well as the limit projection.
+  the audit checks the complete scan equalities as well as the limit projection.
   They stop an edit of one side only; they do not connect the definition to anything
   written independently.
 - `appendCondition` and `addPermission` use `appendCondition_exact` and
@@ -128,39 +128,39 @@ an entry below. `maxDepth`, `maxFields`, `maxFilterDepth`, `maxInValues` and `ro
 and are not audited.
 
 Three groups, targeting twenty functions, stay outside the audit. `make survey` prints their tables with hand-written
-generators shared in `audit/Audit/Generators.lean`, since automatically derived generators
-for recursive expressions and selections do not terminate. The library builds nine
+generators shared in `audit/Audit/Generators.lean`. These choose names from a small
+vocabulary so the sampled schemas and selections exercise successful resolution.
+The pinned leanassay revision also supports size-bounded generators for recursive types. The library builds nine
 independent survey modules so their automatically derived instances stay separate and
 completed groups can be reused independently.
 
-- `paramToks`, `expressionToks`, `expressionsToks`, `scanToks`, `joinToks`, `joinsToks`,
-  `emit` and `compile` build the SQL
-  text. `compile_params` and `placeholders_numbered` refute 26 of 295 broken versions,
-  those that lose or reorder a parameter; `compile_erase` refutes none of the versions
-  tried. The 172 holes change the text around the parameters, which no theorem
-  describes. Four versions give the same output on the inputs tried and 93 do not
-  typecheck; none is untested or times out. The differential test and
-  `tests/fixtures/expected/` pin the text.
-- `resolveExpression`, `resolveExpressions`, `resolveFilter`, `resolveOrder`,
-  `resolveScan`, `resolveNode`, `resolveNodes`, `resolveSelection` and `runSelection` decide which selections are accepted. `resolveSelection_values` and `runSelection_params`
-  refute 4 of 304 broken versions; `resolveSelection_declared` refutes none of the versions tried.
-  The 100 holes accept or reject a different set of selections or return a different
-  error. `invalid_queries_are_rejected` in `tests/compile.rs` pins the rules by example.
-  126 versions do not typecheck and 47 give the same output on every input tried.
-  None is untested. The filter survey has 27 unresolved timeouts at the default
-  30-second deadline per mutation in this run with concurrent machine load; do not
-  count these as equivalent or killed.
-- `guardQuery`, `resolve` and `run` use `resolve_values` and `run_params`. The mutator
-  generates one changed role comparison in `resolve`: zero killed, one hole, zero
-  equivalent, ill-typed, untested or timed-out versions. It changes the accepted set
-  while successful outputs still satisfy parameter preservation. No mutation is
-  generated for `guardQuery` or `run` by this pinned revision.
+| Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
+|---|---|---|---|---|---|---|---|---|
+| SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
+| Selection resolution | 9 | 178 | 5 | 50 | 17 | 0 | 26 | 80 |
+| Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
+| Total | 20 | 355 | 28 | 151 | 19 | 0 | 26 | 131 |
+
+- The SQL emission group is `paramToks`, `expressionToks`, `expressionsToks`,
+  `scanToks`, `joinToks`, `joinsToks`, `emit` and `compile`. Parameter preservation,
+  erasure and placeholder numbering constrain values. SQL text is pinned by the
+  differential test and `tests/fixtures/expected/`.
+- The selection group is `resolveExpression`, `resolveExpressions`, `resolveFilter`,
+  `resolveOrder`, `resolveScan`, `resolveNode`, `resolveNodes`, `resolveSelection` and
+  `runSelection`. Value preservation and declared-reference properties leave holes
+  in acceptance and error reporting. Rejection tests cover these rules by example.
+- `guardQuery`, `resolve` and `run` use `resolve_values` and `run_params`. The changed
+  role comparison in `resolve` changes acceptance while preserving successful
+  outputs' parameters.
+
+The survey uses 1000 samples and a 30-second deadline per mutation. Timeouts are
+unresolved measurements under concurrent machine load.
 
 leanassay compares outputs only for types with `DecidableEq`. The audit implements
 `DecidableEq Predicate` from `predicateEq_iff` and a constructor comparison for `Scan`.
 `Expression`, `Node`, `Query` and `Selection` have no instance; the surveys compare the
-output of `runSelection` or `run` and declare `DecidableEq` for `Except`. The pinned
-leanassay revision is unchanged. Hand-written generators remain necessary.
+output of `runSelection` or `run` and declare `DecidableEq` for `Except`. Output comparisons without a usable equality instance are counted as untested.
+The hand-written generators retain the small name vocabulary.
 
 The lexical helpers `comparisonText`, `aggregateText`, `leafLex`, `offsetLex`,
 `emptyLeaf`, `emptyField`, `emptyFields`, `emptyRow` and `resultLex` return text or

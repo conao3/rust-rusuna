@@ -195,3 +195,18 @@ An independent acceptance checker still needs root lookup, mode-dependent select
 argument restrictions, alias and depth bounds, visible schema lookup, session binding
 and policy-dependency checks. It must return Bool without calling a resolver or
 constructing `Query`, `Node` or `Scan`, followed by mutual success-equivalence proofs.
+
+## Mutation audit
+
+The strict audit targets fourteen functions: 101 mutations, 78 killed, zero holes,
+16 equivalent on sampled inputs, zero untested, zero timed out and 7 stillborn.
+`make survey` reports the functions outside the strict audit:
+
+| Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
+|---|---|---|---|---|---|---|---|---|
+| SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
+| Selection resolution | 9 | 178 | 5 | 50 | 17 | 0 | 26 | 80 |
+| Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
+| Total | 20 | 355 | 28 | 151 | 19 | 0 | 26 | 131 |
+
+The survey uses 1000 samples and a 30-second deadline per mutation. Equivalence is sampled output equality, not a proved equivalence.
