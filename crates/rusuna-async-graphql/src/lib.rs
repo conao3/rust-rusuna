@@ -691,6 +691,7 @@ struct Document<'a> {
     text: String,
     definitions: Vec<String>,
     variables: serde_json::Map<String, Json>,
+    omit_null: bool,
 }
 
 impl Document<'_> {
@@ -708,7 +709,10 @@ impl Document<'_> {
             (Some(alias), None) => write!(self.text, "{alias}: {name}")?,
             (None, None) => self.text.push_str(name),
         }
-        let arguments = field.arguments()?;
+        let mut arguments = field.arguments()?;
+        if self.omit_null {
+            arguments.retain(|(_, value)| *value != Value::Null);
+        }
         if !arguments.is_empty() {
             let types = self
                 .catalog
@@ -784,6 +788,7 @@ fn render(
         text: String::new(),
         definitions: Vec::new(),
         variables: serde_json::Map::new(),
+        omit_null: false,
     };
     document.field(parent, field, child, None)?;
     let definitions = if document.definitions.is_empty() {

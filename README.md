@@ -154,9 +154,7 @@ A view or a materialized view is mapped like a table, and reads it the same way:
 relationships in both directions, filters, ordering, aggregates, read permissions and
 subscriptions. rusuna does not read the database catalog, so it does not know that a
 relation is a view; declare `read_only: true` for one that is not updatable, which every
-materialized view is. A simple view that PostgreSQL can update may stay writable. Hasura
-reads from the catalog whether a view is insertable and updatable; rusuna takes the
-declaration.
+materialized view is. A simple view that PostgreSQL can update may stay writable.
 
 ```graphql
 type author_stats @table(name: "author_stats", read_only: true) @primary_key(columns: ["author_id"])
@@ -556,7 +554,9 @@ query { article(limit: 2) { id title } weather(city: "Oslo") { temperature stati
   nothing, so the fields are absent from that role's introspection and execution.
 - **Forwarding.** A remote root field is sent as a document of that field alone, with
   the field's alias, arguments as variables declared with the remote's argument types,
-  and its selection with fragments expanded. Each remote root field of a request is one
+  and its selection with fragments expanded. Arguments whose value is null, including
+  omitted nullable variables, are left out, so the remote applies its own defaults; an
+  explicit null argument is not sent. Each remote root field of a request is one
   HTTP `POST` (`content-type: application/json`, the fixed headers of `header`, and the
   client request headers named by `forward_header`). The client headers come from the
   request data `ClientHeaders`, which the `rusuna-axum` routes add. Remote values are read
@@ -574,9 +574,8 @@ query { article(limit: 2) { id title } weather(city: "Oslo") { temperature stati
   stops later root fields, but a remote write that succeeded stays, and a later failure
   cannot undo it.
 
-Differences from Hasura and what is outside: rusuna does not send Hasura's session
-headers (`x-hasura-role`, session variables) unless they are forwarded client headers;
-there are no remote schema permissions that restrict remote fields or arguments per role
+Outside this feature: rusuna sends no session values to the remote server (forward
+client headers when it needs them); there are no remote schema permissions that restrict remote fields or arguments per role
 beyond the role list; there are no relationships between rusuna types and remote types
 (Hasura's remote relationships); remote root fields are not batched into one request per
 server; and remote subscriptions are not forwarded.
@@ -1368,8 +1367,10 @@ and other client headers do not; a remote error, an unreachable server and intro
 it are errors with their messages. Same-named types or root fields, interfaces, unions,
 undefined types, invalid SDL and a missing SDL fail `build`; with prefixes, a renamed
 input object and enum argument are forwarded under the remote names, one request per
-remote root field. Schemas built from introspection and from SDL answer queries and
-introspection alike.
+remote root field. Enum values come back from nested and root remote fields, and an
+omitted nullable variable leaves the remote argument default in effect. A REST endpoint
+over an unreachable remote answers 502. Schemas built from introspection and from SDL
+answer queries and introspection alike.
 
 The subscription tests in `crates/rusuna-http-tests/tests/subscriptions.rs` run over
 WebSocket. A subscription receives its first result, then the results changed by a

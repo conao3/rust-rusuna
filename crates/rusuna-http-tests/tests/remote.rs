@@ -86,8 +86,18 @@ fn weather_schema(weather: &Weather) -> Schema {
                     Ok(Some(GraphQLValue::from(value)))
                 })
             })
-            .argument(InputValue::new("unit", TypeRef::named("Unit"))),
+            .argument(
+                InputValue::new("unit", TypeRef::named("Unit"))
+                    .default_value(GraphQLValue::Enum(async_graphql::Name::new("CELSIUS"))),
+            ),
         )
+        .field(Field::new("unit", TypeRef::named_nn("Unit"), |ctx| {
+            FieldFuture::new(async move {
+                Ok(Some(GraphQLValue::Enum(async_graphql::Name::new(
+                    parent(&ctx)["unit"].as_str().unwrap(),
+                ))))
+            })
+        }))
         .field(Field::new("station", TypeRef::named("Station"), |ctx| {
             FieldFuture::new(async move { Ok(Some(FieldValue::owned_any(parent(&ctx)))) })
         }));
@@ -149,6 +159,13 @@ fn weather_schema(weather: &Weather) -> Schema {
                 })
                 .argument(InputValue::new("name", TypeRef::named_nn(TypeRef::STRING))),
             )
+            .field(Field::new("defaultUnit", TypeRef::named_nn("Unit"), |_| {
+                FieldFuture::new(async {
+                    Ok(Some(GraphQLValue::Enum(async_graphql::Name::new(
+                        "CELSIUS",
+                    ))))
+                })
+            }))
             .field(Field::new("now", TypeRef::named_nn("Instant"), |_| {
                 FieldFuture::new(async { Ok(Some(GraphQLValue::from("2026-01-01T00:00:00Z"))) })
             }))
@@ -296,7 +313,7 @@ async fn remote_root_fields_are_served_beside_rusuna_root_fields() {
     let (address, weather, schema) = serve_weather().await;
     let rusuna = serve_rusuna(role_schemas(&pool, &[remote(address, &schema)]).unwrap()).await;
 
-    let remote_part = "weather(city: \"Tokyo\") { city temperature f: temperature(unit: FAHRENHEIT) station { id name } } now";
+    let remote_part = "weather(city: \"Tokyo\") { city temperature f: temperature(unit: FAHRENHEIT) unit station { id name } } now defaultUnit";
     let response = post(
         rusuna,
         &[],
@@ -324,6 +341,18 @@ async fn remote_root_fields_are_served_beside_rusuna_root_fields() {
         response["data"],
         direct(&schema, &format!("{{ {remote_part} }}")).await
     );
+    let omitted = post(
+        rusuna,
+        &[],
+        &json!({"query": "query($unit: Unit) { weather(city: \"Oslo\") { temperature(unit: $unit) unit } }"}),
+    )
+    .await;
+    assert_eq!(
+        omitted["data"],
+        direct(&schema, "{ weather(city: \"Oslo\") { temperature unit } }").await,
+        "{omitted}"
+    );
+    assert_eq!(omitted["data"]["weather"]["temperature"], -5);
     let user = post(
         rusuna,
         &role_headers("user", &json!({"user_id": 1})),
@@ -391,7 +420,8 @@ async fn remote_types_appear_in_introspection_for_the_roles_that_see_them() {
             "description": "The weather of a city",
             "fields": [
                 {"name": "city", "args": []},
-                {"name": "temperature", "args": [{"name": "unit", "defaultValue": null}]},
+                {"name": "temperature", "args": [{"name": "unit", "defaultValue": "CELSIUS"}]},
+                {"name": "unit", "args": []},
                 {"name": "station", "args": []},
             ],
         },
@@ -438,7 +468,32 @@ async fn remote_schemas_forward_headers_and_report_errors() {
     let down = RemoteSchema::new("down", &format!("http://{down_address}/graphql"))
         .unwrap()
         .sdl("type Query { offline: String }");
-    let rusuna = serve_rusuna(role_schemas(&pool, &[headed, down]).unwrap()).await;
+    let schemas = role_schemas(&pool, &[headed, down]).unwrap();
+    let rusuna = serve_rusuna(schemas.clone()).await;
+    let rest = rusuna_axum::rest(
+        schemas,
+        vec![rusuna_axum::Endpoint::new(
+            "offline",
+            "/offline",
+            [rusuna_axum::RestMethod::Get],
+            "{ offline }",
+        )],
+        |parts: &axum::http::request::Parts| {
+            let session = session(parts);
+            async move { Ok(session) }
+        },
+    )
+    .await
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rest_address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, rest).await.unwrap() });
+    let (status, body) = request(rest_address, "GET", "/offline", &[], None).await;
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(
+        body["errors"][0]["extensions"]["code"],
+        "remote-schema-error"
+    );
 
     let response = post(
         rusuna,
@@ -540,7 +595,7 @@ async fn remote_names_collide_or_take_prefixes() {
         rusuna,
         &[],
         &json!({
-            "query": "query($filter: w_Forecast!) { w_forecast(filter: $filter) { city temperature station { name } __typename } forecast(filter: {cities: [\"Tokyo\"]}) { temperature } u: __type(name: \"w_Unit\") { name } }",
+            "query": "query($filter: w_Forecast!) { w_forecast(filter: $filter) { city temperature unit station { name } __typename } forecast(filter: {cities: [\"Tokyo\"]}) { temperature } u: __type(name: \"w_Unit\") { name } }",
             "variables": {"filter": {"cities": ["Oslo", "Tokyo", "Nowhere"], "unit": "FAHRENHEIT"}},
         }),
     )
@@ -549,8 +604,8 @@ async fn remote_names_collide_or_take_prefixes() {
         response,
         json!({"data": {
             "w_forecast": [
-                {"city": "Oslo", "temperature": 23, "station": {"name": "Oslo central"}, "__typename": "w_Weather"},
-                {"city": "Tokyo", "temperature": 68, "station": {"name": "Tokyo central"}, "__typename": "w_Weather"},
+                {"city": "Oslo", "temperature": -5, "unit": "FAHRENHEIT", "station": {"name": "Oslo central"}, "__typename": "w_Weather"},
+                {"city": "Tokyo", "temperature": 20, "unit": "FAHRENHEIT", "station": {"name": "Tokyo central"}, "__typename": "w_Weather"},
             ],
             "forecast": [{"temperature": 20}],
             "u": {"name": "w_Unit"},
