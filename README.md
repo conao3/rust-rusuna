@@ -234,7 +234,8 @@ type Query {
   read the placeholders of the compiled statement.
 
 The lower-level API builds such a type with `Table::statement(name, sql, arguments)`, which
-sets `Table::body` to `Body::Statement { parts, arguments }`; a `Selection` passes the root
+sets `Table::body` to `Body::Statement { parts, arguments }` (`Schema::new` checks a hand-built
+`Body::Statement` by the same rules); a `Selection` passes the root
 arguments with `Selection::argument(name, value)` in the declared order.
 
 ### Functions
@@ -265,8 +266,7 @@ type Query {
 - `@function(name: String!, schema: String, arguments: {…})` on a root field with `@list` or
   `@aggregate` reads the rows of a `@table` type from the function: `SETOF <table>`. The rows
   keep the type's relationships and read permissions (row condition, columns and `limit`),
-  and a role sees the root field when it may read the type, as in Hasura with inferred
-  function permissions.
+  and a role sees the root field when it may read the type.
 - `@function(…)` on a type, in place of `@table`, declares the row type of a function that
   returns `TABLE(...)`; its fields map to the result columns. Such a type is read-only, like
   a native query type, and takes its own `@permission`.

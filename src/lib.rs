@@ -172,14 +172,17 @@ fn check_body(owner: &str, body: &Body) -> Result<(), Error> {
     match body {
         Body::Table => Ok(()),
         Body::Statement { parts, arguments } => {
-            statement::check_arguments(arguments).map_err(invalid)?;
-            match parts.iter().find_map(|part| match part {
-                SqlPart::Argument(name) if !arguments.contains(name) => Some(name),
-                _ => None,
-            }) {
-                Some(name) => Err(invalid(format!("`{name}` is no declared argument"))),
-                None => Ok(()),
+            let sql: String = parts
+                .iter()
+                .map(|part| match part {
+                    SqlPart::Text(text) => text.clone(),
+                    SqlPart::Argument(name) => format!("{{{{{name}}}}}"),
+                })
+                .collect();
+            if statement::parse(&sql, arguments).map_err(invalid)? != statement::merged(parts) {
+                return Err(invalid("a text part contains `{{`".into()));
             }
+            Ok(())
         }
         Body::Function {
             name, arguments, ..

@@ -309,3 +309,31 @@ fn lower_level_selections_need_the_declared_arguments_at_the_root_only() {
         vec![Value::Int(1), Value::Null, Value::Int(1)]
     );
 }
+
+#[test]
+fn lower_level_statements_are_checked_like_sdl_statements() {
+    use rusuna::{Body, RootField, RootKind, SqlPart, Table};
+    let build = |parts: Vec<SqlPart>| {
+        let mut table = Table::new("t", "", "").read_only().column("id", "id");
+        table.body = Body::Statement {
+            parts,
+            arguments: vec!["a".into()],
+        };
+        Schema::new(vec![table], vec![RootField::new("t", "t", RootKind::List)])
+    };
+    let text = |s: &str| SqlPart::Text(s.into());
+    let argument = || SqlPart::Argument("a".into());
+    assert!(build(vec![text("SELECT "), argument(), text(" AS id")]).is_ok());
+    for parts in [
+        vec![text("SELECT $1 AS id")],
+        vec![text("SELECT 1 AS id; SELECT "), argument()],
+        vec![text("SELECT 1 AS id -- "), argument()],
+        vec![text("SELECT '{{a}}' AS id")],
+        vec![text("SELECT "), SqlPart::Argument("b".into())],
+    ] {
+        assert!(
+            matches!(build(parts.clone()), Err(Error::InvalidStatement { .. })),
+            "{parts:?}"
+        );
+    }
+}

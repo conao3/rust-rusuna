@@ -30,6 +30,18 @@ pub(crate) fn check_arguments(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn merged(parts: &[SqlPart]) -> Vec<SqlPart> {
+    let mut out: Vec<SqlPart> = Vec::new();
+    for part in parts {
+        match (out.last_mut(), part) {
+            (_, SqlPart::Text(text)) if text.is_empty() => {}
+            (Some(SqlPart::Text(last)), SqlPart::Text(text)) => last.push_str(text),
+            _ => out.push(part.clone()),
+        }
+    }
+    out
+}
+
 pub(crate) fn parse(sql: &str, arguments: &[String]) -> Result<Vec<SqlPart>, String> {
     check_arguments(arguments)?;
     if sql.trim().is_empty() {
