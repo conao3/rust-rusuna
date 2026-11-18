@@ -4,6 +4,15 @@
 //! mutation in document order on one transaction, and returns the JSON object of the
 //! GraphQL `data`. [`fetch`] runs one compiled statement on a connection.
 //! [`Error::PermissionCheck`] reports a row that fails a write permission check.
+//!
+//! [`Subscriptions`] polls subscribed query statements, runs the subscriptions that differ
+//! only in values as one [`Multiplexed`] statement and reports changed results.
+
+mod subscription;
+
+pub use subscription::{
+    Multiplexed, Outcome, Subscription, SubscriptionOptions, SubscriptionStats, Subscriptions,
+};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use rusuna::{Compiled, CompiledField, Value};
@@ -21,6 +30,7 @@ pub const PERMISSION_CHECK_MESSAGE: &str =
 pub enum Error {
     PermissionCheck,
     Parameter { index: usize, message: String },
+    Statement(String),
     Database(sqlx::Error),
 }
 
@@ -37,6 +47,7 @@ impl fmt::Display for Error {
             Self::Parameter { index, message } => {
                 write!(f, "parameter ${}: {message}", index + 1)
             }
+            Self::Statement(message) => write!(f, "the statement cannot be multiplexed: {message}"),
             Self::Database(error) => write!(f, "{error}"),
         }
     }

@@ -15,6 +15,4 @@ chrono = { workspace = true }
 rusuna = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
-
-[dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }

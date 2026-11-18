@@ -166,3 +166,135 @@ async fn mutations_run_in_one_transaction_and_report_permission_checks() {
     assert_eq!(denied.to_string(), rusuna_sqlx::PERMISSION_CHECK_MESSAGE);
     assert_eq!(ids(&pool, "{id: {_gte: 3}}").await, json!([{"id": 3}]));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multiplexed_parameters_keep_the_inferred_types() {
+    let pool = pool("sqlx_multiplexed").await;
+    let schema = Schema::from_sdl(SDL).unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    for filters in [
+        [
+            "{small: {_eq: 1}}",
+            "{small: {_eq: 2}}",
+            "{small: {_eq: 3}}",
+        ],
+        [
+            "{big: {_gt: 15}}",
+            "{big: {_gt: 5}}",
+            "{big: {_gt: 2147483647}}",
+        ],
+        [
+            "{single: {_eq: 2.5}}",
+            "{single: {_eq: 1.5}}",
+            "{single: {_eq: 0.1}}",
+        ],
+        [
+            "{single: {_lt: 2}}",
+            "{single: {_lt: 3}}",
+            "{single: {_lt: 1}}",
+        ],
+        [
+            "{double: {_gt: 3}}",
+            "{double: {_gt: 2.2499999999999996}}",
+            "{double: {_gt: 1e300}}",
+        ],
+        [
+            "{label: {_eq: \"two\"}}",
+            "{label: {_eq: \"one\"}}",
+            "{label: {_like: \"%o%\"}}",
+        ],
+        [
+            "{code: {_eq: \"def\"}}",
+            "{code: {_eq: \"abc \"}}",
+            "{code: {_eq: \"x'y\"}}",
+        ],
+        [
+            "{flag: {_eq: false}}",
+            "{flag: {_eq: true}}",
+            "{flag: {_neq: true}}",
+        ],
+        [
+            "{at: {_gt: \"2020-01-01T12:00:00Z\"}}",
+            "{at: {_gt: \"2020-01-01 12:00:00+00\"}}",
+            "{at: {_gt: \"2020-01-02 03:30:00.5+09:30\"}}",
+        ],
+        [
+            "{local: {_gt: \"2020-01-01 12:00\"}}",
+            "{local: {_gt: \"2020-01-01T00:00:00.000001\"}}",
+            "{local: {_gt: \"2020-01-02 12:30:00\"}}",
+        ],
+        [
+            "{day: {_eq: \"2020-01-02\"}}",
+            "{day: {_eq: \"2020-01-01\"}}",
+            "{day: {_eq: \"2019-12-31\"}}",
+        ],
+        [
+            "{id: {_in: [2, 3]}}",
+            "{id: {_in: [1, 2]}}",
+            "{id: {_nin: [1, 2]}}",
+        ],
+    ] {
+        let compiled: Vec<rusuna::Compiled> = filters
+            .iter()
+            .map(|filter| {
+                schema
+                    .compile(
+                        &format!("{{ typed(where: {filter}, order_by: {{id: asc}}) {{ id }} }}"),
+                        &json!({}),
+                        None,
+                        &Session::new("admin"),
+                    )
+                    .unwrap()
+                    .remove(0)
+                    .compiled
+            })
+            .collect();
+        let multiplexed = rusuna_sqlx::Multiplexed::prepare(&mut conn, &compiled[0])
+            .await
+            .unwrap();
+        let mut arguments = Vec::new();
+        let mut expected = Vec::new();
+        for c in compiled.iter().filter(|c| c.sql == compiled[0].sql) {
+            arguments.push(multiplexed.arguments(&c.params).unwrap());
+            expected.push(rusuna_sqlx::fetch(&mut conn, c).await.unwrap());
+        }
+        assert!(arguments.len() >= 2, "{filters:?}");
+        assert_eq!(
+            multiplexed.fetch(&mut conn, &arguments).await.unwrap(),
+            expected,
+            "{filters:?}"
+        );
+    }
+    let compiled = Schema::from_sdl(SDL)
+        .unwrap()
+        .compile(
+            "{ typed(where: {small: {_eq: 1}}) { id } }",
+            &json!({}),
+            None,
+            &Session::new("admin"),
+        )
+        .unwrap()
+        .remove(0)
+        .compiled;
+    let multiplexed = rusuna_sqlx::Multiplexed::prepare(&mut conn, &compiled)
+        .await
+        .unwrap();
+    for invalid in [
+        rusuna::Value::Int(70000),
+        rusuna::Value::Text("1".into()),
+        rusuna::Value::Float(1.5),
+    ] {
+        assert!(matches!(
+            multiplexed.arguments(&[invalid]),
+            Err(rusuna_sqlx::Error::Parameter { index: 0, .. })
+        ));
+    }
+    assert!(multiplexed.arguments(&[]).is_err());
+    assert_eq!(
+        multiplexed
+            .fetch(&mut conn, &[json!(["1"]), json!([null])])
+            .await
+            .unwrap(),
+        vec![json!([{"id": 1}]), json!([])]
+    );
+}
