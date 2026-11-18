@@ -1,5 +1,5 @@
-import Audit.Generators
+import Audit.AcceptanceGenerators
 
 open model
 
-#assay resolveNode resolveNodes using resolveSelection_values runSelection_params resolveSelection_declared
+#assay resolveNode using resolveNode_accepts resolveNodes_accepts resolveSelection_accepts runSelection_accepts resolveSelection_values runSelection_params resolveSelection_declared

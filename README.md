@@ -331,11 +331,12 @@ Conditions written a second time, as an equivalence next to the definition:
 | `scalarValid_iff`, `membershipValid_iff` | Comparison values are non-null and finite, and membership lists respect their size bound. |
 | `predicateEq_iff`, `predicatesEq_iff`, `hasConjunct_iff` | Structural expression equality and immediate conjunct membership have their stated meanings. |
 | `appendCondition_exact`, `addPermission_condition` | The inserted scan is exactly the original scan with the requested role condition appended; binding errors are preserved. |
+| `resolveSelection_accepts`, `runSelection_accepts` | Pre-permission resolution and compilation succeed exactly when the Boolean `acceptsSelection` accepts the schema and selection. |
 
 [leanassay](https://github.com/conao3/lean-leanassay/tree/fc0d05473917864cedb6d27e208c81de3e2a11af) checks which theorems rule out
-broken implementations: the audit covers fourteen functions, with 101 mutations, 78 killed,
-16 equivalent on the sampled inputs, 7 stillborn, zero holes, zero untested and zero timed out.
-There are nine independent properties (fifteen principal theorem statements), fourteen
+broken implementations: the audit covers twenty-one functions, with 144 mutations, 93 killed,
+18 equivalent on the sampled inputs, 33 stillborn, zero holes, zero untested and zero timed out.
+There are nine independent properties (fifteen principal theorem statements), sixteen
 restated conditions and zero variable-free checks. The executable audit checks full
 scan equalities as well as their limit projection. AGENTS.md lists the functions it covers and the ones it does not.
 
@@ -356,9 +357,9 @@ A manual mutation failed both the insertion and parameter-preservation proofs.
 | Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
 |---|---|---|---|---|---|---|---|---|
 | SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
-| Selection resolution | 9 | 178 | 5 | 50 | 17 | 0 | 26 | 80 |
+| Selection resolution | 2 | 136 | 25 | 3 | 2 | 0 | 52 | 54 |
 | Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
-| Total | 20 | 355 | 28 | 151 | 19 | 0 | 26 | 131 |
+| Total | 13 | 313 | 48 | 104 | 4 | 0 | 52 | 105 |
 
 The survey uses 1000 samples and a 30-second deadline per mutation. Timeouts are
 unresolved and depend on machine load. Equivalent means equal outputs on the sampled
@@ -372,9 +373,11 @@ Outside the proofs:
   its role condition as an expression in the plan. It does not interpret SQL execution,
   or prove that the expression represents the application author's intended policy.
   Differential tests compare PostgreSQL results with Hasura-generated statements.
-- The complete acceptance rules of `resolveSelection` and `resolve`. An independent
-  Bool acceptance function and its success equivalence remain pending; no theorem
-  fixes the complete accepted set or every error variant. Tests cover them by example.
+- The complete acceptance rules of the role-aware `resolve` and `run`. The proved
+  `acceptsSelection` equivalence covers the schema supplied to pre-permission
+  resolution. Session binding and the final permission-dependency validator need
+  an input-only success characterization. Error variants remain outside the
+  acceptance theorem. Tests cover these cases by example.
 - leanfran, which translates the Lean definitions to the Rust that runs. The tests run
   the generated Rust.
 - `src/lib.rs`, which converts public Rust types to Lean types and back; SDL parsing,

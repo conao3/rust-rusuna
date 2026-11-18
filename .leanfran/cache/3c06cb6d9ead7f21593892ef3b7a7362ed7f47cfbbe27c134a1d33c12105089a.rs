@@ -31235,6 +31235,356 @@ pub(crate) unsafe fn l_model_pieceSlot(mut x_1: Obj) -> Obj {
     unused_assignments,
     unused_variables,
     unreachable_code,
+    unused_unsafe,
+    clippy::all
+)]
+pub(crate) unsafe fn l_model_acceptsExpressions(
+    mut x_1: Obj,
+    mut x_2: Obj,
+    mut x_3: Obj,
+    mut x_4: Obj,
+) -> u8 {
+    let mut x_5: u8 = 0;
+    let mut x_6: Obj = rt::lean_box(0);
+    let mut x_7: Obj = rt::lean_box(0);
+    let mut x_8: u8 = 0;
+    let mut x_9: u8 = 0;
+    let mut __blk: u32 = 0;
+    'body: loop {
+        match __blk {
+            0 => match rt::lean_obj_tag(x_4) {
+                0 => {
+                    rt::lean_dec(x_3);
+                    rt::lean_dec_ref(x_2);
+                    x_5 = 1u8;
+                    return x_5;
+                }
+                1 => {
+                    x_6 = rt::lean_ctor_get(x_4, 0);
+                    x_7 = rt::lean_ctor_get(x_4, 1);
+                    rt::lean_inc(x_3);
+                    rt::lean_inc_ref(x_2);
+                    x_8 = l_model_acceptsExpression(x_1, x_2, x_3, x_6);
+                    match x_8 as u32 {
+                        0 => {
+                            rt::lean_dec(x_3);
+                            rt::lean_dec_ref(x_2);
+                            return x_8;
+                        }
+                        1 => {
+                            {
+                                let t_0 = x_1;
+                                let t_1 = x_2;
+                                let t_2 = x_3;
+                                let t_3 = x_7;
+                                x_1 = t_0;
+                                x_2 = t_1;
+                                x_3 = t_2;
+                                x_4 = t_3;
+                            }
+                            __blk = 0;
+                            continue 'body;
+                        }
+                        _ => rt::lean_internal_panic_unreachable(),
+                    }
+                }
+                _ => rt::lean_internal_panic_unreachable(),
+            },
+            _ => rt::lean_internal_panic_unreachable(),
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    non_snake_case,
+    unused_mut,
+    unused_assignments,
+    unused_variables,
+    unreachable_code,
+    unused_unsafe,
+    clippy::all
+)]
+pub(crate) unsafe fn l_model_acceptsExpression(
+    mut x_1: Obj,
+    mut x_2: Obj,
+    mut x_3: Obj,
+    mut x_4: Obj,
+) -> u8 {
+    let mut x_6: Obj = rt::lean_box(0);
+    let mut x_7: Obj = rt::lean_box(0);
+    let mut x_8: Obj = rt::lean_box(0);
+    let mut x_9: u8 = 0;
+    let mut x_10: Obj = rt::lean_box(0);
+    let mut x_11: Obj = rt::lean_box(0);
+    let mut x_12: u8 = 0;
+    let mut x_13: Obj = rt::lean_box(0);
+    let mut x_14: u8 = 0;
+    let mut x_15: Obj = rt::lean_box(0);
+    let mut x_16: Obj = rt::lean_box(0);
+    let mut x_17: Obj = rt::lean_box(0);
+    let mut x_18: u8 = 0;
+    let mut x_19: u8 = 0;
+    let mut x_20: Obj = rt::lean_box(0);
+    let mut x_21: Obj = rt::lean_box(0);
+    let mut x_22: Obj = rt::lean_box(0);
+    let mut x_23: u8 = 0;
+    let mut x_24: u8 = 0;
+    let mut x_25: Obj = rt::lean_box(0);
+    let mut x_26: Obj = rt::lean_box(0);
+    let mut x_27: u8 = 0;
+    let mut x_28: Obj = rt::lean_box(0);
+    let mut x_29: Obj = rt::lean_box(0);
+    let mut x_30: Obj = rt::lean_box(0);
+    let mut x_31: u8 = 0;
+    let mut x_32: Obj = rt::lean_box(0);
+    let mut x_33: Obj = rt::lean_box(0);
+    let mut x_34: Obj = rt::lean_box(0);
+    let mut x_35: u8 = 0;
+    let mut x_36: Obj = rt::lean_box(0);
+    let mut x_37: u8 = 0;
+    let mut x_38: Obj = rt::lean_box(0);
+    let mut x_39: u8 = 0;
+    let mut x_40: u8 = 0;
+    let mut x_41: u8 = 0;
+    let mut x_42: Obj = rt::lean_box(0);
+    let mut x_43: Obj = rt::lean_box(0);
+    let mut x_44: Obj = rt::lean_box(0);
+    let mut x_45: Obj = rt::lean_box(0);
+    let mut x_46: u8 = 0;
+    let mut x_47: u8 = 0;
+    let mut x_48: Obj = rt::lean_box(0);
+    let mut __blk: u32 = 0;
+    'body: loop {
+        match __blk {
+            0 => {
+                x_13 = rt::lean_unsigned_to_nat(32u32);
+                x_14 = rt::lean_nat_dec_le(x_3, x_13);
+                match x_14 as u32 {
+                    0 => {
+                        rt::lean_dec(x_3);
+                        rt::lean_dec_ref(x_2);
+                        return x_14;
+                    }
+                    1 => {
+                        match rt::lean_obj_tag(x_4) {
+                            0 => {
+                                rt::lean_dec(x_3);
+                                x_15 = rt::lean_ctor_get(x_4, 0);
+                                x_16 = rt::lean_ctor_get(x_4, 1);
+                                x_17 = l_model_findColumn(x_2, x_15);
+                                rt::lean_dec_ref(x_2);
+                                match rt::lean_obj_tag(x_17) {
+                                    0 => {
+                                        x_18 = 0u8;
+                                        return x_18;
+                                    }
+                                    1 => {
+                                        rt::lean_dec_ref(x_17);
+                                        x_19 = l_model_scalarValid(x_16);
+                                        return x_19;
+                                    }
+                                    _ => rt::lean_internal_panic_unreachable(),
+                                }
+                            }
+                            1 => {
+                                rt::lean_dec(x_3);
+                                x_20 = rt::lean_ctor_get(x_4, 0);
+                                x_21 = rt::lean_ctor_get(x_4, 1);
+                                x_22 = l_model_findColumn(x_2, x_20);
+                                rt::lean_dec_ref(x_2);
+                                match rt::lean_obj_tag(x_22) {
+                                    0 => {
+                                        x_23 = 0u8;
+                                        return x_23;
+                                    }
+                                    1 => {
+                                        rt::lean_dec_ref(x_22);
+                                        x_24 = l_model_membershipValid(x_21);
+                                        return x_24;
+                                    }
+                                    _ => rt::lean_internal_panic_unreachable(),
+                                }
+                            }
+                            2 => {
+                                rt::lean_dec(x_3);
+                                x_25 = rt::lean_ctor_get(x_4, 0);
+                                x_26 = l_model_findColumn(x_2, x_25);
+                                rt::lean_dec_ref(x_2);
+                                match rt::lean_obj_tag(x_26) {
+                                    0 => {
+                                        x_27 = 0u8;
+                                        return x_27;
+                                    }
+                                    1 => {
+                                        rt::lean_dec_ref(x_26);
+                                        return x_14;
+                                    }
+                                    _ => rt::lean_internal_panic_unreachable(),
+                                }
+                            }
+                            5 => {
+                                x_28 = rt::lean_ctor_get(x_4, 0);
+                                x_29 = rt::lean_unsigned_to_nat(1u32);
+                                x_30 = rt::lean_nat_add(x_3, x_29);
+                                rt::lean_dec(x_3);
+                                {
+                                    let t_0 = x_1;
+                                    let t_1 = x_2;
+                                    let t_2 = x_30;
+                                    let t_3 = x_28;
+                                    x_1 = t_0;
+                                    x_2 = t_1;
+                                    x_3 = t_2;
+                                    x_4 = t_3;
+                                }
+                                __blk = 0;
+                                continue 'body;
+                            }
+                            6 => {
+                                x_32 = rt::lean_ctor_get(x_4, 0);
+                                x_33 = rt::lean_ctor_get(x_4, 1);
+                                x_34 = l_model_findRelation(x_2, x_32);
+                                rt::lean_dec_ref(x_2);
+                                match rt::lean_obj_tag(x_34) {
+                                    0 => {
+                                        rt::lean_dec(x_3);
+                                        x_35 = 0u8;
+                                        return x_35;
+                                    }
+                                    1 => {
+                                        x_36 = rt::lean_ctor_get(x_34, 0);
+                                        rt::lean_inc(x_36);
+                                        rt::lean_dec_ref(x_34);
+                                        x_37 = rt::lean_ctor_get_uint8(
+                                            x_36,
+                                            4 * core::mem::size_of::<usize>() as u32 + 0,
+                                        );
+                                        x_38 = rt::lean_ctor_get(x_36, 1);
+                                        rt::lean_inc_ref(x_38);
+                                        x_39 = 2u8;
+                                        x_40 = l_model_instDecidableEqKind(x_37, x_39);
+                                        match x_40 as u32 {
+                                            0 => match x_14 as u32 {
+                                                0 => {
+                                                    rt::lean_dec_ref(x_38);
+                                                    rt::lean_dec(x_36);
+                                                    rt::lean_dec(x_3);
+                                                    return x_14;
+                                                }
+                                                1 => {
+                                                    x_41 = l_model_relationValid(x_36);
+                                                    rt::lean_dec(x_36);
+                                                    match x_41 as u32 {
+                                                        0 => {
+                                                            rt::lean_dec_ref(x_38);
+                                                            rt::lean_dec(x_3);
+                                                            return x_41;
+                                                        }
+                                                        1 => {
+                                                            x_42 = l_model_findTable(x_1, x_38);
+                                                            rt::lean_dec_ref(x_38);
+                                                            match rt::lean_obj_tag(x_42) {
+0 => {
+rt::lean_dec(x_3);
+return x_40;
+}
+1 => {
+x_43 = rt::lean_ctor_get(x_42, 0);
+rt::lean_inc(x_43);
+rt::lean_dec_ref(x_42);
+x_44 = rt::lean_unsigned_to_nat(1u32);
+x_45 = rt::lean_nat_add(x_3, x_44);
+rt::lean_dec(x_3);
+{ let t_0 = x_1; let t_1 = x_43; let t_2 = x_45; let t_3 = x_33; x_1 = t_0; x_2 = t_1; x_3 = t_2; x_4 = t_3; }
+__blk = 0; continue 'body;
+}
+_ => rt::lean_internal_panic_unreachable(),
+}
+                                                        }
+                                                        _ => rt::lean_internal_panic_unreachable(),
+                                                    }
+                                                }
+                                                _ => rt::lean_internal_panic_unreachable(),
+                                            },
+                                            1 => {
+                                                rt::lean_dec_ref(x_38);
+                                                rt::lean_dec(x_36);
+                                                rt::lean_dec(x_3);
+                                                x_47 = 0u8;
+                                                return x_47;
+                                            }
+                                            _ => rt::lean_internal_panic_unreachable(),
+                                        }
+                                    }
+                                    _ => rt::lean_internal_panic_unreachable(),
+                                }
+                            }
+                            _ => {
+                                x_48 = rt::lean_ctor_get(x_4, 0);
+                                {
+                                    let t_0 = x_48;
+                                    x_6 = t_0;
+                                }
+                                x_7 = l_List_lengthTR___redArg(x_6);
+                                x_8 = rt::lean_unsigned_to_nat(1000u32);
+                                x_9 = rt::lean_nat_dec_le(x_7, x_8);
+                                rt::lean_dec(x_7);
+                                match x_9 as u32 {
+                                    0 => {
+                                        rt::lean_dec(x_3);
+                                        rt::lean_dec_ref(x_2);
+                                        return x_9;
+                                    }
+                                    1 => {
+                                        x_10 = rt::lean_unsigned_to_nat(1u32);
+                                        x_11 = rt::lean_nat_add(x_3, x_10);
+                                        rt::lean_dec(x_3);
+                                        x_12 = l_model_acceptsExpressions(x_1, x_2, x_11, x_6);
+                                        return x_12;
+                                    }
+                                    _ => rt::lean_internal_panic_unreachable(),
+                                }
+                            }
+                        }
+                    }
+                    _ => rt::lean_internal_panic_unreachable(),
+                }
+            }
+            _ => rt::lean_internal_panic_unreachable(),
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    non_snake_case,
+    unused_mut,
+    unused_assignments,
+    unused_variables,
+    unreachable_code,
+    unused_unsafe,
+    clippy::all
+)]
+pub(crate) unsafe fn l_model_instDecidableEqKind(mut x_1: u8, mut x_2: u8) -> u8 {
+    let mut x_3: Obj = rt::lean_box(0);
+    let mut x_4: Obj = rt::lean_box(0);
+    let mut x_5: u8 = 0;
+    x_3 = l_model_Kind_ctorIdx(x_1);
+    x_4 = l_model_Kind_ctorIdx(x_2);
+    x_5 = rt::lean_nat_dec_eq(x_3, x_4);
+    rt::lean_dec(x_4);
+    rt::lean_dec(x_3);
+    return x_5;
+}
+
+#[allow(
+    dead_code,
+    non_snake_case,
+    unused_mut,
+    unused_assignments,
+    unused_variables,
+    unreachable_code,
     clippy::all
 )]
 unsafe fn l_model_rowAlias_init() -> Obj {
@@ -31303,6 +31653,147 @@ pub(crate) unsafe fn l_model_placeholders(mut x_1: Obj) -> Obj {
     x_2 = l_model_emit(x_1);
     x_3 = l_model_slots(x_2);
     return x_3;
+}
+
+#[allow(
+    dead_code,
+    non_snake_case,
+    unused_mut,
+    unused_assignments,
+    unused_variables,
+    unreachable_code,
+    unused_unsafe,
+    clippy::all
+)]
+pub(crate) unsafe fn l_model_acceptsOrder(mut x_1: Obj, mut x_2: Obj) -> u8 {
+    let mut x_3: u8 = 0;
+    x_3 = l_List_all___at___00model_acceptsOrder_spec__0(x_1, x_2);
+    return x_3;
+}
+
+#[allow(
+    dead_code,
+    non_snake_case,
+    unused_mut,
+    unused_assignments,
+    unused_variables,
+    unreachable_code,
+    unused_unsafe,
+    clippy::all
+)]
+pub(crate) unsafe fn l_List_all___at___00model_acceptsOrder_spec__0(
+    mut x_1: Obj,
+    mut x_2: Obj,
+) -> u8 {
+    let mut x_3: u8 = 0;
+    let mut x_4: Obj = rt::lean_box(0);
+    let mut x_5: Obj = rt::lean_box(0);
+    let mut x_6: Obj = rt::lean_box(0);
+    let mut x_7: Obj = rt::lean_box(0);
+    let mut x_8: u8 = 0;
+    let mut x_9: u8 = 0;
+    let mut __blk: u32 = 0;
+    'body: loop {
+        match __blk {
+            0 => match rt::lean_obj_tag(x_2) {
+                0 => {
+                    x_3 = 1u8;
+                    return x_3;
+                }
+                1 => {
+                    x_4 = rt::lean_ctor_get(x_2, 0);
+                    x_5 = rt::lean_ctor_get(x_2, 1);
+                    x_6 = rt::lean_ctor_get(x_4, 0);
+                    x_7 = l_model_findColumn(x_1, x_6);
+                    match rt::lean_obj_tag(x_7) {
+                        0 => {
+                            x_8 = 0u8;
+                            return x_8;
+                        }
+                        1 => {
+                            rt::lean_dec_ref(x_7);
+                            {
+                                let t_0 = x_1;
+                                let t_1 = x_5;
+                                x_1 = t_0;
+                                x_2 = t_1;
+                            }
+                            __blk = 0;
+                            continue 'body;
+                        }
+                        _ => rt::lean_internal_panic_unreachable(),
+                    }
+                }
+                _ => rt::lean_internal_panic_unreachable(),
+            },
+            _ => rt::lean_internal_panic_unreachable(),
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    non_snake_case,
+    unused_mut,
+    unused_assignments,
+    unused_variables,
+    unreachable_code,
+    unused_unsafe,
+    clippy::all
+)]
+pub(crate) unsafe fn l_model_acceptsScan(
+    mut x_1: Obj,
+    mut x_2: Obj,
+    mut x_3: Obj,
+    mut x_4: Obj,
+) -> u8 {
+    let mut x_5: u8 = 0;
+    let mut x_6: u8 = 0;
+    rt::lean_inc_ref(x_2);
+    x_5 = l_model_acceptsFilter(x_1, x_2, x_3);
+    match x_5 as u32 {
+        0 => {
+            rt::lean_dec_ref(x_2);
+            return x_5;
+        }
+        1 => {
+            x_6 = l_List_all___at___00model_acceptsOrder_spec__0(x_2, x_4);
+            rt::lean_dec_ref(x_2);
+            return x_6;
+        }
+        _ => rt::lean_internal_panic_unreachable(),
+    }
+}
+
+#[allow(
+    dead_code,
+    non_snake_case,
+    unused_mut,
+    unused_assignments,
+    unused_variables,
+    unreachable_code,
+    unused_unsafe,
+    clippy::all
+)]
+pub(crate) unsafe fn l_model_acceptsFilter(mut x_1: Obj, mut x_2: Obj, mut x_3: Obj) -> u8 {
+    let mut x_4: u8 = 0;
+    let mut x_5: Obj = rt::lean_box(0);
+    let mut x_6: Obj = rt::lean_box(0);
+    let mut x_7: u8 = 0;
+    match rt::lean_obj_tag(x_3) {
+        0 => {
+            rt::lean_dec_ref(x_2);
+            x_4 = 1u8;
+            return x_4;
+        }
+        1 => {
+            x_5 = rt::lean_ctor_get(x_3, 0);
+            x_6 = rt::lean_unsigned_to_nat(0u32);
+            x_7 = l_model_acceptsExpression(x_1, x_2, x_6, x_5);
+            return x_7;
+        }
+        _ => rt::lean_internal_panic_unreachable(),
+    }
 }
 
 #[allow(
@@ -31778,6 +32269,488 @@ pub(crate) unsafe fn l_model_maxInValues() -> Obj {
     unused_unsafe,
     clippy::all
 )]
+pub(crate) unsafe fn l_model_acceptsNodes(
+    mut x_1: Obj,
+    mut x_2: Obj,
+    mut x_3: Obj,
+    mut x_4: Obj,
+    mut x_5: Obj,
+) -> u8 {
+    let mut x_6: u8 = 0;
+    let mut x_7: Obj = rt::lean_box(0);
+    let mut x_8: Obj = rt::lean_box(0);
+    let mut x_9: u8 = 0;
+    let mut x_10: u8 = 0;
+    let mut __blk: u32 = 0;
+    'body: loop {
+        match __blk {
+            0 => match rt::lean_obj_tag(x_5) {
+                0 => {
+                    x_6 = 1u8;
+                    return x_6;
+                }
+                1 => {
+                    x_7 = rt::lean_ctor_get(x_5, 0);
+                    rt::lean_inc(x_7);
+                    x_8 = rt::lean_ctor_get(x_5, 1);
+                    rt::lean_inc(x_8);
+                    rt::lean_dec_ref(x_5);
+                    x_9 = l_model_acceptsNode(x_1, x_2, x_3, x_4, x_7);
+                    match x_9 as u32 {
+                        0 => {
+                            rt::lean_dec(x_8);
+                            return x_9;
+                        }
+                        1 => {
+                            {
+                                let t_0 = x_1;
+                                let t_1 = x_2;
+                                let t_2 = x_3;
+                                let t_3 = x_4;
+                                let t_4 = x_8;
+                                x_1 = t_0;
+                                x_2 = t_1;
+                                x_3 = t_2;
+                                x_4 = t_3;
+                                x_5 = t_4;
+                            }
+                            __blk = 0;
+                            continue 'body;
+                        }
+                        _ => rt::lean_internal_panic_unreachable(),
+                    }
+                }
+                _ => rt::lean_internal_panic_unreachable(),
+            },
+            _ => rt::lean_internal_panic_unreachable(),
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    non_snake_case,
+    unused_mut,
+    unused_assignments,
+    unused_variables,
+    unreachable_code,
+    unused_unsafe,
+    clippy::all
+)]
+pub(crate) unsafe fn l_model_acceptsNode(
+    mut x_1: Obj,
+    mut x_2: Obj,
+    mut x_3: Obj,
+    mut x_4: Obj,
+    mut x_5: Obj,
+) -> u8 {
+    let mut x_6: Obj = rt::lean_box(0);
+    let mut x_7: Obj = rt::lean_box(0);
+    let mut x_8: Obj = rt::lean_box(0);
+    let mut x_9: Obj = rt::lean_box(0);
+    let mut x_10: Obj = rt::lean_box(0);
+    let mut x_11: Obj = rt::lean_box(0);
+    let mut x_13: Obj = rt::lean_box(0);
+    let mut x_14: u8 = 0;
+    let mut x_15: Obj = rt::lean_box(0);
+    let mut x_16: u8 = 0;
+    let mut x_17: Obj = rt::lean_box(0);
+    let mut x_18: Obj = rt::lean_box(0);
+    let mut x_19: u8 = 0;
+    let mut x_20: u8 = 0;
+    let mut x_21: Obj = rt::lean_box(0);
+    let mut x_22: Obj = rt::lean_box(0);
+    let mut x_23: Obj = rt::lean_box(0);
+    let mut x_24: u8 = 0;
+    let mut x_26: u8 = 0;
+    let mut x_27: Obj = rt::lean_box(0);
+    let mut x_28: u8 = 0;
+    let mut x_29: Obj = rt::lean_box(0);
+    let mut x_31: u8 = 0;
+    let mut x_32: Obj = rt::lean_box(0);
+    let mut x_33: Obj = rt::lean_box(0);
+    let mut x_34: Obj = rt::lean_box(0);
+    let mut x_35: u8 = 0;
+    let mut x_36: Obj = rt::lean_box(0);
+    let mut x_37: u8 = 0;
+    let mut x_38: Obj = rt::lean_box(0);
+    let mut x_39: u8 = 0;
+    let mut x_40: Obj = rt::lean_box(0);
+    let mut x_41: Obj = rt::lean_box(0);
+    let mut x_42: u8 = 0;
+    let mut x_43: Obj = rt::lean_box(0);
+    let mut x_44: Obj = rt::lean_box(0);
+    let mut x_45: u8 = 0;
+    let mut x_46: u8 = 0;
+    let mut x_47: u8 = 0;
+    let mut x_48: Obj = rt::lean_box(0);
+    let mut x_49: Obj = rt::lean_box(0);
+    let mut x_50: u8 = 0;
+    let mut x_51: Obj = rt::lean_box(0);
+    let mut x_52: Obj = rt::lean_box(0);
+    let mut x_53: u8 = 0;
+    let mut x_54: Obj = rt::lean_box(0);
+    let mut x_55: Obj = rt::lean_box(0);
+    let mut x_56: u8 = 0;
+    let mut x_57: u8 = 0;
+    let mut x_58: u8 = 0;
+    let mut x_59: u8 = 0;
+    let mut x_60: u8 = 0;
+    let mut x_61: u8 = 0;
+    let mut __blk: u32 = 0;
+    'body: loop {
+        match __blk {
+            0 => {
+                x_6 = rt::lean_ctor_get(x_5, 1);
+                rt::lean_inc_ref(x_6);
+                x_7 = rt::lean_ctor_get(x_5, 2);
+                rt::lean_inc(x_7);
+                x_8 = rt::lean_ctor_get(x_5, 3);
+                rt::lean_inc(x_8);
+                x_9 = rt::lean_ctor_get(x_5, 4);
+                rt::lean_inc(x_9);
+                x_10 = rt::lean_ctor_get(x_5, 5);
+                rt::lean_inc(x_10);
+                x_11 = rt::lean_ctor_get(x_5, 6);
+                rt::lean_inc(x_11);
+                rt::lean_dec_ref(x_5);
+                match rt::lean_obj_tag(x_7) {
+                    0 => {
+                        x_58 = l_List_isEmpty___redArg(x_8);
+                        match x_58 as u32 {
+                            0 => {
+                                rt::lean_dec(x_10);
+                                rt::lean_dec(x_9);
+                                {
+                                    let t_0 = x_58;
+                                    x_31 = t_0;
+                                }
+                                __blk = 3;
+                                continue 'body;
+                            }
+                            1 => match rt::lean_obj_tag(x_9) {
+                                0 => match rt::lean_obj_tag(x_10) {
+                                    0 => {
+                                        {
+                                            let t_0 = x_58;
+                                            x_31 = t_0;
+                                        }
+                                        __blk = 3;
+                                        continue 'body;
+                                    }
+                                    1 => {
+                                        rt::lean_dec_ref(x_10);
+                                        x_59 = 0u8;
+                                        {
+                                            let t_0 = x_59;
+                                            x_31 = t_0;
+                                        }
+                                        __blk = 3;
+                                        continue 'body;
+                                    }
+                                    _ => rt::lean_internal_panic_unreachable(),
+                                },
+                                1 => {
+                                    rt::lean_dec_ref(x_9);
+                                    rt::lean_dec(x_10);
+                                    x_60 = 0u8;
+                                    {
+                                        let t_0 = x_60;
+                                        x_31 = t_0;
+                                    }
+                                    __blk = 3;
+                                    continue 'body;
+                                }
+                                _ => rt::lean_internal_panic_unreachable(),
+                            },
+                            _ => rt::lean_internal_panic_unreachable(),
+                        }
+                    }
+                    1 => {
+                        rt::lean_dec(x_10);
+                        rt::lean_dec(x_9);
+                        x_61 = 0u8;
+                        {
+                            let t_0 = x_61;
+                            x_31 = t_0;
+                        }
+                        __blk = 3;
+                        continue 'body;
+                    }
+                    _ => rt::lean_internal_panic_unreachable(),
+                }
+            }
+            1 => {
+                x_16 = l_model_relationValid(x_13);
+                rt::lean_dec_ref(x_13);
+                match x_16 as u32 {
+                    0 => {
+                        rt::lean_dec_ref(x_15);
+                        rt::lean_dec(x_11);
+                        rt::lean_dec(x_8);
+                        rt::lean_dec(x_7);
+                        return x_16;
+                    }
+                    1 => {
+                        x_17 = rt::lean_box(0);
+                        rt::lean_inc(x_11);
+                        x_18 = l_List_mapTR_loop___at___00model_resolveNode_spec__0(x_11, x_17);
+                        x_19 = l_model_selectionValid(x_18);
+                        rt::lean_dec(x_18);
+                        match x_19 as u32 {
+                            0 => {
+                                rt::lean_dec_ref(x_15);
+                                rt::lean_dec(x_11);
+                                rt::lean_dec(x_8);
+                                rt::lean_dec(x_7);
+                                return x_19;
+                            }
+                            1 => {
+                                rt::lean_inc_ref(x_15);
+                                x_20 = l_model_acceptsScan(x_1, x_15, x_7, x_8);
+                                rt::lean_dec(x_8);
+                                rt::lean_dec(x_7);
+                                match x_20 as u32 {
+                                    0 => {
+                                        rt::lean_dec_ref(x_15);
+                                        rt::lean_dec(x_11);
+                                        return x_20;
+                                    }
+                                    1 => {
+                                        x_21 = rt::lean_unsigned_to_nat(1u32);
+                                        x_22 = rt::lean_nat_add(x_3, x_21);
+                                        x_23 = l_model_relationMode(x_14);
+                                        x_24 = l_model_acceptsNodes(x_1, x_15, x_22, x_23, x_11);
+                                        rt::lean_dec(x_23);
+                                        rt::lean_dec(x_22);
+                                        rt::lean_dec_ref(x_15);
+                                        return x_24;
+                                    }
+                                    _ => rt::lean_internal_panic_unreachable(),
+                                }
+                            }
+                            _ => rt::lean_internal_panic_unreachable(),
+                        }
+                    }
+                    _ => rt::lean_internal_panic_unreachable(),
+                }
+            }
+            2 => match x_26 as u32 {
+                0 => {
+                    rt::lean_dec_ref(x_29);
+                    rt::lean_dec_ref(x_27);
+                    rt::lean_dec(x_11);
+                    rt::lean_dec(x_8);
+                    rt::lean_dec(x_7);
+                    return x_26;
+                }
+                1 => {
+                    {
+                        let t_0 = x_27;
+                        let t_1 = x_28;
+                        let t_2 = x_29;
+                        x_13 = t_0;
+                        x_14 = t_1;
+                        x_15 = t_2;
+                    }
+                    __blk = 1;
+                    continue 'body;
+                }
+                _ => rt::lean_internal_panic_unreachable(),
+            },
+            3 => {
+                x_32 = l_model_modeLeaf(x_2, x_4, x_6);
+                match rt::lean_obj_tag(x_32) {
+                    0 => {
+                        x_33 = l_model_childMode(x_4, x_6);
+                        match rt::lean_obj_tag(x_33) {
+                            0 => {
+                                x_34 = rt::lean_box(0);
+                                x_35 = l_model_instDecidableEqMode_decEq(x_4, x_34);
+                                match x_35 as u32 {
+                                    0 => {
+                                        rt::lean_dec(x_11);
+                                        rt::lean_dec(x_8);
+                                        rt::lean_dec(x_7);
+                                        rt::lean_dec_ref(x_6);
+                                        return x_35;
+                                    }
+                                    1 => {
+                                        x_36 = l_model_findRelation(x_2, x_6);
+                                        rt::lean_dec_ref(x_6);
+                                        match rt::lean_obj_tag(x_36) {
+                                            0 => {
+                                                rt::lean_dec(x_11);
+                                                rt::lean_dec(x_8);
+                                                rt::lean_dec(x_7);
+                                                x_37 = 0u8;
+                                                return x_37;
+                                            }
+                                            1 => {
+                                                x_38 = rt::lean_ctor_get(x_36, 0);
+                                                rt::lean_inc(x_38);
+                                                rt::lean_dec_ref(x_36);
+                                                x_39 = rt::lean_ctor_get_uint8(
+                                                    x_38,
+                                                    4 * core::mem::size_of::<usize>() as u32 + 0,
+                                                );
+                                                x_40 = rt::lean_ctor_get(x_38, 1);
+                                                x_41 = l_model_findTable(x_1, x_40);
+                                                match rt::lean_obj_tag(x_41) {
+                                                    0 => {
+                                                        rt::lean_dec(x_38);
+                                                        rt::lean_dec(x_11);
+                                                        rt::lean_dec(x_8);
+                                                        rt::lean_dec(x_7);
+                                                        x_42 = 0u8;
+                                                        return x_42;
+                                                    }
+                                                    1 => {
+                                                        x_43 = rt::lean_ctor_get(x_41, 0);
+                                                        rt::lean_inc(x_43);
+                                                        rt::lean_dec_ref(x_41);
+                                                        x_44 = rt::lean_unsigned_to_nat(32u32);
+                                                        x_45 = rt::lean_nat_dec_lt(x_3, x_44);
+                                                        match x_45 as u32 {
+                                                            0 => {
+                                                                rt::lean_dec(x_43);
+                                                                rt::lean_dec(x_38);
+                                                                rt::lean_dec(x_11);
+                                                                rt::lean_dec(x_8);
+                                                                rt::lean_dec(x_7);
+                                                                return x_45;
+                                                            }
+                                                            1 => {
+                                                                x_46 = 0u8;
+                                                                x_47 = l_model_instDecidableEqKind(
+                                                                    x_39, x_46,
+                                                                );
+                                                                match x_47 as u32 {
+0 => {
+match x_45 as u32 {
+0 => {
+{ let t_0 = x_31; let t_1 = x_38; let t_2 = x_39; let t_3 = x_43; x_26 = t_0; x_27 = t_1; x_28 = t_2; x_29 = t_3; }
+__blk = 2; continue 'body;
+}
+1 => {
+{ let t_0 = x_38; let t_1 = x_39; let t_2 = x_43; x_13 = t_0; x_14 = t_1; x_15 = t_2; }
+__blk = 1; continue 'body;
+}
+_ => rt::lean_internal_panic_unreachable(),
+}
+}
+1 => {
+{ let t_0 = x_31; let t_1 = x_38; let t_2 = x_39; let t_3 = x_43; x_26 = t_0; x_27 = t_1; x_28 = t_2; x_29 = t_3; }
+__blk = 2; continue 'body;
+}
+_ => rt::lean_internal_panic_unreachable(),
+}
+                                                            }
+                                                            _ => {
+                                                                rt::lean_internal_panic_unreachable(
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => rt::lean_internal_panic_unreachable(),
+                                                }
+                                            }
+                                            _ => rt::lean_internal_panic_unreachable(),
+                                        }
+                                    }
+                                    _ => rt::lean_internal_panic_unreachable(),
+                                }
+                            }
+                            1 => {
+                                rt::lean_dec(x_8);
+                                rt::lean_dec(x_7);
+                                rt::lean_dec_ref(x_6);
+                                x_48 = rt::lean_ctor_get(x_33, 0);
+                                rt::lean_inc(x_48);
+                                rt::lean_dec_ref(x_33);
+                                x_49 = rt::lean_unsigned_to_nat(35u32);
+                                x_50 = rt::lean_nat_dec_lt(x_3, x_49);
+                                match x_50 as u32 {
+                                    0 => {
+                                        rt::lean_dec(x_48);
+                                        rt::lean_dec(x_11);
+                                        return x_50;
+                                    }
+                                    1 => match x_31 as u32 {
+                                        0 => {
+                                            rt::lean_dec(x_48);
+                                            rt::lean_dec(x_11);
+                                            return x_31;
+                                        }
+                                        1 => {
+                                            x_51 = rt::lean_box(0);
+                                            rt::lean_inc(x_11);
+                                            x_52 = l_List_mapTR_loop___at___00model_resolveNode_spec__0(x_11, x_51);
+                                            x_53 = l_model_selectionValid(x_52);
+                                            rt::lean_dec(x_52);
+                                            match x_53 as u32 {
+                                                0 => {
+                                                    rt::lean_dec(x_48);
+                                                    rt::lean_dec(x_11);
+                                                    return x_53;
+                                                }
+                                                1 => {
+                                                    x_54 = rt::lean_unsigned_to_nat(1u32);
+                                                    x_55 = rt::lean_nat_add(x_3, x_54);
+                                                    x_56 = l_model_acceptsNodes(
+                                                        x_1, x_2, x_55, x_48, x_11,
+                                                    );
+                                                    rt::lean_dec(x_48);
+                                                    rt::lean_dec(x_55);
+                                                    return x_56;
+                                                }
+                                                _ => rt::lean_internal_panic_unreachable(),
+                                            }
+                                        }
+                                        _ => rt::lean_internal_panic_unreachable(),
+                                    },
+                                    _ => rt::lean_internal_panic_unreachable(),
+                                }
+                            }
+                            _ => rt::lean_internal_panic_unreachable(),
+                        }
+                    }
+                    1 => {
+                        rt::lean_dec_ref(x_32);
+                        rt::lean_dec(x_8);
+                        rt::lean_dec(x_7);
+                        rt::lean_dec_ref(x_6);
+                        match x_31 as u32 {
+                            0 => {
+                                rt::lean_dec(x_11);
+                                return x_31;
+                            }
+                            1 => {
+                                x_57 = l_List_isEmpty___redArg(x_11);
+                                rt::lean_dec(x_11);
+                                return x_57;
+                            }
+                            _ => rt::lean_internal_panic_unreachable(),
+                        }
+                    }
+                    _ => rt::lean_internal_panic_unreachable(),
+                }
+            }
+            _ => rt::lean_internal_panic_unreachable(),
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    non_snake_case,
+    unused_mut,
+    unused_assignments,
+    unused_variables,
+    unreachable_code,
+    unused_unsafe,
+    clippy::all
+)]
 pub(crate) unsafe fn l_model_Scan_order(mut x_1: Obj) -> Obj {
     let mut x_2: Obj = rt::lean_box(0);
     x_2 = rt::lean_ctor_get(x_1, 4);
@@ -31866,6 +32839,157 @@ pub(crate) unsafe fn l_model_maxDepth() -> Obj {
     let v = l_model_maxDepth_init();
     rt::lean_mark_persistent(v);
     CELL.with(|c| *c.get_or_init(|| v))
+}
+
+#[allow(
+    dead_code,
+    non_snake_case,
+    unused_mut,
+    unused_assignments,
+    unused_variables,
+    unreachable_code,
+    unused_unsafe,
+    clippy::all
+)]
+pub(crate) unsafe fn l_model_acceptsSelection(mut x_1: Obj, mut x_2: Obj) -> u8 {
+    let mut x_3: Obj = rt::lean_box(0);
+    let mut x_4: Obj = rt::lean_box(0);
+    let mut x_5: u8 = 0;
+    let mut x_6: Obj = rt::lean_box(0);
+    let mut x_7: Obj = rt::lean_box(0);
+    let mut x_8: u8 = 0;
+    let mut x_9: Obj = rt::lean_box(0);
+    let mut x_10: u8 = 0;
+    let mut x_11: Obj = rt::lean_box(0);
+    let mut x_12: Obj = rt::lean_box(0);
+    let mut x_13: Obj = rt::lean_box(0);
+    let mut x_14: Obj = rt::lean_box(0);
+    let mut x_16: u8 = 0;
+    let mut x_17: Obj = rt::lean_box(0);
+    let mut x_18: Obj = rt::lean_box(0);
+    let mut x_19: Obj = rt::lean_box(0);
+    let mut x_20: u8 = 0;
+    let mut x_21: Obj = rt::lean_box(0);
+    let mut x_22: u8 = 0;
+    let mut x_23: Obj = rt::lean_box(0);
+    let mut x_24: u8 = 0;
+    let mut x_25: Obj = rt::lean_box(0);
+    let mut x_26: Obj = rt::lean_box(0);
+    let mut x_27: u8 = 0;
+    let mut x_28: u8 = 0;
+    let mut __blk: u32 = 0;
+    'body: loop {
+        match __blk {
+            0 => {
+                x_3 = rt::lean_ctor_get(x_1, 1);
+                x_4 = l_List_find_x3f___at___00model_resolveSelection_spec__0(x_2, x_3);
+                match rt::lean_obj_tag(x_4) {
+                    0 => {
+                        rt::lean_dec_ref(x_2);
+                        x_5 = 0u8;
+                        return x_5;
+                    }
+                    1 => {
+                        x_6 = rt::lean_ctor_get(x_4, 0);
+                        rt::lean_inc(x_6);
+                        rt::lean_dec_ref(x_4);
+                        x_7 = rt::lean_ctor_get(x_6, 1);
+                        rt::lean_inc_ref(x_7);
+                        x_8 = rt::lean_ctor_get_uint8(
+                            x_6,
+                            2 * core::mem::size_of::<usize>() as u32 + 0,
+                        );
+                        rt::lean_dec(x_6);
+                        x_9 = l_model_findTable(x_1, x_7);
+                        rt::lean_dec_ref(x_7);
+                        match rt::lean_obj_tag(x_9) {
+                            0 => {
+                                rt::lean_dec_ref(x_2);
+                                x_10 = 0u8;
+                                return x_10;
+                            }
+                            1 => {
+                                x_11 = rt::lean_ctor_get(x_9, 0);
+                                rt::lean_inc(x_11);
+                                rt::lean_dec_ref(x_9);
+                                x_12 = rt::lean_ctor_get(x_2, 2);
+                                rt::lean_inc(x_12);
+                                x_13 = rt::lean_ctor_get(x_2, 3);
+                                rt::lean_inc(x_13);
+                                x_14 = rt::lean_ctor_get(x_2, 6);
+                                rt::lean_inc_n(x_14, 2);
+                                rt::lean_dec_ref(x_2);
+                                x_25 = rt::lean_box(0);
+                                x_26 = l_List_mapTR_loop___at___00model_resolveNode_spec__0(
+                                    x_14, x_25,
+                                );
+                                x_27 = l_model_selectionValid(x_26);
+                                rt::lean_dec(x_26);
+                                match x_27 as u32 {
+                                    0 => {
+                                        rt::lean_dec(x_13);
+                                        rt::lean_dec(x_12);
+                                        {
+                                            let t_0 = x_27;
+                                            x_16 = t_0;
+                                        }
+                                        __blk = 1;
+                                        continue 'body;
+                                    }
+                                    1 => {
+                                        rt::lean_inc(x_11);
+                                        x_28 = l_model_acceptsScan(x_1, x_11, x_12, x_13);
+                                        rt::lean_dec(x_13);
+                                        rt::lean_dec(x_12);
+                                        {
+                                            let t_0 = x_28;
+                                            x_16 = t_0;
+                                        }
+                                        __blk = 1;
+                                        continue 'body;
+                                    }
+                                    _ => rt::lean_internal_panic_unreachable(),
+                                }
+                            }
+                            _ => rt::lean_internal_panic_unreachable(),
+                        }
+                    }
+                    _ => rt::lean_internal_panic_unreachable(),
+                }
+            }
+            1 => match x_16 as u32 {
+                0 => {
+                    rt::lean_dec(x_14);
+                    rt::lean_dec(x_11);
+                    return x_16;
+                }
+                1 => {
+                    x_17 = rt::lean_unsigned_to_nat(0u32);
+                    x_18 = l_model_RootKind_ctorIdx(x_8);
+                    x_19 = l_model_resolveSelection___closed__0();
+                    x_20 = rt::lean_nat_dec_eq(x_18, x_19);
+                    rt::lean_dec(x_18);
+                    match x_20 as u32 {
+                        0 => {
+                            x_21 = rt::lean_box(0);
+                            x_22 = l_model_acceptsNodes(x_1, x_11, x_17, x_21, x_14);
+                            rt::lean_dec(x_11);
+                            return x_22;
+                        }
+                        1 => {
+                            x_23 = rt::lean_box(1);
+                            x_24 = l_model_acceptsNodes(x_1, x_11, x_17, x_23, x_14);
+                            rt::lean_dec(x_11);
+                            return x_24;
+                        }
+                        _ => rt::lean_internal_panic_unreachable(),
+                    }
+                }
+                _ => rt::lean_internal_panic_unreachable(),
+            },
+            _ => rt::lean_internal_panic_unreachable(),
+        }
+    }
 }
 
 #[allow(
@@ -34248,6 +35372,26 @@ pub fn quote_chars(arg0: Vec<char>) -> Vec<char> {
     }
 }
 
+#[doc = "Lean: `model.acceptsExpressions : model.Schema → model.Table → Nat → List (model.Expression String model.Value) → Bool` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
+#[::leanfran::exported("model.acceptsExpressions")]
+pub fn accepts_expressions(
+    schema: Schema,
+    table: Table,
+    depth: rt::Nat,
+    es: Vec<ExpressionStringModelValue>,
+) -> bool {
+    unsafe {
+        let __a0: Obj = rt::ToLean::to_lean(schema);
+        let __a1: Obj = rt::ToLean::to_lean(table);
+        let __a2: Obj = rt::ToLean::to_lean(depth);
+        let __a3: Obj = rt::list_to_lean(es, |v0| rt::ToLean::to_lean(v0));
+        let __r: u8 = l_model_acceptsExpressions(__a0, __a1, __a2, __a3);
+        rt::lean_dec(__a0);
+        rt::lean_dec(__a3);
+        (__r) != 0
+    }
+}
+
 #[doc = "Lean: `model.eraseNodes : List model.Node → List model.Node` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
 #[::leanfran::exported("model.eraseNodes")]
 pub fn erase_nodes(arg0: Vec<Node>) -> Vec<Node> {
@@ -34686,6 +35830,19 @@ pub fn erase_scan(scan: Scan) -> Scan {
     }
 }
 
+#[doc = "Lean: `model.acceptsOrder : model.Table → List model.Order → Bool` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
+#[::leanfran::exported("model.acceptsOrder")]
+pub fn accepts_order(table: Table, order: Vec<Order>) -> bool {
+    unsafe {
+        let __a0: Obj = rt::ToLean::to_lean(table);
+        let __a1: Obj = rt::list_to_lean(order, |v0| rt::ToLean::to_lean(v0));
+        let __r: u8 = l_model_acceptsOrder(__a0, __a1);
+        rt::lean_dec(__a0);
+        rt::lean_dec(__a1);
+        (__r) != 0
+    }
+}
+
 #[doc = "Lean: `model.distinct : List String → Bool` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
 #[::leanfran::exported("model.distinct")]
 pub fn distinct(arg0: Vec<String>) -> bool {
@@ -34693,6 +35850,27 @@ pub fn distinct(arg0: Vec<String>) -> bool {
         let __a0: Obj = rt::list_to_lean(arg0, |v0| rt::ToLean::to_lean(v0));
         let __r: u8 = l_model_distinct(__a0);
         rt::lean_dec(__a0);
+        (__r) != 0
+    }
+}
+
+#[doc = "Lean: `model.acceptsScan : model.Schema → model.Table → Option (model.Expression String model.Value) → List model.Order → Bool` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
+#[::leanfran::exported("model.acceptsScan")]
+pub fn accepts_scan(
+    schema: Schema,
+    table: Table,
+    conds: Option<ExpressionStringModelValue>,
+    order: Vec<Order>,
+) -> bool {
+    unsafe {
+        let __a0: Obj = rt::ToLean::to_lean(schema);
+        let __a1: Obj = rt::ToLean::to_lean(table);
+        let __a2: Obj = rt::option_to_lean(conds, |v0| rt::ToLean::to_lean(v0));
+        let __a3: Obj = rt::list_to_lean(order, |v0| rt::ToLean::to_lean(v0));
+        let __r: u8 = l_model_acceptsScan(__a0, __a1, __a2, __a3);
+        rt::lean_dec(__a0);
+        rt::lean_dec(__a2);
+        rt::lean_dec(__a3);
         (__r) != 0
     }
 }
@@ -35223,6 +36401,26 @@ pub fn guarded_predicate_values(schema: Schema, session: Session, arg2: Predicat
     }
 }
 
+#[doc = "Lean: `model.acceptsExpression : model.Schema → model.Table → Nat → model.Expression String model.Value → Bool` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
+#[::leanfran::exported("model.acceptsExpression")]
+pub fn accepts_expression(
+    schema: Schema,
+    table: Table,
+    depth: rt::Nat,
+    e: ExpressionStringModelValue,
+) -> bool {
+    unsafe {
+        let __a0: Obj = rt::ToLean::to_lean(schema);
+        let __a1: Obj = rt::ToLean::to_lean(table);
+        let __a2: Obj = rt::ToLean::to_lean(depth);
+        let __a3: Obj = rt::ToLean::to_lean(e);
+        let __r: u8 = l_model_acceptsExpression(__a0, __a1, __a2, __a3);
+        rt::lean_dec(__a0);
+        rt::lean_dec(__a3);
+        (__r) != 0
+    }
+}
+
 #[doc = "Lean: `model.kName : Nat → String` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
 #[::leanfran::exported("model.kName")]
 pub fn k_name(index: rt::Nat) -> String {
@@ -35443,6 +36641,48 @@ pub fn c_name(index: rt::Nat) -> String {
         let __v = <String as rt::FromLean>::from_lean(__r);
         rt::lean_dec(__r);
         __v
+    }
+}
+
+#[doc = "Lean: `model.acceptsNodes : model.Schema → model.Table → Nat → model.Mode → List model.Selection → Bool` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
+#[::leanfran::exported("model.acceptsNodes")]
+pub fn accepts_nodes(
+    schema: Schema,
+    table: Table,
+    depth: rt::Nat,
+    mode: Mode,
+    selections: Vec<Selection>,
+) -> bool {
+    unsafe {
+        let __a0: Obj = rt::ToLean::to_lean(schema);
+        let __a1: Obj = rt::ToLean::to_lean(table);
+        let __a2: Obj = rt::ToLean::to_lean(depth);
+        let __a3: Obj = rt::ToLean::to_lean(mode);
+        let __a4: Obj = rt::list_to_lean(selections, |v0| rt::ToLean::to_lean(v0));
+        let __r: u8 = l_model_acceptsNodes(__a0, __a1, __a2, __a3, __a4);
+        rt::lean_dec(__a0);
+        rt::lean_dec(__a1);
+        rt::lean_dec(__a2);
+        rt::lean_dec(__a3);
+        (__r) != 0
+    }
+}
+
+#[doc = "Lean: `model.acceptsFilter : model.Schema → model.Table → Option (model.Expression String model.Value) → Bool` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
+#[::leanfran::exported("model.acceptsFilter")]
+pub fn accepts_filter(
+    schema: Schema,
+    table: Table,
+    conds: Option<ExpressionStringModelValue>,
+) -> bool {
+    unsafe {
+        let __a0: Obj = rt::ToLean::to_lean(schema);
+        let __a1: Obj = rt::ToLean::to_lean(table);
+        let __a2: Obj = rt::option_to_lean(conds, |v0| rt::ToLean::to_lean(v0));
+        let __r: u8 = l_model_acceptsFilter(__a0, __a1, __a2);
+        rt::lean_dec(__a0);
+        rt::lean_dec(__a2);
+        (__r) != 0
     }
 }
 
@@ -35789,6 +37029,30 @@ pub fn guarded_query_values(schema: Schema, session: Session, query: Query) -> V
     }
 }
 
+#[doc = "Lean: `model.acceptsNode : model.Schema → model.Table → Nat → model.Mode → model.Selection → Bool` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
+#[::leanfran::exported("model.acceptsNode")]
+pub fn accepts_node(
+    schema: Schema,
+    table: Table,
+    depth: rt::Nat,
+    mode: Mode,
+    selection: Selection,
+) -> bool {
+    unsafe {
+        let __a0: Obj = rt::ToLean::to_lean(schema);
+        let __a1: Obj = rt::ToLean::to_lean(table);
+        let __a2: Obj = rt::ToLean::to_lean(depth);
+        let __a3: Obj = rt::ToLean::to_lean(mode);
+        let __a4: Obj = rt::ToLean::to_lean(selection);
+        let __r: u8 = l_model_acceptsNode(__a0, __a1, __a2, __a3, __a4);
+        rt::lean_dec(__a0);
+        rt::lean_dec(__a1);
+        rt::lean_dec(__a2);
+        rt::lean_dec(__a3);
+        (__r) != 0
+    }
+}
+
 #[doc = "Lean: `model.assign : List model.Tok → List model.Piece` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
 #[::leanfran::exported("model.assign")]
 pub fn assign(toks: Vec<Tok>) -> Vec<Piece> {
@@ -35840,6 +37104,18 @@ pub fn bind_operands(session: Session, arg1: Vec<Operand>) -> Result<Vec<Value>,
         );
         rt::lean_dec(__r);
         __v
+    }
+}
+
+#[doc = "Lean: `model.acceptsSelection : model.Schema → model.Selection → Bool` (module `LeanRustGen.Embed.rusuna.h19a5e6a0406f9184.model`)."]
+#[::leanfran::exported("model.acceptsSelection")]
+pub fn accepts_selection(schema: Schema, root: Selection) -> bool {
+    unsafe {
+        let __a0: Obj = rt::ToLean::to_lean(schema);
+        let __a1: Obj = rt::ToLean::to_lean(root);
+        let __r: u8 = l_model_acceptsSelection(__a0, __a1);
+        rt::lean_dec(__a0);
+        (__r) != 0
     }
 }
 

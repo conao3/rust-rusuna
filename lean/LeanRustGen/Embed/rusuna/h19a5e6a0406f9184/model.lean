@@ -1301,6 +1301,181 @@ theorem relationValid_iff (relation : Relation) :
     relationValid relation = true ↔
       relation.parent ≠ [] ∧ relation.parent.length = relation.child.length := by
   simp [relationValid]
+mutual
+def acceptsExpression (schema : Schema) (table : Table) (depth : Nat)
+    (e : Expression String Value) : Bool :=
+  depth ≤ maxFilterDepth && match e with
+  | .compare field _ value => (findColumn table field).isSome && scalarValid value
+  | .member field _ values => (findColumn table field).isSome && membershipValid values
+  | .isNull field _ => (findColumn table field).isSome
+  | .and es | .or es => es.length ≤ maxFields && acceptsExpressions schema table (depth + 1) es
+  | .not e => acceptsExpression schema table (depth + 1) e
+  | .relation name e => match findRelation table name with
+    | none => false
+    | some relation => decide (relation.kind ≠ .aggregate) && relationValid relation &&
+      match findTable schema relation.target with
+      | none => false
+      | some target => acceptsExpression schema target (depth + 1) e
+termination_by sizeOf e
+def acceptsExpressions (schema : Schema) (table : Table) (depth : Nat)
+    (es : List (Expression String Value)) : Bool :=
+  match es with
+  | [] => true
+  | e :: es => acceptsExpression schema table depth e && acceptsExpressions schema table depth es
+termination_by sizeOf es
+end
+
+def acceptsFilter (schema : Schema) (table : Table) (conds : Option (Expression String Value)) : Bool :=
+  conds.all (acceptsExpression schema table 0)
+
+def acceptsOrder (table : Table) (order : List Order) : Bool :=
+  order.all fun o => (findColumn table o.field).isSome
+
+def acceptsScan (schema : Schema) (table : Table) (conds : Option (Expression String Value))
+    (order : List Order) : Bool :=
+  acceptsFilter schema table conds && acceptsOrder table order
+
+mutual
+def acceptsNode (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+    (selection : Selection) : Bool :=
+  let arguments := selection.conds.isNone && selection.order.isEmpty &&
+    selection.limit.isNone && selection.offset.isNone
+  match modeLeaf table mode selection.name with
+  | some _ => arguments && selection.children.isEmpty
+  | none => match childMode mode selection.name with
+    | some next => depth < maxDepth + 3 && arguments &&
+      selectionValid (selection.children.map (·.alias)) &&
+      acceptsNodes schema table (depth + 1) next selection.children
+    | none => decide (mode = .row) && match findRelation table selection.name with
+      | none => false
+      | some relation => match findTable schema relation.target with
+        | none => false
+        | some target => depth < maxDepth && (decide (relation.kind ≠ .object) || arguments) &&
+          relationValid relation && selectionValid (selection.children.map (·.alias)) &&
+          acceptsScan schema target selection.conds selection.order &&
+          acceptsNodes schema target (depth + 1) (relationMode relation.kind) selection.children
+termination_by sizeOf selection
+decreasing_by all_goals cases selection <;> simp_all <;> omega
+def acceptsNodes (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+    (selections : List Selection) : Bool :=
+  match selections with
+  | [] => true
+  | selection :: selections =>
+    acceptsNode schema table depth mode selection && acceptsNodes schema table depth mode selections
+termination_by sizeOf selections
+end
+
+def acceptsSelection (schema : Schema) (root : Selection) : Bool :=
+  match schema.roots.find? (·.field = root.name) with
+  | none => false
+  | some field => match findTable schema field.target with
+    | none => false
+    | some table => selectionValid (root.children.map (·.alias)) &&
+      acceptsScan schema table root.conds root.order &&
+      acceptsNodes schema table 0 (if field.kind = .aggregate then .aggregate else .row) root.children
+
+theorem success_map (result : Except ε α) (f : α → β) :
+    (result.map f).isOk = result.isOk := by cases result <;> rfl
+
+mutual
+theorem resolveExpression_accepts (schema : Schema) (table : Table) (depth : Nat)
+    (e : Expression String Value) :
+    (resolveExpression schema table depth e).isOk = acceptsExpression schema table depth e := by
+  cases e <;> simp only [resolveExpression, acceptsExpression]
+  all_goals repeat' split
+  all_goals try simp only [success_map]
+  all_goals simp_all [Except.isOk, Except.toBool, Bool.and_eq_true]
+  all_goals first
+    | omega
+    | exact resolveExpression_accepts _ _ _ _
+    | exact resolveExpressions_accepts _ _ _ _
+termination_by sizeOf e
+theorem resolveExpressions_accepts (schema : Schema) (table : Table) (depth : Nat)
+    (es : List (Expression String Value)) :
+    (resolveExpressions schema table depth es).isOk = acceptsExpressions schema table depth es := by
+  cases es with
+  | nil => simp [resolveExpressions, acceptsExpressions, Except.isOk, Except.toBool]
+  | cons e es =>
+    have he := resolveExpression_accepts schema table depth e
+    have hes := resolveExpressions_accepts schema table depth es
+    simp only [resolveExpressions, acceptsExpressions]
+    split <;> try simp only [success_map]
+    all_goals simp_all [Except.isOk, Except.toBool]
+termination_by sizeOf es
+end
+theorem resolveFilter_accepts (schema : Schema) (table : Table) (conds : Option (Expression String Value)) :
+    (resolveFilter schema table conds).isOk = acceptsFilter schema table conds := by
+  cases conds with
+  | none => rfl
+  | some e => exact resolveExpression_accepts schema table 0 e
+
+theorem resolveOrder_accepts (table : Table) (order : List Order) :
+    (resolveOrder table order).isOk = acceptsOrder table order := by
+  induction order with
+  | nil => rfl
+  | cons o os ih =>
+    simp only [resolveOrder, acceptsOrder, List.all_cons]
+    split
+    · simp_all [Except.isOk, Except.toBool]
+    · split <;> simp_all [Except.isOk, Except.toBool, acceptsOrder]
+
+theorem resolveScan_accepts (schema : Schema) (table : Table) (conds : Option (Expression String Value))
+    (order : List Order) (limit offset : Option Nat) :
+    (resolveScan schema table conds order limit offset).isOk = acceptsScan schema table conds order := by
+  have hf := resolveFilter_accepts schema table conds
+  have ho := resolveOrder_accepts table order
+  simp only [resolveScan, acceptsScan]
+  repeat' split
+  all_goals simp_all [Except.isOk, Except.toBool]
+
+mutual
+theorem resolveNode_accepts (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+    (scanOrder : List (String × Direction)) (selection : Selection) :
+    (resolveNode schema table depth mode scanOrder selection).isOk =
+      acceptsNode schema table depth mode selection := by
+  cases selection with
+  | mk alias name conds order limit offset children =>
+    have ih := fun t d m os => resolveNodes_accepts schema t d m os children
+    have hs := fun t => resolveScan_accepts schema t conds order limit offset
+    simp only [resolveNode, acceptsNode]
+    repeat' split
+    all_goals simp_all [Except.isOk, Except.toBool, Bool.and_eq_true]
+    all_goals grind only [Except.toBool, Option.isSome]
+termination_by sizeOf selection
+theorem resolveNodes_accepts (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+    (scanOrder : List (String × Direction)) (selections : List Selection) :
+    (resolveNodes schema table depth mode scanOrder selections).isOk =
+      acceptsNodes schema table depth mode selections := by
+  cases selections with
+  | nil => simp [resolveNodes, acceptsNodes, Except.isOk, Except.toBool]
+  | cons s ss =>
+    have hn := resolveNode_accepts schema table depth mode scanOrder s
+    have hns := resolveNodes_accepts schema table depth mode scanOrder ss
+    simp only [resolveNodes, acceptsNodes]
+    repeat' split
+    all_goals simp_all [Except.isOk, Except.toBool]
+termination_by sizeOf selections
+end
+
+theorem resolveSelection_accepts (schema : Schema) (root : Selection) :
+    (resolveSelection schema root).isOk = acceptsSelection schema root := by
+  have hs := fun t => resolveScan_accepts schema t root.conds root.order root.limit root.offset
+  have hn := fun t m os => resolveNodes_accepts schema t 0 m os root.children
+  simp only [resolveSelection, acceptsSelection]
+  repeat' split
+  all_goals simp_all [Except.isOk, Except.toBool, relationMode]
+  all_goals grind only [Except.toBool, Option.isSome]
+
+theorem runSelection_accepts (schema : Schema) (root : Selection) :
+    (runSelection schema root).isOk = acceptsSelection schema root := by
+  have h := resolveSelection_accepts schema root
+  simp only [runSelection]
+  split <;> simp_all [Except.isOk, Except.toBool]
+theorem resolveSelection_ok_iff (schema : Schema) (root : Selection) :
+    (∃ query, resolveSelection schema root = .ok query) ↔ acceptsSelection schema root = true := by
+  rw [← resolveSelection_accepts]
+  cases resolveSelection schema root <;> simp [Except.isOk, Except.toBool]
+
 def findPermission (schema : Schema) (role target : String) : Option Permission :=
   schema.permissions.find? fun p => p.role == role && p.target == target
 

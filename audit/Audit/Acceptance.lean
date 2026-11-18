@@ -1,0 +1,11 @@
+import Audit.AcceptanceGenerators
+
+open model
+
+instance : Inhabited (Except Error Compiled) := ⟨.error .invalidFilter⟩
+
+#assay resolveOrder resolveScan using resolveOrder_accepts resolveScan_accepts resolveSelection_values runSelection_params resolveSelection_declared
+#assay resolveSelection runSelection using resolveSelection_accepts runSelection_accepts resolveSelection_values runSelection_params resolveSelection_declared
+#assay resolveFilter using resolveFilter_accepts resolveSelection_accepts runSelection_accepts resolveSelection_values runSelection_params resolveSelection_declared
+#assay resolveNodes using resolveNodes_accepts resolveSelection_accepts runSelection_accepts resolveSelection_values runSelection_params resolveSelection_declared
+#assay resolveExpressions using resolveExpressions_accepts resolveSelection_accepts runSelection_accepts resolveSelection_values runSelection_params resolveSelection_declared

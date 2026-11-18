@@ -97,7 +97,10 @@ theorem resolve_tables (schema : Schema) (session : Session) (root : Selection)
 
 ## Conditions restated next to their implementations
 
-Fourteen statements; these do not supply an independent acceptance specification.
+Sixteen boundary statements. The selection acceptance equalities compare success
+with a separate Boolean traversal. Their seven expression, ordering, scan and node
+lemmas and the existential success form below support the same conditions and are
+not counted again.
 
 ```lean
 theorem aliasValid_iff (alias : String) :
@@ -173,9 +176,108 @@ theorem appendCondition_exact (scan : Scan) (condition : Predicate) :
       .mk scan.name scan.schema scan.table (.and [scan.conds, condition]) scan.order scan.limit scan.offset
 ```
 
+```lean
+theorem resolveSelection_accepts (schema : Schema) (root : Selection) :
+    (resolveSelection schema root).isOk = acceptsSelection schema root
+```
+
+```lean
+theorem runSelection_accepts (schema : Schema) (root : Selection) :
+    (runSelection schema root).isOk = acceptsSelection schema root
+```
+
 ## Checks of individual values
 
 None. Unit tests and fixtures are not counted as theorems.
+
+## Selection acceptance
+
+This checker describes pre-permission resolution. It shares pure name and mode
+lookups and the verified scalar, membership, alias and relationship checks with the
+resolver. It calls no resolver or exception-returning helper and constructs no
+`Query`, `Node` or `Scan`. Child aliases are checked by their containing selection.
+
+```lean
+mutual
+def acceptsExpression (schema : Schema) (table : Table) (depth : Nat)
+    (e : Expression String Value) : Bool :=
+  depth ≤ maxFilterDepth && match e with
+  | .compare field _ value => (findColumn table field).isSome && scalarValid value
+  | .member field _ values => (findColumn table field).isSome && membershipValid values
+  | .isNull field _ => (findColumn table field).isSome
+  | .and es | .or es => es.length ≤ maxFields && acceptsExpressions schema table (depth + 1) es
+  | .not e => acceptsExpression schema table (depth + 1) e
+  | .relation name e => match findRelation table name with
+    | none => false
+    | some relation => decide (relation.kind ≠ .aggregate) && relationValid relation &&
+      match findTable schema relation.target with
+      | none => false
+      | some target => acceptsExpression schema target (depth + 1) e
+termination_by sizeOf e
+def acceptsExpressions (schema : Schema) (table : Table) (depth : Nat)
+    (es : List (Expression String Value)) : Bool :=
+  match es with
+  | [] => true
+  | e :: es => acceptsExpression schema table depth e && acceptsExpressions schema table depth es
+termination_by sizeOf es
+end
+
+def acceptsFilter (schema : Schema) (table : Table) (conds : Option (Expression String Value)) : Bool :=
+  conds.all (acceptsExpression schema table 0)
+
+def acceptsOrder (table : Table) (order : List Order) : Bool :=
+  order.all fun o => (findColumn table o.field).isSome
+
+def acceptsScan (schema : Schema) (table : Table) (conds : Option (Expression String Value))
+    (order : List Order) : Bool :=
+  acceptsFilter schema table conds && acceptsOrder table order
+
+mutual
+def acceptsNode (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+    (selection : Selection) : Bool :=
+  let arguments := selection.conds.isNone && selection.order.isEmpty &&
+    selection.limit.isNone && selection.offset.isNone
+  match modeLeaf table mode selection.name with
+  | some _ => arguments && selection.children.isEmpty
+  | none => match childMode mode selection.name with
+    | some next => depth < maxDepth + 3 && arguments &&
+      selectionValid (selection.children.map (·.alias)) &&
+      acceptsNodes schema table (depth + 1) next selection.children
+    | none => decide (mode = .row) && match findRelation table selection.name with
+      | none => false
+      | some relation => match findTable schema relation.target with
+        | none => false
+        | some target => depth < maxDepth && (decide (relation.kind ≠ .object) || arguments) &&
+          relationValid relation && selectionValid (selection.children.map (·.alias)) &&
+          acceptsScan schema target selection.conds selection.order &&
+          acceptsNodes schema target (depth + 1) (relationMode relation.kind) selection.children
+termination_by sizeOf selection
+decreasing_by all_goals cases selection <;> simp_all <;> omega
+def acceptsNodes (schema : Schema) (table : Table) (depth : Nat) (mode : Mode)
+    (selections : List Selection) : Bool :=
+  match selections with
+  | [] => true
+  | selection :: selections =>
+    acceptsNode schema table depth mode selection && acceptsNodes schema table depth mode selections
+termination_by sizeOf selections
+end
+
+def acceptsSelection (schema : Schema) (root : Selection) : Bool :=
+  match schema.roots.find? (·.field = root.name) with
+  | none => false
+  | some field => match findTable schema field.target with
+    | none => false
+    | some table => selectionValid (root.children.map (·.alias)) &&
+      acceptsScan schema table root.conds root.order &&
+      acceptsNodes schema table 0 (if field.kind = .aggregate then .aggregate else .row) root.children
+```
+
+The success statement also has an existential form:
+
+```lean
+theorem resolveSelection_ok_iff (schema : Schema) (root : Selection) :
+    (∃ query, resolveSelection schema root = .ok query) ↔ acceptsSelection schema root = true
+```
 
 ## Boundary
 
@@ -186,27 +288,33 @@ keys and the appended permission conjunct are excluded. `documentValues` walks t
 raw resolved plan in document order and inserts each scan's permission values after
 its user filter; it is not an independent selection acceptance checker.
 
-The complete acceptance equivalence for `resolveSelection` and `resolve` is pending.
-The existing predicates characterize individual checks, but no independent Bool
-function characterizes all accepted selections. Neither the complete accepted set
-nor the choice of every error is proved. These functions remain in `Survey`.
+`resolveSelection` and `runSelection` have a complete success characterization for
+the schema supplied to them. The choice of an error variant is outside that
+characterization. The role-aware `resolve` and `run` remain outside this acceptance
+proof: they additionally bind session variables, insert permissions and validate
+all scans and user column references.
 
-An independent acceptance checker still needs root lookup, mode-dependent selections,
-argument restrictions, alias and depth bounds, visible schema lookup, session binding
-and policy-dependency checks. It must return Bool without calling a resolver or
-constructing `Query`, `Node` or `Scan`, followed by mutual success-equivalence proofs.
+The missing step is an input-only success characterization of `guardQuery` followed
+by `queryPermitted`, given successful resolution against `visibleSchema`. It must
+include missing session variables and the exact syntactic permission dependencies
+inside policy relationships. Successful raw selection and individually resolvable
+role conditions are insufficient. For example, a permission on table `t` containing
+a relationship predicate `u.id IS NOT NULL` can resolve while table `u` requires
+`u.id = 1`; the final validator rejects this query with `InvalidPermission`.
+The existing scan-condition theorem assumes successful final resolution, so it
+cannot establish this converse. `guardQuery`, `resolve` and `run` stay in Survey.
 
 ## Mutation audit
 
-The strict audit targets fourteen functions: 101 mutations, 78 killed, zero holes,
-16 equivalent on sampled inputs, zero untested, zero timed out and 7 stillborn.
+The strict audit targets twenty-one functions: 144 mutations, 93 killed, zero holes,
+18 equivalent on sampled inputs, zero untested, zero timed out and 33 stillborn.
 `make survey` reports the functions outside the strict audit:
 
 | Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
 |---|---|---|---|---|---|---|---|---|
 | SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
-| Selection resolution | 9 | 178 | 5 | 50 | 17 | 0 | 26 | 80 |
+| Selection resolution | 2 | 136 | 25 | 3 | 2 | 0 | 52 | 54 |
 | Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
-| Total | 20 | 355 | 28 | 151 | 19 | 0 | 26 | 131 |
+| Total | 13 | 313 | 48 | 104 | 4 | 0 | 52 | 105 |
 
 The survey uses 1000 samples and a 30-second deadline per mutation. Equivalence is sampled output equality, not a proved equivalence.

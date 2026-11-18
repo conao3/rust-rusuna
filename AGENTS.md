@@ -96,14 +96,14 @@ syntactic invariants of this plan; they do not establish PostgreSQL result seman
 
 ## Theorems and the audit
 
-A theorem counts when it rules out a broken implementation. `audit/Audit/Compiler.lean`
-and `audit/Audit/Permissions.lean` run [leanassay](https://github.com/conao3/lean-leanassay): `#assay` breaks each function in small ways and runs the theorems on the
+A theorem counts when it rules out a broken implementation. `audit/Audit/Compiler.lean`,
+`audit/Audit/Permissions.lean` and `audit/Audit/Acceptance.lean` run [leanassay](https://github.com/conao3/lean-leanassay): `#assay` breaks each function in small ways and runs the theorems on the
 broken versions. `lake -d audit build --wfail` fails when no broken version of a function
 is refuted, when a broken version satisfies every theorem but changes the output (a
 hole), or when no input satisfies a theorem's hypotheses.
 
-The audit covers fourteen functions: 101 broken versions, 78 refuted, 16 with the same output
-on every input tried, 7 that do not typecheck, no hole, no untested version and no timeout.
+The audit covers twenty-one functions: 144 broken versions, 93 refuted, 18 with the same output
+on every input tried, 33 that do not typecheck, no hole, no untested version and no timeout.
 
 - Properties: `quoteChars` and `quoteStringChars` (`unquote_quote`, `unquote_quoteChars`: reading a quoted name
   back gives the name; `unquote_quoteString` and `unquote_quoteStringChars` do the
@@ -122,33 +122,40 @@ on every input tried, 7 that do not typecheck, no hole, no untested version and 
   `addPermission_condition`: all three mutations are refuted, including returning the
   original scan without its condition. The table is in README.md. Audit-only default
   instances supply constant failing scans and errors to the mutator.
+- `resolveExpressions`, `resolveFilter`, `resolveOrder`, `resolveScan`,
+  `resolveNodes`, `resolveSelection` and `runSelection` use the Boolean acceptance
+  equalities. An audit-only `Inhabited (Except Error Compiled)`
+  supplies an error result so the `runSelection` audit checks unconditional rejection.
 
 A function added to the block gets a theorem and an `#assay` line in the same change, or
 an entry below. `maxDepth`, `maxFields`, `maxFilterDepth`, `maxInValues` and `rowAlias` are constants
 and are not audited.
 
-Three groups, targeting twenty functions, stay outside the audit. `make survey` prints their tables with hand-written
+Three groups, targeting thirteen functions, stay outside the audit. `make survey` prints their tables with hand-written
 generators shared in `audit/Audit/Generators.lean`. These choose names from a small
 vocabulary so the sampled schemas and selections exercise successful resolution.
-The pinned leanassay revision also supports size-bounded generators for recursive types. The library builds nine
+The pinned leanassay revision also supports size-bounded generators for recursive types. The library builds seven
 independent survey modules so their automatically derived instances stay separate and
 completed groups can be reused independently.
 
 | Group | Functions | Mutations | Killed | Holes | Equivalent on sampled inputs | Untested | Timed out | Stillborn |
 |---|---|---|---|---|---|---|---|---|
 | SQL emission | 8 | 176 | 23 | 100 | 2 | 0 | 0 | 51 |
-| Selection resolution | 9 | 178 | 5 | 50 | 17 | 0 | 26 | 80 |
+| Selection resolution | 2 | 136 | 25 | 3 | 2 | 0 | 52 | 54 |
 | Permission resolution | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
-| Total | 20 | 355 | 28 | 151 | 19 | 0 | 26 | 131 |
+| Total | 13 | 313 | 48 | 104 | 4 | 0 | 52 | 105 |
 
 - The SQL emission group is `paramToks`, `expressionToks`, `expressionsToks`,
   `scanToks`, `joinToks`, `joinsToks`, `emit` and `compile`. Parameter preservation,
   erasure and placeholder numbering constrain values. SQL text is pinned by the
   differential test and `tests/fixtures/expected/`.
-- The selection group is `resolveExpression`, `resolveExpressions`, `resolveFilter`,
-  `resolveOrder`, `resolveScan`, `resolveNode`, `resolveNodes`, `resolveSelection` and
-  `runSelection`. Value preservation and declared-reference properties leave holes
-  in acceptance and error reporting. Rejection tests cover these rules by example.
+- The selection group is `resolveExpression` and `resolveNode`. Success equivalences use `acceptsSelection` and
+  its traversal helpers alongside the value and declaration theorems.
+  `resolveExpression` has three holes: predicate constructor choices and different
+  error variants can change output without changing success or parameters. These
+  require output properties beyond success equivalence. `resolveNode` has no
+  observed hole, but forty timed-out mutations leave its audit unresolved.
+  Rejection and differential tests exercise the input rules and emitted statements.
 - `guardQuery`, `resolve` and `run` use `resolve_values` and `run_params`. The changed
   role comparison in `resolve` changes acceptance while preserving successful
   outputs' parameters.
@@ -158,9 +165,13 @@ unresolved measurements under concurrent machine load.
 
 leanassay compares outputs only for types with `DecidableEq`. The audit implements
 `DecidableEq Predicate` from `predicateEq_iff` and a constructor comparison for `Scan`.
-`Expression`, `Node`, `Query` and `Selection` have no instance; the surveys compare the
-output of `runSelection` or `run` and declare `DecidableEq` for `Except`. Output comparisons without a usable equality instance are counted as untested.
+`Expression`, `Node`, `Query` and `Selection` have no instance. The surveys use
+predicate and scan comparisons where available and the output of `runSelection`
+or `run` for opaque plans, with `DecidableEq` for `Except`. Output comparisons without a usable equality instance are counted as untested.
 The hand-written generators retain the small name vocabulary.
+`Audit.AcceptanceGenerators` uses the existing `genTable` for standalone `Table`
+arguments of the acceptance lemmas; schema and selection generators are shared
+unchanged with the emission and permission surveys.
 
 The lexical helpers `comparisonText`, `aggregateText`, `leafLex`, `offsetLex`,
 `emptyLeaf`, `emptyField`, `emptyFields`, `emptyRow` and `resultLex` return text or
@@ -172,17 +183,26 @@ rejection tests. Value traversal, erasure and declared-reference helpers state a
 support the preservation theorems; they are not independent acceptance checks.
 
 The reported properties are nine independent properties, stated by fifteen boundary
-theorems; fourteen conditions restated next to the implementation; and zero variable-free
+theorems; sixteen boundary conditions restated next to the implementation; and zero variable-free
 checks. `PROOFS.md` lists every counted statement verbatim. Intermediate value,
 declaration and permission traversal lemmas support those properties and are not counted
-again. The new independent guarantees are each non-admin scan's role condition and the
+again. The permission guarantees are each non-admin scan's role condition and the
 visibility of user columns. `resolve_tables` follows from the scan condition guarantee.
 
-The complete acceptance equivalence is unfinished. No independent Bool function yet
-characterizes every selection accepted by `resolveSelection` and `resolve`. In particular,
-`documentValues` uses raw resolution and is a parameter-order specification, not an
-acceptance predicate. Changes in the accepted set or error variant can still be survey
-holes. Keep this boundary explicit in public descriptions.
+`acceptsSelection` and its expression, ordering, scan and node helpers describe
+accepted pre-permission inputs without calling a resolver or constructing a plan.
+The acceptance equalities for `resolveSelection` and `runSelection` are the two
+counted boundary statements; the traversal lemmas and existential success form
+support those same conditions. These eight Boolean functions are specifications
+outside the compiler call graph; the audit mutates their resolvers against them.
+
+The role-aware acceptance equivalence for `resolve` and `run` is pending. The
+missing lemma characterizes `guardQuery` followed by `queryPermitted` from the raw
+selection, including session binding and syntactic dependencies between permissions.
+Individual role conditions can resolve while a relationship inside one condition
+fails to contain its target's role condition. PROOFS.md describes this boundary.
+`documentValues` is a parameter-order specification using raw resolution. Error
+variants and SQL text require properties beyond success equivalence.
 
 Manual mutation checks supplement automatic generation. Replacing the inserted
 `.and [scan.conds, condition]` with `scan.conds` in `appendCondition` makes

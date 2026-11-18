@@ -1,5 +1,5 @@
-import Audit.Generators
+import Audit.AcceptanceGenerators
 
 open model
 
-#assay resolveExpression resolveExpressions resolveFilter using resolveSelection_values runSelection_params resolveSelection_declared
+#assay resolveExpression using resolveExpression_accepts resolveExpressions_accepts resolveFilter_accepts resolveSelection_accepts runSelection_accepts resolveSelection_values runSelection_params resolveSelection_declared
