@@ -18,4 +18,5 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 rusuna = { workspace = true }
+rusuna-events = { workspace = true }
 serde_json = { workspace = true }

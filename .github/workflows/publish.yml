@@ -14,7 +14,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CRATES: rusuna rusuna-sqlx rusuna-async-graphql rusuna-axum
+  CRATES: rusuna rusuna-sqlx rusuna-events rusuna-async-graphql rusuna-axum
 
 jobs:
   publish:

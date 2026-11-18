@@ -1,0 +1,19 @@
+[
+  {
+    "Name": "article_created",
+    "Table": "article",
+    "Operations": ["INSERT"]
+  },
+  {
+    "Name": "article_renamed",
+    "Table": "article",
+    "Operations": ["UPDATE"],
+    "Columns": ["title", "published"]
+  },
+  {
+    "Name": "audit_removed",
+    "Table": "entry",
+    "Schema": "audit",
+    "Operations": ["DELETE", "UPDATE"]
+  }
+]

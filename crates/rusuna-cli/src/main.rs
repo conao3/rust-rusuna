@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use rusuna::{Schema, Session, Value};
+use rusuna_events::EventTrigger;
 use serde_json::{Value as Json, json};
+use std::fmt;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
@@ -41,7 +43,26 @@ enum Command {
         #[command(subcommand)]
         command: QueryCommand,
     },
+    #[command(about = "Generate the SQL of event triggers")]
+    Events {
+        #[command(subcommand)]
+        command: EventsCommand,
+    },
 }
+
+#[derive(Subcommand)]
+enum EventsCommand {
+    #[command(
+        about = "Print the migration that creates the event tables and the declared triggers"
+    )]
+    GenerateMigration {
+        #[arg(long, default_value = "[]", value_parser = triggers)]
+        triggers: Triggers,
+    },
+}
+
+#[derive(Clone)]
+struct Triggers(Vec<EventTrigger>);
 
 #[derive(Subcommand)]
 enum SchemaCommand {
@@ -88,6 +109,39 @@ fn variables(value: &str) -> Result<Json, String> {
     Ok(value)
 }
 
+fn triggers(value: &str) -> Result<Triggers, String> {
+    serde_json::from_str(&input(value)?)
+        .map(Triggers)
+        .map_err(|e| format!("triggers must be a JSON array of trigger objects: {e}"))
+}
+
+#[derive(Debug)]
+enum Error {
+    Schema(rusuna::Error),
+    Events(rusuna_events::Error),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Schema(error) => error.fmt(f),
+            Error::Events(error) => error.fmt(f),
+        }
+    }
+}
+
+impl From<rusuna::Error> for Error {
+    fn from(error: rusuna::Error) -> Self {
+        Error::Schema(error)
+    }
+}
+
+impl From<rusuna_events::Error> for Error {
+    fn from(error: rusuna_events::Error) -> Self {
+        Error::Events(error)
+    }
+}
+
 fn parameter(value: Value) -> Json {
     match value {
         Value::Int(v) => json!(v),
@@ -98,7 +152,7 @@ fn parameter(value: Value) -> Json {
     }
 }
 
-fn execute(command: Command) -> Result<Json, rusuna::Error> {
+fn execute(command: Command) -> Result<Json, Error> {
     match command {
         Command::Schema {
             command: SchemaCommand::ExpandSdl { schema, role },
@@ -124,6 +178,9 @@ fn execute(command: Command) -> Result<Json, rusuna::Error> {
                 json!({"Fields": fields.into_iter().map(|f| json!({"ResponseKey": f.response_key, "Sql": f.compiled.sql, "Params": f.compiled.params.into_iter().map(parameter).collect::<Vec<_>>()})).collect::<Vec<_>>()}),
             )
         }
+        Command::Events {
+            command: EventsCommand::GenerateMigration { triggers },
+        } => Ok(json!({"Sql": rusuna_events::migration(&triggers.0)?})),
     }
 }
 
@@ -131,8 +188,8 @@ fn output(value: &Json, format: Output) -> String {
     match format {
         Output::Json => serde_json::to_string_pretty(value).unwrap(),
         Output::Text | Output::Table => {
-            if let Some(sdl) = value.get("Sdl") {
-                return sdl.as_str().unwrap().trim_end().into();
+            if let Some(text) = value.get("Sdl").or_else(|| value.get("Sql")) {
+                return text.as_str().unwrap().trim_end().into();
             }
             let rows = value["Fields"]
                 .as_array()
@@ -161,9 +218,16 @@ fn main() -> ExitCode {
     let mut args: Vec<_> = std::env::args_os().collect();
     if args.last().is_some_and(|v| v == "help")
         && args[1..args.len() - 1].iter().all(|v| {
-            ["schema", "query", "expand-sdl", "compile-sql"]
-                .iter()
-                .any(|name| v == name)
+            [
+                "schema",
+                "query",
+                "events",
+                "expand-sdl",
+                "compile-sql",
+                "generate-migration",
+            ]
+            .iter()
+            .any(|name| v == name)
         })
     {
         *args.last_mut().unwrap() = "--help".into();

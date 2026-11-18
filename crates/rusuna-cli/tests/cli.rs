@@ -62,6 +62,8 @@ fn all_help_levels_and_version_succeed() {
         vec!["schema", "help"],
         vec!["schema", "expand-sdl", "help"],
         vec!["query", "compile-sql", "help"],
+        vec!["events", "help"],
+        vec!["events", "generate-migration", "help"],
         vec!["--version"],
     ] {
         let result = run(&args);
@@ -178,4 +180,63 @@ fn mutations_compile_in_root_field_order() {
             .unwrap()
             .contains("DELETE FROM")
     );
+}
+
+#[test]
+fn event_migrations_match_the_committed_sql() {
+    let directory = format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"));
+    let triggers = format!("file://{directory}/events.json");
+    let text = run(&[
+        "events",
+        "generate-migration",
+        "--triggers",
+        &triggers,
+        "--output",
+        "text",
+    ]);
+    assert!(text.status.success(), "{:?}", text.stderr);
+    let expected = format!("{directory}/events.sql");
+    if std::env::var_os("RUSUNA_UPDATE_EXPECTED").is_some() {
+        std::fs::write(&expected, &text.stdout).unwrap();
+    }
+    assert_eq!(
+        String::from_utf8(text.stdout.clone()).unwrap(),
+        std::fs::read_to_string(&expected).unwrap()
+    );
+    let json = run(&["events", "generate-migration", "--triggers", &triggers]);
+    assert!(json.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        value["Sql"].as_str().unwrap().trim_end(),
+        String::from_utf8(text.stdout).unwrap().trim_end()
+    );
+    let empty = run(&["events", "generate-migration", "--output", "text"]);
+    assert!(empty.status.success());
+    assert!(
+        !String::from_utf8(empty.stdout)
+            .unwrap()
+            .contains("CREATE OR REPLACE TRIGGER")
+    );
+}
+
+#[test]
+fn event_trigger_errors_have_distinct_exit_codes() {
+    for triggers in [
+        "{}",
+        "[{\"Name\": \"a\"}]",
+        "[{\"Name\": \"a\", \"Table\": \"t\", \"Operations\": [\"TRUNCATE\"]}]",
+    ] {
+        let result = run(&["events", "generate-migration", "--triggers", triggers]);
+        assert_eq!(result.status.code(), Some(252), "{triggers}");
+    }
+    for triggers in [
+        "[{\"Name\": \"a b\", \"Table\": \"t\", \"Operations\": [\"INSERT\"]}]",
+        "[{\"Name\": \"a\", \"Table\": \"t\", \"Operations\": []}]",
+        "[{\"Name\": \"a\", \"Table\": \"t\", \"Operations\": [\"INSERT\"], \"Columns\": [\"c\"]}]",
+    ] {
+        let result = run(&["events", "generate-migration", "--triggers", triggers]);
+        assert_eq!(result.status.code(), Some(254), "{triggers}");
+        let error: serde_json::Value = serde_json::from_slice(&result.stderr).unwrap();
+        assert!(error["Error"].is_string());
+    }
 }
