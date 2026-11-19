@@ -154,6 +154,24 @@ impl Client {
         assert!(message["payload"].get("errors").is_none(), "{message}");
         message["payload"]["data"].clone()
     }
+
+    async fn data_batch(&mut self, ids: &[&str]) -> HashMap<String, Json> {
+        let mut results = HashMap::new();
+        for _ in ids {
+            let message = self.next().await;
+            assert_eq!(message["type"], "next", "{message}");
+            let id = message["id"].as_str().unwrap();
+            assert!(ids.contains(&id), "{message}");
+            assert!(message["payload"].get("errors").is_none(), "{message}");
+            assert!(
+                results
+                    .insert(id.to_string(), message["payload"]["data"].clone())
+                    .is_none(),
+                "duplicate response: {message}"
+            );
+        }
+        results
+    }
 }
 
 async fn direct(
@@ -724,24 +742,20 @@ async fn limited_subscriptions_send_at_most_the_permitted_rows() {
             json!({}),
         )
         .await;
+    let initial = client.data_batch(&["list", "aggregate"]).await;
+    assert_eq!(initial["list"], json!({"author": [{"id": 6}, {"id": 5}]}));
     assert_eq!(
-        client.data("list").await,
-        json!({"author": [{"id": 6}, {"id": 5}]})
-    );
-    assert_eq!(
-        client.data("aggregate").await,
+        initial["aggregate"],
         json!({"author_aggregate": {"aggregate": {"count": 6}, "nodes": [{"id": 6}, {"id": 5}]}})
     );
     sqlx::query("INSERT INTO author (id, name) VALUES (99, 'new author')")
         .execute(&pool)
         .await
         .unwrap();
+    let updated = client.data_batch(&["list", "aggregate"]).await;
+    assert_eq!(updated["list"], json!({"author": [{"id": 99}, {"id": 6}]}));
     assert_eq!(
-        client.data("list").await,
-        json!({"author": [{"id": 99}, {"id": 6}]})
-    );
-    assert_eq!(
-        client.data("aggregate").await,
+        updated["aggregate"],
         json!({"author_aggregate": {"aggregate": {"count": 7}, "nodes": [{"id": 99}, {"id": 6}]}})
     );
 }
