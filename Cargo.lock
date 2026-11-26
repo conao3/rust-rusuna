@@ -1815,7 +1815,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusuna"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-graphql-parser",
  "async-graphql-value",
@@ -1827,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "rusuna-async-graphql"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -1842,7 +1842,7 @@ dependencies = [
 
 [[package]]
 name = "rusuna-axum"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-graphql",
  "async-graphql-axum",
@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "rusuna-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "rusuna",
@@ -1871,7 +1871,7 @@ dependencies = [
 
 [[package]]
 name = "rusuna-events"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "chrono",
@@ -1887,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "rusuna-http-client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "http-body-util",
@@ -1899,7 +1899,7 @@ dependencies = [
 
 [[package]]
 name = "rusuna-http-tests"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-graphql",
  "async-graphql-axum",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "rusuna-sqlx"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "rusuna",

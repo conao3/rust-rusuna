@@ -48,7 +48,7 @@
           };
           packages.default = pkgs.rustPlatform.buildRustPackage {
             pname = "rusuna";
-            version = "0.2.0";
+            version = "0.2.1";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
             nativeCheckInputs = [ pkgs.postgresql_17 ];
