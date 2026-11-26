@@ -1609,7 +1609,7 @@ Each test that loads its own tables creates its own database in the cluster.
 ## Publishing
 
 `cargo package --workspace --exclude rusuna-cli --exclude rusuna-http-tests` builds the
-6 published crates; their dependencies on each other carry `version = "0.2.0"`, so
+6 published crates; their dependencies on each other carry the workspace version, so
 they are published in the order `rusuna`, `rusuna-http-client`, `rusuna-sqlx`,
 `rusuna-events`, `rusuna-async-graphql`, `rusuna-axum`. The `rusuna` package contains `src/` and `.leanfran/cache/`, the Rust
 leanfran generated from the `lean!` block. Its build script copies the cached module and
@@ -1618,6 +1618,18 @@ needs neither Lean nor Lake, so a crate that depends on the published `rusuna`
 crates.io) builds with cargo and a C toolchain only. `lean/` isn't packaged; the cache
 key depends on the block and on the crate name, so a changed block needs a regenerated
 cache before packaging, which `make check` enforces.
+
+To release, run
+
+```sh
+gh workflow run release.yml --ref master -f version_bump=patch
+```
+
+The `Release` workflow bumps the workspace version, runs `make check`, `nix build` and
+`cargo publish --workspace --dry-run`, pushes the version commit and the `v<version>` tag,
+publishes the 6 crates to crates.io with trusted publishing in the order above, and
+creates the GitHub Release. Choose `minor` for a version that adds fields or variants to
+the public types, and `major` for a larger bump.
 
 ## License
 
