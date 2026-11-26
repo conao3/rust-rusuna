@@ -12,7 +12,7 @@ with `gh actions-lock --no-interactive`, verify with `gh actions-lock --verify`,
 commit the workflow and `actions.lock` together.
 
 Release with `gh workflow run release.yml --ref master -f version_bump=patch` (`minor` when
-the public types gain fields or variants). The workflow bumps the version, checks, pushes the
+the public types gain fields or variants). The workflow bumps the version, verifies the crates, pushes the
 version commit and the `v<version>` tag, publishes the 6 crates, and creates the GitHub
 Release; don't push release tags by hand.
 

@@ -1625,7 +1625,7 @@ To release, run
 gh workflow run release.yml --ref master -f version_bump=patch
 ```
 
-The `Release` workflow bumps the workspace version, runs `make check`, `nix build` and
+The `Release` workflow bumps the workspace version, runs
 `cargo publish --workspace --dry-run`, pushes the version commit and the `v<version>` tag,
 publishes the 6 crates to crates.io with trusted publishing in the order above, and
 creates the GitHub Release. Choose `minor` for a version that adds fields or variants to
