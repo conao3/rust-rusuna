@@ -1,12 +1,43 @@
+<p align="center">
+  <img src="docs/assets/banner.png" alt="rusuna: a Hasura-style GraphQL engine as a Rust library" width="880">
+</p>
+
+<p align="center"><strong>GraphQL to 1 PostgreSQL statement per root field, inside your Rust process, with a compiler core written in Lean 4</strong></p>
+
+<p align="center">
+  <a href="https://github.com/conao3/rust-rusuna/actions/workflows/ci.yml"><img src="https://github.com/conao3/rust-rusuna/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/conao3/rust-rusuna" alt="License: Apache-2.0"></a>
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/Rust-edition%202024-orange" alt="Rust edition 2024"></a>
+  <a href="lean-toolchain"><img src="https://img.shields.io/badge/Lean-v4.35.0-blue" alt="Lean v4.35.0"></a>
+  <a href="https://github.com/conao3/rust-rusuna/stargazers"><img src="https://img.shields.io/github/stars/conao3/rust-rusuna?style=flat" alt="GitHub stars"></a>
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> |
+  <a href="#usage">Usage</a> |
+  <a href="#mapping-sdl">Mapping SDL</a> |
+  <a href="#read-permissions">Permissions</a> |
+  <a href="#mutations-and-primary-keys">Mutations</a> |
+  <a href="#subscriptions">Subscriptions</a> |
+  <a href="#event-triggers-and-cron-triggers">Events</a> |
+  <a href="#what-is-proved">Proofs</a> |
+  <a href="#results-and-speed">Speed</a> |
+  <a href="#development">Development</a> |
+  <a href="https://crates.io/crates/rusuna">crates.io</a>
+</p>
+
 # rusuna
 
-A Hasura-style GraphQL engine as a Rust library. rusuna compiles a GraphQL query or mutation over
-tables and relationships into one PostgreSQL statement that returns the response as a
-single JSON value. It runs inside your own process: no extra server, no database
-extension.
+rusuna is a Hasura-style GraphQL engine you embed as a Rust library. You describe your
+tables and relationships in SDL, and rusuna compiles each root field of a GraphQL query or
+mutation into 1 PostgreSQL statement that returns the response as a single JSON value. It
+runs inside your own process, with no extra server and no database extension. rusuna isn't
+a Hasura product and isn't affiliated with Hasura.
 
-The compiler core is written in Lean 4 with machine-checked theorems and is translated to
-Rust by [leanfran](https://github.com/conao3/lean-leanfran).
+The compiler core is written in Lean 4 with machine-checked theorems about the parameters,
+identifiers and permission conditions of the statements it emits.
+[leanfran](https://github.com/conao3/lean-leanfran) translates it to Rust, so you build
+the published crates without Lean.
 
 ## Status
 
@@ -41,6 +72,16 @@ The workspace has these crates:
 | `rusuna-http-client` | The hyper 1 and rustls HTTP client of webhooks and remote schemas. |
 | `rusuna-cli` | The `rusuna` command (not published). |
 
+## Install
+
+```
+cargo add rusuna
+```
+
+Add `rusuna-sqlx`, `rusuna-async-graphql`, `rusuna-axum` or `rusuna-events` for the layers
+you need. The published crates build with cargo and a C toolchain; you don't need Lean or
+Lake (see [Publishing](#publishing)).
+
 ## Usage
 
 ```rust
@@ -72,8 +113,9 @@ for field in fields {
 
 Execute each `CompiledField.compiled` with a PostgreSQL client and put its JSON result
 under `CompiledField.response_key` in the response's `data` object; `rusuna-sqlx` does
-this. `CompiledField.mutation` is true for mutation roots. Compilation performs no I/O. `Schema::parse_query(query, &variables, operation_name, role)` returns the expanded
-`Vec<Selection>`; `Schema::compile` additionally calls the Lean compiler for each root.
+this. `CompiledField.mutation` is true for mutation roots. Compilation performs no I/O.
+`Schema::parse_query(query, &variables, operation_name, role)` returns the expanded
+`Vec<Selection>`; `Schema::compile` also calls the Lean compiler for each root.
 `variables` is a JSON object; `operation_name: Option<&str>` is required when a document
 has multiple operations. `Error::Document { message, line, column }` reports syntax and
 type errors with one-based positions. The existing `Error` variants report Lean
@@ -123,16 +165,16 @@ A `schema { query: Root }` definition selects a custom query root type.
 `Schema::expanded_sdl(role)` returns deterministic SDL with `where`, `order_by`, `limit`
 and `offset` arguments on list and aggregate fields. Object relationships have no
 arguments. The output includes `<Type>_bool_exp`, `<Type>_order_by`, scalar comparison
-inputs, `order_by`, and aggregate output types. The `Subscription` root repeats the fields of
-the query root. This same expanded type graph validates
-query values and aggregate operators. `tests/fixtures/schema.graphql` and
+inputs, `order_by`, and aggregate output types. The `Subscription` root repeats the
+fields of the query root. This same expanded type graph validates query values and
+aggregate operators. `tests/fixtures/schema.graphql` and
 `tests/fixtures/schema.expanded.graphql` are checked for equality by `make check`.
 
 Supported scalars are `Int` (signed 32-bit GraphQL input), `Float`, `String`, `Boolean`,
 `ID` and the declared string-valued `DateTime`. The database is responsible for validating
 DateTime syntax and SQL column compatibility. Table types need at least one scalar
 column. The row field names `_and`, `_or` and `_not` are reserved for filter operators.
-The generated root types `Mutation` and `Subscription` cannot share a name with a
+The generated root types `Mutation` and `Subscription` can't share a name with a
 declared type. Interfaces, unions, enums, custom input definitions, extensions, custom scalar
 coercion and custom directives are outside this mapping format.
 
@@ -155,8 +197,8 @@ named by a read or write permission.
 
 A view or a materialized view is mapped like a table, and reads it the same way:
 relationships in both directions, filters, ordering, aggregates, read permissions and
-subscriptions. rusuna does not read the database catalog, so it does not know that a
-relation is a view; declare `read_only: true` for one that is not updatable, which every
+subscriptions. rusuna doesn't read the database catalog, so it doesn't know that a
+relation is a view; declare `read_only: true` for one that isn't updatable, which every
 materialized view is. A simple view that PostgreSQL can update may stay writable.
 
 ```graphql
@@ -176,7 +218,7 @@ type author_stats @table(name: "author_stats", read_only: true) @primary_key(col
   roots and none of their input types (`<t>_insert_input`, `<t>_on_conflict`, …).
   `Schema::compile_mutation` on it returns `Error::ReadOnly`.
 - A subscription to a materialized view sends a new result after `REFRESH MATERIALIZED
-  VIEW` changes it; changes of its base tables do not reach it before.
+  VIEW` changes it; changes of its base tables don't reach it before.
 
 The lower-level API sets `Table::read_only` (`Table::new(…).read_only()`).
 
@@ -215,7 +257,7 @@ type Query {
 - `{{name}}` in the statement stands for the argument `name`. Each occurrence becomes a
   statement parameter `$n`, in the order of the occurrences; no value is written into the SQL
   text. PostgreSQL infers the type of each parameter from its context; write a cast
-  (`{{since}}::timestamptz`) where the context does not decide it.
+  (`{{since}}::timestamptz`) where the context doesn't decide it.
 - The list and aggregate root fields of the type take the declared arguments before `where`,
   `order_by`, `limit` and `offset`; a non-null argument is required and an omitted nullable one
   is `null`. Argument names are GraphQL names other than `where`, `order_by`, `limit` and
@@ -228,8 +270,8 @@ type Query {
   relationship predicate in `where` or in a permission, need a type without arguments:
   arguments are given on root fields only, and the SDL rejects a relationship to a type with
   arguments.
-- The statement is trusted input of the schema author, like the rest of the SDL. rusuna does
-  not parse it beyond its quotes: it must be one statement without `;`, `$`, comments or
+- The statement is trusted input of the schema author, like the rest of the SDL. rusuna doesn't
+  parse it beyond its quotes: it must be one statement without `;`, `$`, comments or
   backslashes, with `{{` only outside quoted text, so that the subscription multiplexer can
   read the placeholders of the compiled statement.
 
@@ -273,7 +315,7 @@ type Query {
 - `schema` defaults to `public`. The function name is quoted as an identifier. The
   arguments are passed by name in their declared order, `"public"."search_articles"("search"
   => $1, "since_id" => $2)`; the names must be the function's parameter names. An omitted
-  nullable argument is passed as `null`, so PostgreSQL parameter defaults do not apply.
+  nullable argument is passed as `null`, so PostgreSQL parameter defaults don't apply.
 - Root fields take the arguments as native query roots do. Relationships to a function type
   and relationship predicates on it need a function without arguments.
 
@@ -308,7 +350,7 @@ defaults to false. Filters use the same grammar as query filters, including rela
 A scalar string `"$name"` reads a session variable; `"$$price"` is the literal `"$price"`.
 Names after `$` contain letters, digits or underscores. `_is_null` takes a literal
 Boolean, since it selects SQL syntax rather than a bound value. Membership lists can contain
-individual session references; a session variable cannot hold a list.
+individual session references; a session variable can't hold a list.
 
 `limit` (a non-negative integer, 0 included) bounds the rows the role reads, as in Hasura
 v2.51.6:
@@ -319,7 +361,7 @@ v2.51.6:
   selects, with the query's `limit` and `offset` only. Its `nodes` list the first `limit` of
   those rows in the query's order.
 - The `<t>_by_pk` root, object relationships, relationship predicates in `where` (`EXISTS`)
-  and the top-level `returning` rows of a mutation are not bounded. Array relationships and
+  and the top-level `returning` rows of a mutation aren't bounded. Array relationships and
   aggregate `nodes` inside `returning` are.
 
 Which rows remain without `order_by` is up to PostgreSQL, as in Hasura.
@@ -329,10 +371,10 @@ let session = Session::new("user").variable("user_id", rusuna::Value::Int(3));
 let fields = schema.compile("{ articles { id title } }", &json!({}), None, &session)?;
 ```
 
-The caller constructs the role and session from its authentication result. rusuna does
-not authenticate a request. `Session::from_json(role, &object)` accepts scalar JSON
+The caller constructs the role and session from its authentication result. rusuna doesn't
+authenticate a request. `Session::from_json(role, &object)` accepts scalar JSON
 values; missing referenced variables, null comparisons and nonfinite numbers are errors.
-The text API additionally checks session types against the permission's scalar fields.
+The text API also checks session types against the permission's scalar fields.
 `admin` is reserved and unrestricted; it requires no permission definitions. Declaring
 an `admin` permission in SDL is an error. Every other role sees only granted tables and
 columns, including filters, ordering and aggregate operands. Hidden roots and relationships
@@ -346,13 +388,13 @@ a scan's permission values follow its user predicate values, before child select
 Both literal and session permission values become parameters through `Tok.param`.
 
 A relationship inside a permission has an additional restriction. Hasura evaluates that
-predicate without automatically applying the target table's permission. To preserve its
+predicate without applying the target table's permission. To preserve its
 result while ensuring every scan contains its role condition, rusuna requires the nested
 predicate to already equal that condition or contain it as an immediate `_and` child.
 For example, if Article requires `author_id = $user_id`, a Comment permission of
 `{article: {author_id: {_eq: "$user_id"}}}` is supported. A different predicate on
 Article that omits the condition is rejected with `InvalidPermission`, even if it would
-logically imply it. This check uses the resolved expression after session binding; it
+imply it. This check uses the resolved expression after session binding; it
 never searches the SQL text or expands permission cycles.
 
 The lower-level API uses `Table.permissions: Vec<Permission>` and
@@ -400,7 +442,7 @@ primary-key `constraint`, required `update_columns` and optional `where`. An emp
 `update_columns` list means `DO NOTHING`. Conflict updates apply the update permission,
 its presets, its row condition and its post-update check; inserted rows use the insert
 check. Omitted insert fields use database defaults. Explicit null stays null. `_inc`
-accepts numeric columns, and a column cannot occur in both `_set` and `_inc`.
+accepts numeric columns, and a column can't occur in both `_set` and `_inc`.
 
 Write directives are repeatable once per role and operation. Insert requires `columns`
 and `check`; update requires `columns`, `where` and `check`; delete requires `where`.
@@ -445,7 +487,7 @@ recognize this failure with `is_permission_check_error(sqlstate, message)`, whic
 `PERMISSION_CHECK_SQLSTATE` (`22P02`) and `PERMISSION_CHECK_MARKER`. A failed statement
 leaves PostgreSQL's transaction aborted until rollback. Hasura reports a GraphQL
 `permission-error`; rusuna exposes a PostgreSQL error so checking a separate result
-column cannot be forgotten.
+column can't be forgotten.
 
 Outside the mutation surface: nested relationship inserts, `update_<t>_many`, jsonb
 operators such as `_append`, numeric operators other than `_inc`, and conflict constraints
@@ -453,12 +495,12 @@ other than the declared primary key. Conflict updates with primary-key presets a
 rejected: the returning snapshot requires stable conflict keys. Ordinary updates can
 change primary keys. SQL column types, database constraints, triggers
 and defaults belong to the caller's database schema. The returning overlay covers
-the explicit target table; it does not model trigger or cascade changes to other tables.
+the explicit target table; it doesn't model trigger or cascade changes to other tables.
 The overlay and the self-join that records original tuple identifiers are emitted only when
 `returning` reads the modified table again through a relationship. The self-join matches
 the declared primary-key columns, so under `READ COMMITTED` an update or delete applies to
 a row that a concurrent transaction changed while the statement waited for its lock, and
-`returning` observes the changed row once. An update or delete whose `returning` does not
+`returning` observes the changed row once. An update or delete whose `returning` doesn't
 read the modified table again follows PostgreSQL's ordinary re-check. Two cases remain:
 when the concurrent transaction changes the row's primary key, the statement skips that
 row; on a table without a primary-key declaration, the update self-join matches `ctid`
@@ -553,21 +595,21 @@ let response = graphql
   requires, resolver)` adds a field to a rusuna row type. `requires` names scalar
   fields of that type. The statement selects each of them under the alias
   `__rusuna_<field>` whenever the hand-written field is selected, and
-  `parent_column(&ctx, field)` reads it from the parent row. A role that cannot read the
-  type or a required field does not get the hand-written field. Required names are at
-  most 54 bytes so the alias fits the 63-byte limit. A type that is not a row type of
-  the schema, or a required name that is not one of its scalar fields, is an error of
+  `parent_column(&ctx, field)` reads it from the parent row. A role that can't read the
+  type or a required field doesn't get the hand-written field. Required names are at
+  most 54 bytes so the alias fits the 63-byte limit. A type that isn't a row type of
+  the schema, or a required name that isn't one of its scalar fields, is an error of
   `build` for every role.
 - **Static types.** async-graphql 7 schemas are either static (`Schema<Query, Mutation,
-  Subscription>` from derive macros) or dynamic; a dynamic schema cannot register a
-  `#[derive(SimpleObject)]` or `#[Object]` type, and a static schema cannot hold dynamic
+  Subscription>` from derive macros) or dynamic; a dynamic schema can't register a
+  `#[derive(SimpleObject)]` or `#[Object]` type, and a static schema can't hold dynamic
   types. Write the hand-written resolvers that share the schema with rusuna as
   `dynamic::Object` and `dynamic::Field`. Their resolvers can call the same async
   functions a static resolver calls, and can convert a serializable result with
   `async_graphql::to_value` and `FieldValue::value`.
 - **Mutations.** A mutation operation runs its rusuna root fields in document order on
   one transaction, which the schema's extension opens with the first such field. After a
-  field fails, the transaction is rolled back, later rusuna root fields do not run, and
+  field fails, the transaction is rolled back, later rusuna root fields don't run, and
   the response has `data: null` with the error. The transaction commits only when the
   response has no errors, so an error of a hand-written field also rolls back the rusuna
   writes. Hand-written mutation fields use their own connections. Two mutation root
@@ -584,7 +626,7 @@ let response = graphql
   Hasura's message `check constraint of an insert/update permission has failed` and code
   `permission-error`. Compilation errors are `validation-failed`; database errors are
   `constraint-violation` (SQLSTATE class 23), `data-exception` (class 22, and
-  parameters that do not fit their column type) or `unexpected`; a missing or foreign
+  parameters that don't fit their column type) or `unexpected`; a missing or foreign
   session is `access-denied`. async-graphql reports validation errors and positions in
   its own words, and errors carry `locations` rather than Hasura's `extensions.path`.
 - **Variables.** The extension applies variable defaults and binds omitted nullable
@@ -626,8 +668,8 @@ are [async-graphql-axum](https://docs.rs/async-graphql-axum/7.2.1/async_graphql_
 `rusuna_axum::graphql_ws(HashMap<String, dynamic::Schema>, session)` is a `GET` route that
 upgrades to a WebSocket and speaks the
 [`graphql-transport-ws`](https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md)
-protocol through async-graphql-axum. The client's first message must be `connection_init`. The session
-function receives the upgrade request's head and that message's payload and returns
+protocol through async-graphql-axum. The client's first message must be `connection_init`.
+The session function receives the upgrade request's head and that message's payload and returns
 `Result<rusuna::Session, String>`; the session is fixed for the connection, so
 authentication can read either the upgrade headers or the payload. The connection runs
 every operation on the schema of the session's role with the session in the connection
@@ -662,13 +704,13 @@ query { article(limit: 2) { id title } weather(city: "Oslo") { temperature stati
   remote types reachable from its query and mutation roots join the role schema:
   objects, input objects with their default values, enums, custom scalars, arguments with
   their defaults, and descriptions. Directive definitions are ignored. Interfaces,
-  unions and type extensions are an error of `build`. Subscription root fields are not
+  unions and type extensions are an error of `build`. Subscription root fields aren't
   added.
 - **Names.** A remote type whose name is already a type of the role schema (or of another
   remote schema), and a remote root field whose name is already a root field, are an
   error of `build`. `type_prefix(p)` renames every remote type except the built-in
   scalars, and `root_field_prefix(p)` every remote root field; the forwarded document uses
-  the remote names. Hand-written types registered after `build` are not checked.
+  the remote names. Hand-written types registered after `build` aren't checked.
 - **Roles.** `roles([...])` lists the roles whose schemas include the remote root fields
   and types; the default is `admin` only. `Builder::remote` on another role's builder adds
   nothing, so the fields are absent from that role's introspection and execution.
@@ -676,7 +718,7 @@ query { article(limit: 2) { id title } weather(city: "Oslo") { temperature stati
   the field's alias, arguments as variables declared with the remote's argument types,
   and its selection with fragments expanded. Arguments whose value is null, including
   omitted nullable variables, are left out, so the remote applies its own defaults; an
-  explicit null argument is not sent. Each remote root field of a request is one
+  explicit null argument isn't sent. Each remote root field of a request is one
   HTTP `POST` (`content-type: application/json`, the fixed headers of `header`, and the
   client request headers named by `forward_header`). The client headers come from the
   request data `ClientHeaders`, which the `rusuna-axum` routes add. Remote values are read
@@ -686,19 +728,19 @@ query { article(limit: 2) { id title } weather(city: "Oslo") { temperature stati
 - **Errors.** When the server answers with `errors`, the root field is null and carries
   the message of the first remote error with `extensions.code` `remote-schema-error` and
   the remote errors in `extensions.remote_errors`. An unreachable server, a timeout or an
-  answer that is not a GraphQL response give the same code with a message naming the
+  answer that isn't a GraphQL response give the same code with a message naming the
   remote schema. A `rest` endpoint answers such an error with status 502.
 - **Mutations.** Remote mutation root fields run in document order with rusuna's, and the
-  rule of repeated response keys applies to them. They are not part of rusuna's
+  rule of repeated response keys applies to them. They aren't part of rusuna's
   transaction: a failing remote field rolls back the rusuna writes of the operation and
   stops later root fields, but a remote write that succeeded stays, and a later failure
-  cannot undo it.
+  can't undo it.
 
 Outside this feature: rusuna sends no session values to the remote server (forward
-client headers when it needs them); there are no remote schema permissions that restrict remote fields or arguments per role
-beyond the role list; there are no relationships between rusuna types and remote types
-(Hasura's remote relationships); remote root fields are not batched into one request per
-server; and remote subscriptions are not forwarded.
+client headers when it needs them); there are no remote schema permissions that restrict
+remote fields or arguments per role beyond the role list; there are no relationships between rusuna types and remote types
+(Hasura's remote relationships); remote root fields aren't batched into one request per
+server; and remote subscriptions aren't forwarded.
 
 ## REST endpoints
 
@@ -750,14 +792,14 @@ path whose segments `:name` bind the GraphQL variable `name`, the methods `Get`,
 **Building.** `rest` validates every document against the schema of every role, without
 running a resolver: it executes the document in async-graphql's introspection-only mode,
 which validates it and answers each field with null. A role whose schema rejects the
-document, for example because a root field or column is hidden from it, cannot call the
+document, for example because a root field or column is hidden from it, can't call the
 endpoint. It is an error when no role can, when the document is a subscription or has
-other than one operation, when a URL variable is not a variable of the operation or has a
+other than one operation, when a URL variable isn't a variable of the operation or has a
 list type, when two endpoints serve the same method at the same pattern, and when two
-patterns differ only in variable names. Variables that the request must supply are not
+patterns differ only in variable names. Variables that the request must supply aren't
 required at this point.
 
-**Variables.** A request builds the variables from three places; a later one replaces an
+**Variables.** A request builds the variables from 3 places; a later one replaces an
 earlier one of the same name:
 
 1. the JSON object of the body, for every method except `GET`, passed as is;
@@ -768,7 +810,7 @@ Values from the path and the query string are text, converted by the variable's 
 type: `Int` and `Float` read a JSON number, `Boolean` reads `true` or `false`, and a bare
 flag (`?published`) is `true`; an empty value of a nullable variable is null; every other
 type (`String`, `ID`, `DateTime`, enums) is the text as a string. A list-typed variable
-cannot come from the path or the query string. A name that is not a variable of the
+can't come from the path or the query string. A name that isn't a variable of the
 operation is an error. Omitted variables take their defaults, and omitted nullable ones
 are null, as in the GraphQL route.
 
@@ -778,9 +820,9 @@ body with `errors` (and `data`), each error with `extensions.code` where one app
 
 | Status | When |
 |---|---|
-| 400 `bad-request` | The body is not a JSON object, a path or query value does not fit its type, or a name is not a variable. |
+| 400 `bad-request` | The body isn't a JSON object, a path or query value doesn't fit its type, or a name isn't a variable. |
 | 400 | async-graphql rejects a variable value, `validation-failed`, `data-exception`, `constraint-violation` and `permission-error` (a violated insert or update check). |
-| 403 `access-denied` | The session's role has no schema or cannot call the endpoint. |
+| 403 `access-denied` | The session's role has no schema or can't call the endpoint. |
 | 404, 405 | axum: no pattern matches, or the pattern has no endpoint for the method. |
 | 500 `unexpected` | Another database error. |
 | 502 `remote-schema-error` | A remote schema failed or answered with errors. |
@@ -815,7 +857,7 @@ permission theorems hold for it unchanged.
 `rusuna_sqlx::Subscriptions` polls the statements. Subscriptions with the same role and
 the same SQL text form a group: `compile_erase` proves that inputs differing only in
 values (variables and session values) compile to the same text, so these are the
-subscriptions that differ in values only. Every `interval` (default one second) each
+subscriptions that differ in values only. Every `interval` (default 1 second) each
 group runs one statement for up to `batch_size` (default 100) subscriptions, and sends a
 subscription its result when it differs from the last result sent to it (JSON
 equality). Subscribing runs the group's statement for the new subscription alone: its
@@ -844,8 +886,8 @@ the type PostgreSQL infers for `$k` when `Multiplexed::prepare` prepares the com
 statement. The values are written as text in the form `rusuna_sqlx::fetch` would send:
 integers and floats in decimal (`float4` values rounded to `f32` first), date and time
 values as the microsecond `fetch` binds, in ISO 8601 with years past 9999 written in
-full and `BC` for years before 1. The types are those `fetch` binds; another inferred type makes `prepare`
-fail. The rewrite copies single-quoted literals and double-quoted identifiers
+full and `BC` for years before 1. The types are those `fetch` binds; another inferred type
+makes `prepare` fail. The rewrite copies single-quoted literals and double-quoted identifiers
 unchanged and requires the placeholders outside them to be exactly `$1` to `$n` in order,
 which `placeholders_numbered` proves for every compiled statement.
 
@@ -854,8 +896,8 @@ On the benchmark data (`bench/seed.sql`), the statement of
 for 100 subscriptions with different `user_id` values executed in 98 to 107 ms
 (`EXPLAIN ANALYZE`, 7 runs each under `plan_cache_mode = auto` and `force_generic_plan`).
 The 100 single statements under a generic plan took 112 ms in total by `psql`'s `\timing`,
-round trips on a Unix socket included. A per-row argument in the lateral subquery uses the index
-on `article.author_id` as a parameter would.
+round trips on a Unix socket included. A per-row argument in the lateral subquery uses the
+index on `article.author_id` as a parameter would.
 
 Differences from Hasura v2 live queries:
 
@@ -916,7 +958,7 @@ worker.await?;
 ### Declaring triggers and the migration
 
 An `EventTrigger` names a trigger and declares its SQL table (`schema` defaults to
-`public`), the operations that record an event (all three by default) and, for updates,
+`public`), the operations that record an event (all 3 by default) and, for updates,
 the SQL columns an update must change (`columns`; empty means every update). Trigger
 names are 1 to 42 ASCII letters, digits, `_` or `-`. Declarations live in Rust, next to
 the handlers. The same declaration has a JSON form with the keys `Name`, `Table`,
@@ -962,7 +1004,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA rusuna TO worker_ro
 (`INSERT` and `DELETE` for cron occurrences, `schedule` and `cleanup`).
 
 The script is idempotent: applying it again changes nothing, and applying it with changed
-declarations replaces the trigger of each declared name on its table. It does not drop
+declarations replaces the trigger of each declared name on its table. It doesn't drop
 anything. When you remove a declaration or move it to another table, drop the old trigger
 in your migration: `DROP TRIGGER IF EXISTS "rusuna_event_<name>" ON <table>;`. The table
 layout belongs to this version of the crate.
@@ -975,7 +1017,7 @@ ordinary row trigger, `TRUNCATE` records nothing, and a session with
 `session_replication_role = replica` (logical replication apply, some bulk loads)
 records nothing. An update trigger with columns fires when the update
 lists one of the columns (`UPDATE OF`) and one of their values changes (`IS DISTINCT FROM`
-on the JSON values); a column changed only by another `BEFORE` trigger does not count.
+on the JSON values); a column changed only by another `BEFORE` trigger doesn't count.
 
 ### The event table
 
@@ -1035,7 +1077,7 @@ time between a failed attempt and the next one (`interval`, default 10 seconds) 
 time an attempt may take (`timeout`, default 60 seconds). An error, a handler panic, a
 non-2xx status, a connection error or the timeout fails the attempt; at the timeout the
 handler's future is dropped. An event whose attempts reach `max_retries + 1` without a
-success stays in the table as `failed` and is not tried again.
+success stays in the table as `failed` and isn't tried again.
 `rusuna_events::redeliver(executor, id)` makes a failed event pending again with its
 attempts counted from zero.
 
@@ -1059,7 +1101,7 @@ and in the same statement increments `tries` and sets `locked_until` to now plus
 `timeout` plus `WorkerOptions::lease_margin` (default 30 seconds). Deliveries run outside
 that transaction, so no connection or lock is held while a handler runs. The result is
 recorded only if `tries` still equals the claimed attempt and the event is pending, so a
-claim that another worker has since taken over cannot overwrite the newer result.
+claim that another worker has since taken over can't overwrite the newer result.
 
 - **Several workers.** Workers in one process or in many claim different rows:
   `SKIP LOCKED` skips the rows another claim is taking, and a claimed row has a lease.
@@ -1072,7 +1114,7 @@ claim that another worker has since taken over cannot overwrite the newer result
   (default true) it also `LISTEN`s on `rusuna_events` and polls at once when the trigger
   function notifies. The listener (sqlx `PgListener`) keeps one connection of the pool for
   the worker's lifetime; size the pool for it. Polling alone is enough for correctness,
-  including behind poolers that do not support `LISTEN`. When a poll fills
+  including behind poolers that don't support `LISTEN`. When a poll fills
   every free slot, the worker polls again as soon as a delivery finishes.
 - **Shutdown.** When the `shutdown` future completes, the worker stops claiming and
   waits for its deliveries in progress, at most their timeouts, to record their results.
@@ -1084,7 +1126,7 @@ claim that another worker has since taken over cannot overwrite the newer result
   within `lease_margin`.
 - **Counters.** `Worker::monitor()` returns a handle whose `stats()` reports polls,
   claimed events, delivered and failed attempts, and database errors. A database error
-  does not stop the worker; it tries again at the next poll.
+  doesn't stop the worker; it tries again at the next poll.
 
 `rusuna_events::cleanup(executor, before)` deletes delivered events completed before
 `before`, with their invocations, and keeps the latest occurrence of each cron trigger.
@@ -1105,7 +1147,7 @@ first insert win, so an occurrence becomes one event however many workers run, a
 it is delivered like every other event.
 
 Missed occurrences: a starting worker reads the latest recorded occurrence of each cron
-trigger. If there is one, it records the occurrences after it that are not older than the
+trigger. If there is one, it records the occurrences after it that aren't older than the
 trigger's `tolerance` (default six hours, `CronTrigger::tolerance`), at most 1000 per poll;
 older ones are skipped. A cron trigger with no recorded occurrence starts with the next
 occurrence after the worker starts. `cleanup` keeps the latest occurrence for this reason.
@@ -1119,8 +1161,8 @@ commits. It is delivered to the handler or webhook of `name`.
 - Triggers and deliveries are declared in Rust (or JSON for the CLI), not in metadata, and
   their SQL is a migration you apply.
 - The payload has no `event.session_variables` and no `trace_context`: the trigger
-  function does not read a session from the database. There is no `MANUAL` operation.
-- Failures are retried at a fixed interval; a webhook's `Retry-After` header is not read.
+  function doesn't read a session from the database. There is no `MANUAL` operation.
+- Failures are retried at a fixed interval; a webhook's `Retry-After` header isn't read.
 - A worker runs in your process; there is no separate event delivery service.
 - Cron triggers are declared in code, and their payload shape is rusuna's own.
 
@@ -1164,7 +1206,7 @@ curl -s -i http://127.0.0.1:3000/api/rest/articles/x -H 'x-role: reader'
 
 The first answers `{"article_by_pk":{"id":1,"title":"Notes on the analytical engine","author":{"name":"Ada"}}}`.
 The draft 2 is `null` for a reader and the row for its author. The last answers status
-400 with the code `bad-request`, since `x` is not an `Int`.
+400 with the code `bad-request`, since `x` isn't an `Int`.
 
 The same path serves subscriptions over WebSocket. The example reads the role and the
 user from the `headers` object of the `connection_init` payload. With
@@ -1320,7 +1362,8 @@ levels plus 32 `EXISTS` levels and a maximum-depth 1000-term permission (65,001 
 
 ## What is proved
 
-The Lean definitions and theorems are in `src/compiler.rs`. Each theorem is universally quantified over its Lean inputs.
+The Lean definitions and theorems are in `src/compiler.rs`. Each theorem is universally
+quantified over its Lean inputs.
 [PROOFS.md](PROOFS.md) lists the exact statements and their classification.
 The permission statements concern successful resolution with a schema and session.
 
@@ -1339,14 +1382,14 @@ Properties:
 | `resolve_columns` | User column references in selections, filters, ordering and aggregates belong to the role's visible columns; join keys and policy columns are excluded. |
 | `resolve_limits`, `capLimit_cap`, `capLimit_user`, `capLimit_choice` | For a non-admin role whose permission has a `limit`, every list root, array relationship and aggregate `nodes` list of the plan has a limit of at most that value. The applied limit is at most the permission's and the query's and equals one of them. |
 
-`compile_erase` erases `Value` operands, including bound session operands. It does not
+`compile_erase` erases `Value` operands, including bound session operands. It doesn't
 erase pagination, `_is_null` flags, names, role choices or permission syntax.
 
 Conditions written a second time, as an equivalence next to the definition:
 
 | Theorem | Statement |
 |---|---|
-| `aliasValid_iff`, `selectionValid_iff` | An accepted selection is not empty, has at most 1000 fields, and its aliases are distinct, not empty, not `%` and at most 63 bytes long. |
+| `aliasValid_iff`, `selectionValid_iff` | An accepted selection isn't empty, has at most 1000 fields, and its aliases are distinct, not empty, not `%` and at most 63 bytes long. |
 | `relationValid_iff` | An accepted relationship has as many columns as references, and at least one. |
 | `lateralScan_object`, `lateralScan_array`, `lateralScan_aggregate`, `lateralScan_limit` | The scan of an object relationship has the limit 1 and the conditions of the relationship; array and aggregate scans are unchanged. |
 | `scalarValid_iff`, `membershipValid_iff` | Comparison values are non-null and finite, and membership lists respect their size bound. |
@@ -1366,7 +1409,7 @@ broken implementations: the audit covers forty-two functions, with 266 mutations
 23 equivalent on the sampled inputs, 61 stillborn, zero holes, zero untested and zero timed out.
 There are thirteen independent properties (twenty-four principal theorem statements), thirty-six
 restated conditions and zero variable-free checks. The executable audit checks full
-scan equalities as well as their limit projection. AGENTS.md lists the functions it covers and the ones it does not.
+scan equalities as well as their limit projection. AGENTS.md lists the functions it covers and the ones it doesn't.
 
 The permission insertion audit has the following table (`✗` means a theorem refuted
 the mutation):
@@ -1377,7 +1420,7 @@ the mutation):
 | `appendCondition := fun x _ => x` | ✗ | ✗ |
 | `addPermission := fun _ _ _ => default` | — | ✗ |
 
-Replacing the requested role with `"other"` is not generated by the pinned mutator.
+Replacing the requested role with `"other"` isn't generated by the pinned mutator.
 A manual mutation failed both the insertion and parameter-preservation proofs.
 
 `make survey` examines functions outside that audit with the boundary theorems:
@@ -1393,15 +1436,15 @@ A manual mutation failed both the insertion and parameter-preservation proofs.
 
 The survey uses 1000 samples and a 30-second deadline per mutation. Timeouts are
 unresolved and depend on machine load. Equivalent means equal outputs on the sampled
-inputs; untested means an output comparison could not be performed. Stillborn
-mutations do not typecheck. The holes concern SQL text, acceptance rules and the
+inputs; untested means an output comparison couldn't be performed. Stillborn
+mutations don't typecheck. The holes concern SQL text, acceptance rules and the
 parameters of write statements, which are outside the properties proved above; the
 tests cover these by example.
 
 Outside the proofs:
 
 - What PostgreSQL returns. The row permission theorem proves that each `Scan` contains
-  its role condition as an expression in the plan. It does not interpret SQL execution,
+  its role condition as an expression in the plan. It doesn't interpret SQL execution,
   or prove that the expression represents the application author's intended policy.
   Differential tests compare PostgreSQL results with Hasura-generated statements.
 - The complete acceptance rules of the role-aware `resolve` and `run`. The proved
@@ -1446,7 +1489,8 @@ one connection, the statement of rusuna, of [viat-gql](https://crates.io/crates/
 | B: 50,000 articles and their author | 137.9 (115.9–185.4) | 196.0 (177.7–259.6) | 136.8 (118.0–154.5) | 172.8 (157.0–246.6) |
 | C: 2,000 authors, all their articles and all their comments | 601.5 (509.3–778.6) | 646.8 (579.8–713.5) | 679.3 (602.4–765.3) | 637.2 (551.6–740.0) |
 
-All three speed goals pass in this run. Compiling these GraphQL documents, including parsing and type checking, takes 93 to 158 µs.
+All 3 speed goals pass in this run. Compiling these GraphQL documents, including parsing
+and type checking, takes 93 to 158 µs.
 All four implementations return equal results on the benchmark data. The differential
 test covers 43 admin queries and 19 permission queries, including empty results, nested
 aggregates, custom root names, nullable columns, composite relationship predicates and
@@ -1485,8 +1529,8 @@ A `GET` with a path variable, one with query-string values (a number, a bare Boo
 and a percent-encoded string), a `POST` with a JSON body and a `PATCH` and `PUT` that mix
 the path with the query string or the body each answer the `data` of the same document
 sent to the GraphQL route, for `admin` and for `user` with the presets and row conditions
-of its permissions; a path variable replaces a body value of the same name. Values that do
-not fit their types, unknown names, bodies that are not JSON objects, missing required
+of its permissions; a path variable replaces a body value of the same name. Values that don't
+fit their types, unknown names, bodies that aren't JSON objects, missing required
 variables and a violated insert check answer 400 and change no row; roles whose schema
 rejects the document answer 403. Building the routes runs no resolver, even for a
 mutation, and rejects subscriptions, unknown fields, unbound URL variables, documents with
@@ -1497,11 +1541,11 @@ async-graphql dynamic schema) on `127.0.0.1:0` inside the test, and adds it to t
 of `tests/fixtures/permissions.graphql`. One request selects rusuna and remote root fields
 with variables, a fragment, an alias and an enum argument; the remote part equals the
 server's own answer. A mutation updates a table and the remote server in one operation;
-when the remote field fails, the table write is rolled back and later remote fields do not
+when the remote field fails, the table write is rolled back and later remote fields don't
 run, and repeated remote response keys are rejected. Introspection lists the remote
 types, descriptions, enum values and input defaults for `admin` and `user` and nothing for
-`reviewer`, which cannot select the fields. Fixed and forwarded headers reach the server
-and other client headers do not; a remote error, an unreachable server and introspecting
+`reviewer`, which can't select the fields. Fixed and forwarded headers reach the server
+and other client headers don't; a remote error, an unreachable server and introspecting
 it are errors with their messages. Same-named types or root fields, interfaces, unions,
 undefined types, invalid SDL and a missing SDL fail `build`; with prefixes, a renamed
 input object and enum argument are forwarded under the remote names, one request per
@@ -1513,7 +1557,7 @@ answer queries and introspection alike.
 The subscription tests in `crates/rusuna-http-tests/tests/subscriptions.rs` run over
 WebSocket. A subscription receives its first result, then the results changed by a
 mutation through rusuna and by plain SQL, and nothing after a write that leaves its result
-unchanged or that touches rows its role and session cannot read. 100 subscriptions with
+unchanged or that touches rows its role and session can't read. 100 subscriptions with
 four `user_id` values and seven variable values form one group; each receives the result
 of its own session and variables, and `pg_stat_statements` counts exactly one statement per
 run of the group, with the update as the only other statement. `<t>_by_pk` goes from null
@@ -1541,7 +1585,7 @@ aborted during a delivery leaves the event to another worker, which claims it on
 the lease has expired on an injected clock. Two workers record one event per cron
 occurrence on an injected clock; a starting worker records the missed occurrences within
 the tolerance and skips older ones; a scheduled event waits for its time and a
-rolled-back one is not recorded. Shutdown waits for a delivery in progress; the migration
+rolled-back one isn't recorded. Shutdown waits for a delivery in progress; the migration
 applies twice and replaces a changed trigger; `cleanup` keeps the latest cron
 occurrence. Time-dependent tests move an injected clock and wait on the poll counters of
 `Worker::monitor()`, never on a fixed sleep; the retry test only bounds the interval from
@@ -1565,13 +1609,13 @@ Each test that loads its own tables creates its own database in the cluster.
 ## Publishing
 
 `cargo package --workspace --exclude rusuna-cli --exclude rusuna-http-tests` builds the
-six published crates; their dependencies on each other carry `version = "0.1.0"`, so
-they are published in the order `rusuna`, `rusuna-http-client`, `rusuna-sqlx`, `rusuna-events`, `rusuna-async-graphql`,
-`rusuna-axum`. The `rusuna` package contains `src/` and `.leanfran/cache/`, the Rust
+6 published crates; their dependencies on each other carry `version = "0.2.0"`, so
+they are published in the order `rusuna`, `rusuna-http-client`, `rusuna-sqlx`,
+`rusuna-events`, `rusuna-async-graphql`, `rusuna-axum`. The `rusuna` package contains `src/` and `.leanfran/cache/`, the Rust
 leanfran generated from the `lean!` block. Its build script copies the cached module and
 needs neither Lean nor Lake, so a crate that depends on the published `rusuna`
 ([leanfran](https://crates.io/crates/leanfran) and `leanfran-build` 0.6.0 come from
-crates.io) builds with cargo and a C toolchain only. `lean/` is not packaged; the cache
+crates.io) builds with cargo and a C toolchain only. `lean/` isn't packaged; the cache
 key depends on the block and on the crate name, so a changed block needs a regenerated
 cache before packaging, which `make check` enforces.
 
