@@ -35,6 +35,7 @@ pub(super) fn directives<'a>(
                 "method",
                 "path",
                 "query",
+                "body",
                 "result",
                 "not_found",
                 "roles",
@@ -218,6 +219,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     let document = parse_schema(sdl).map_err(syntax)?;
     let mut query = "Query".to_string();
     let mut seen_schema = false;
+    let mut declares_mutation = false;
     let mut objects = BTreeMap::new();
     let mut defs = BTreeMap::new();
     let mut inputs = BTreeMap::new();
@@ -231,16 +233,20 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             TypeSystemDefinition::Schema(s) => {
                 if seen_schema
                     || s.node.extend
-                    || s.node.mutation.is_some()
+                    || s.node
+                        .mutation
+                        .as_ref()
+                        .is_some_and(|name| name.node != "Mutation")
                     || s.node.subscription.is_some()
                     || !s.node.directives.is_empty()
                 {
                     return Err(error(
                         s.pos,
-                        "only one query schema definition is supported",
+                        "expected one schema definition with a query and optional Mutation root",
                     ));
                 }
                 seen_schema = true;
+                declares_mutation = s.node.mutation.is_some();
                 query = s
                     .node
                     .query
@@ -303,10 +309,20 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     if !objects.contains_key(&query) {
         return Err(error(Pos::default(), "query root type is missing"));
     }
+    if query == "Mutation" {
+        return Err(error(
+            objects[&query].pos,
+            "Mutation is reserved for the mutation root",
+        ));
+    }
+    if declares_mutation && !objects.contains_key("Mutation") {
+        return Err(error(Pos::default(), "mutation root type is missing"));
+    }
     let mapped_types = objects
         .iter()
         .filter(|(name, ty)| {
             *name != &query
+                && name.as_str() != "Mutation"
                 && ty.node.directives.iter().any(|d| {
                     matches!(
                         d.node.name.node.as_str(),
@@ -329,7 +345,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     }
     let table_names: BTreeSet<_> = objects
         .keys()
-        .filter(|n| **n != query && !rest.objects.contains_key(*n))
+        .filter(|n| **n != query && n.as_str() != "Mutation" && !rest.objects.contains_key(*n))
         .cloned()
         .collect();
     let mut natives: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
@@ -348,6 +364,9 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     let mut targets = BTreeMap::new();
     let mut scalar_fields: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (name, t) in &objects {
+        if name == "Mutation" {
+            continue;
+        }
         let TypeKind::Object(o) = &t.node.kind else {
             unreachable!()
         };
@@ -711,8 +730,38 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
         summary.push_str("}\n");
         insert(&mut defs, format!("{name}_aggregate_fields"), summary, pos)?;
     }
-    let (mutation_roots, primary_roots) =
-        writes::definitions(&tables, &scalar_fields, &mut defs, &query)?;
+    let mut mutation_fields = String::new();
+    let (mutation_roots, primary_roots) = writes::definitions(
+        &tables,
+        &scalar_fields,
+        &mut defs,
+        &query,
+        &mut mutation_fields,
+    )?;
+    let mutation_pos = if let Some(mutation) = objects.get("Mutation") {
+        let TypeKind::Object(object) = &mutation.node.kind else {
+            unreachable!()
+        };
+        for field in &object.fields {
+            if mutation_roots.contains_key(field.node.name.node.as_str()) {
+                return Err(error(
+                    field.pos,
+                    "generated mutation root collides with a declared field",
+                ));
+            }
+            mutation_fields.push_str(&render_field(&field.node));
+        }
+        defs.remove("Mutation");
+        mutation.pos
+    } else {
+        Pos::default()
+    };
+    insert(
+        &mut defs,
+        "Mutation".into(),
+        render_type("type", "Mutation", mutation_fields),
+        mutation_pos,
+    )?;
     let subscription = defs[&query]
         .lines()
         .filter(|line| {

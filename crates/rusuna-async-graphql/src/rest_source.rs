@@ -4,7 +4,7 @@ use async_graphql::parser::types::InputObjectType;
 use async_graphql::{PathSegment, QueryPathNode};
 use async_graphql_value::Value as InputSyntax;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use rusuna::{RestField, Template, TemplatePart};
+use rusuna::{BodyTemplate, RestField, RestMethod, Template, TemplatePart};
 use rusuna_http_client::http::{
     HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header::CONTENT_TYPE,
 };
@@ -194,9 +194,19 @@ impl RestSource {
         Uri::from_parts(parts).map_err(|_| invalid("invalid REST request URL"))
     }
 
-    async fn get(&self, uri: &Uri, headers: &HeaderMap) -> Upstream {
+    async fn request(
+        &self,
+        method: Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+        mut body: Option<Vec<u8>>,
+    ) -> Upstream {
         use rusuna_http_client::Error as HttpError;
-        let (times, delay) = self.retry;
+        let (times, delay) = if method == Method::GET {
+            self.retry
+        } else {
+            (0, Duration::ZERO)
+        };
         let mut retries = 0;
         loop {
             let permit = self
@@ -206,7 +216,13 @@ impl RestSource {
                 .expect("REST source semaphore is open");
             let response = self
                 .client
-                .request(Method::GET, uri, headers, None, self.limits)
+                .request(
+                    method.clone(),
+                    uri,
+                    headers,
+                    body.take().map(Into::into),
+                    self.limits,
+                )
                 .await;
             drop(permit);
             let retryable = match &response {
@@ -284,15 +300,7 @@ fn render(
                 continue;
             }
             TemplatePart::Field(name) => field(name)?,
-            TemplatePart::Session(name) => match session.variables.get(name) {
-                Some(rusuna::Value::Null) => Json::Null,
-                Some(rusuna::Value::Text(value)) => Json::String(value.clone()),
-                Some(rusuna::Value::Int(value)) => Json::from(*value),
-                Some(rusuna::Value::Float(value)) if value.is_finite() => Json::from(*value),
-                Some(rusuna::Value::Bool(value)) => Json::from(*value),
-                Some(_) => return Err(invalid("invalid REST session value")),
-                None => return Err(invalid(format!("missing session variable `{name}`"))),
-            },
+            TemplatePart::Session(name) => session_value(session, name)?,
         };
         let text = match (mode, value) {
             (Render::Path, value) => {
@@ -334,6 +342,47 @@ fn render(
     } else {
         Ok(vec![pieces.concat()])
     }
+}
+
+fn session_value(session: &rusuna::Session, name: &str) -> Result<Json, async_graphql::Error> {
+    match session.variables.get(name) {
+        Some(rusuna::Value::Null) => Ok(Json::Null),
+        Some(rusuna::Value::Text(value)) => Ok(Json::String(value.clone())),
+        Some(rusuna::Value::Int(value)) => Ok(Json::from(*value)),
+        Some(rusuna::Value::Float(value)) if value.is_finite() => Ok(Json::from(*value)),
+        Some(rusuna::Value::Bool(value)) => Ok(Json::from(*value)),
+        Some(_) => Err(invalid("invalid REST session value")),
+        None => Err(invalid(format!("missing session variable `{name}`"))),
+    }
+}
+
+fn body_value(
+    template: &BodyTemplate,
+    field: &impl Fn(&str) -> Result<Json, async_graphql::Error>,
+    session: &rusuna::Session,
+) -> Result<Json, async_graphql::Error> {
+    match template {
+        BodyTemplate::Literal(value) => Ok(value.clone()),
+        BodyTemplate::Field(name) => field(name),
+        BodyTemplate::Session(name) => session_value(session, name),
+        BodyTemplate::Array(values) => values
+            .iter()
+            .map(|value| body_value(value, field, session))
+            .collect::<Result<_, _>>()
+            .map(Json::Array),
+        BodyTemplate::Object(values) => body_object(values, field, session).map(Json::Object),
+    }
+}
+
+fn body_object(
+    template: &BTreeMap<String, BodyTemplate>,
+    field: &impl Fn(&str) -> Result<Json, async_graphql::Error>,
+    session: &rusuna::Session,
+) -> Result<serde_json::Map<String, Json>, async_graphql::Error> {
+    template
+        .iter()
+        .map(|(name, value)| Ok((name.clone(), body_value(value, field, session)?)))
+        .collect()
 }
 
 fn as_text(value: Json) -> String {
@@ -577,6 +626,7 @@ impl RestRuntime {
         if call.is_none() && key.is_none() {
             return None;
         }
+        let mutation = call.is_some_and(|call| call.method != RestMethod::Get);
         let shared = shared.clone();
         let owner = owner.to_string();
         let spec = Arc::new(definition.clone());
@@ -598,7 +648,15 @@ impl RestRuntime {
                         .rest
                         .output(&shared, &ctx, state, &spec.ty.node, value));
                 }
-                match shared.rest.call(&shared, &owner, &spec, &ctx, state).await {
+                let call = async || shared.rest.call(&shared, &owner, &spec, &ctx, state).await;
+                let result = if mutation {
+                    ctx.data::<Arc<Slot>>()?
+                        .resolve(&ctx, async |_| call().await)
+                        .await
+                } else {
+                    call().await
+                };
+                match result {
                     Ok(value) => Ok(value),
                     Err(error) => {
                         report(&ctx, error, &[]);
@@ -629,6 +687,23 @@ impl RestRuntime {
         let field = &catalog.fields[&(owner.into(), definition.name.node.to_string())];
         let source = &self.sources[&field.source];
         let session = session(shared, ctx)?;
+        let omitted = |syntax: Option<&InputSyntax>| {
+            matches!(syntax, Some(InputSyntax::Variable(name)) if !state.provided_variables.contains(name)
+                && ctx.query_env.operation.node.variable_definitions.iter().any(|definition|
+                    &definition.node.name.node == name && definition.node.default_value.is_none()))
+        };
+        let argument_value = |argument: &InputValueDefinition| {
+            let name = argument.name.node.as_str();
+            let syntax = ctx.item.node.get_argument(name).map(|value| &value.node);
+            let supplied = if omitted(syntax) {
+                argument.default_value.as_ref().map(|value| &value.node)
+            } else {
+                ctx.args.get(name).map(|value| value.as_value())
+            };
+            supplied
+                .map(|value| self.argument(&argument.ty.node, value, syntax, &omitted, 0))
+                .transpose()
+        };
         let value = |name: &str| {
             if let Some(keys) = catalog.objects.get(owner) {
                 let column = &keys[name];
@@ -651,31 +726,45 @@ impl RestRuntime {
                 .iter()
                 .find(|arg| arg.node.name.node == name)
                 .unwrap();
-            let omitted = |syntax: Option<&InputSyntax>| {
-                matches!(syntax, Some(InputSyntax::Variable(name)) if !state.provided_variables.contains(name)
-                    && ctx.query_env.operation.node.variable_definitions.iter().any(|definition|
-                        &definition.node.name.node == name && definition.node.default_value.is_none()))
-            };
-            let syntax = ctx.item.node.get_argument(name).map(|value| &value.node);
-            let supplied = if omitted(syntax) {
-                argument
-                    .node
-                    .default_value
-                    .as_ref()
-                    .map(|value| &value.node)
-            } else {
-                ctx.args.get(name).map(|value| value.as_value())
-            };
-            match supplied {
-                Some(value) => self.argument(&argument.node.ty.node, value, syntax, &omitted, 0),
-                None => Ok(Json::Null),
-            }
+            Ok(argument_value(&argument.node)?.unwrap_or(Json::Null))
         };
         let uri = source.uri(field, value, session)?;
-        let headers = source.headers(session, ctx.data_opt::<ClientHeaders>())?;
-        let key = Call::new(source, uri.clone(), &headers);
-        let cached = state.calls.lock().await.entry(key).or_default().clone();
-        let response = cached.get_or_init(|| source.get(&uri, &headers)).await;
+        let mut headers = source.headers(session, ctx.data_opt::<ClientHeaders>())?;
+        let upstream;
+        let cached;
+        let response = if field.method == RestMethod::Get {
+            let key = Call::new(source, uri.clone(), &headers);
+            cached = state.calls.lock().await.entry(key).or_default().clone();
+            cached
+                .get_or_init(|| source.request(Method::GET, &uri, &headers, None))
+                .await
+        } else {
+            let body = match &field.body {
+                Some(template) => body_object(template, &value, session)?,
+                None => definition
+                    .arguments
+                    .iter()
+                    .filter_map(|argument| {
+                        argument_value(&argument.node).transpose().map(|value| {
+                            value.map(|value| (argument.node.name.node.to_string(), value))
+                        })
+                    })
+                    .collect::<Result<_, _>>()?,
+            };
+            let body = serde_json::to_vec(&body).map_err(|_| invalid("invalid REST body"))?;
+            headers
+                .entry(CONTENT_TYPE)
+                .or_insert(HeaderValue::from_static("application/json"));
+            let method = match field.method {
+                RestMethod::Post => Method::POST,
+                RestMethod::Put => Method::PUT,
+                RestMethod::Patch => Method::PATCH,
+                RestMethod::Delete => Method::DELETE,
+                RestMethod::Get => unreachable!(),
+            };
+            upstream = source.request(method, &uri, &headers, Some(body)).await;
+            &upstream
+        };
         let ty = &definition.ty.node;
         let value = match response {
             Upstream::Empty if ty.nullable => return Ok(None),

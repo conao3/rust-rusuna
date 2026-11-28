@@ -2,6 +2,7 @@ use super::schema::{directives, string, strings};
 use super::*;
 use async_graphql_parser::Positioned;
 use async_graphql_value::ConstValue;
+use serde_json::Value as Json;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Default)]
@@ -19,6 +20,8 @@ pub struct RestColumn {
 #[derive(Debug, Clone)]
 pub struct RestField {
     pub source: String,
+    pub method: RestMethod,
+    pub body: Option<BTreeMap<String, BodyTemplate>>,
     pub path: Vec<Template>,
     pub query: Vec<(String, Template)>,
     pub result: Vec<String>,
@@ -30,6 +33,24 @@ impl RestField {
     pub fn serves(&self, role: &str) -> bool {
         role == "admin" || self.roles.contains(role)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+#[derive(Debug, Clone)]
+pub enum BodyTemplate {
+    Literal(Json),
+    Field(String),
+    Session(String),
+    Array(Vec<Self>),
+    Object(BTreeMap<String, Self>),
 }
 
 #[derive(Debug, Clone)]
@@ -131,17 +152,85 @@ fn path_template(path: &str) -> Result<Vec<Template>, &'static str> {
         .collect()
 }
 
+fn check_template_field(name: &str, names: &BTreeSet<&str>, pos: Pos) -> Result<(), Error> {
+    if !names.contains(name) {
+        return Err(error(pos, format!("unknown REST template field {name}")));
+    }
+    Ok(())
+}
+
+fn body_template(
+    value: &ConstValue,
+    names: &BTreeSet<&str>,
+    pos: Pos,
+) -> Result<BodyTemplate, Error> {
+    match value {
+        ConstValue::Object(values) => values
+            .iter()
+            .map(|(name, value)| Ok((name.to_string(), body_template(value, names, pos)?)))
+            .collect::<Result<_, _>>()
+            .map(BodyTemplate::Object),
+        ConstValue::List(values) => values
+            .iter()
+            .map(|value| body_template(value, names, pos))
+            .collect::<Result<_, _>>()
+            .map(BodyTemplate::Array),
+        ConstValue::String(text) => {
+            if let Ok(Template(parts)) = Template::parse(text) {
+                match parts.as_slice() {
+                    [TemplatePart::Field(name)] => {
+                        check_template_field(name, names, pos)?;
+                        return Ok(BodyTemplate::Field(name.clone()));
+                    }
+                    [TemplatePart::Session(name)] => {
+                        return Ok(BodyTemplate::Session(name.clone()));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(BodyTemplate::Literal(Json::String(text.clone())))
+        }
+        value => value
+            .clone()
+            .into_json()
+            .map(BodyTemplate::Literal)
+            .map_err(|e| error(pos, e.to_string())),
+    }
+}
+
 fn definition(
     d: &ConstDirective,
     field: &FieldDefinition,
     names: &BTreeSet<&str>,
+    mutation: bool,
 ) -> Result<RestField, Error> {
     let invalid = |message| error(d.name.pos, message);
-    if let Some(method) = d.get_argument("method")
-        && !matches!(&method.node, ConstValue::Enum(name) if name == "GET")
-    {
-        return Err(invalid("@rest query fields use method GET"));
-    }
+    let method = match d.get_argument("method").map(|value| &value.node) {
+        None => "GET",
+        Some(ConstValue::Enum(method)) => method.as_str(),
+        _ => return Err(invalid("@rest method must be an enum value")),
+    };
+    let method = match (mutation, method) {
+        (false, "GET") => RestMethod::Get,
+        (true, "POST") => RestMethod::Post,
+        (true, "PUT") => RestMethod::Put,
+        (true, "PATCH") => RestMethod::Patch,
+        (true, "DELETE") => RestMethod::Delete,
+        (false, _) => return Err(invalid("@rest query fields use method GET")),
+        (true, _) => {
+            return Err(invalid(
+                "@rest mutation fields use POST, PUT, PATCH or DELETE",
+            ));
+        }
+    };
+    let body = match d.get_argument("body") {
+        None => None,
+        Some(_) if !mutation => return Err(invalid("@rest body applies to mutation fields")),
+        Some(value) => match body_template(&value.node, names, value.pos)? {
+            BodyTemplate::Object(values) => Some(values),
+            _ => return Err(error(value.pos, "@rest body must be an object")),
+        },
+    };
     let not_found_null = match d.get_argument("not_found") {
         None => false,
         Some(value) if value.node == ConstValue::Null && field.ty.node.nullable => true,
@@ -171,13 +260,8 @@ fn definition(
         .chain(query.iter().map(|(_, template)| template))
     {
         for part in &template.0 {
-            if let TemplatePart::Field(name) = part
-                && !names.contains(name.as_str())
-            {
-                return Err(error(
-                    d.name.pos,
-                    format!("unknown REST template field {name}"),
-                ));
+            if let TemplatePart::Field(name) = part {
+                check_template_field(name, names, d.name.pos)?;
             }
         }
     }
@@ -194,6 +278,8 @@ fn definition(
     };
     Ok(RestField {
         source: string(d, "source")?,
+        method,
+        body,
         path,
         query,
         result,
@@ -224,15 +310,25 @@ pub(super) fn load(
     scalars: &BTreeSet<String>,
     inputs: &BTreeMap<String, Positioned<TypeDefinition>>,
 ) -> Result<RestCatalog, Error> {
-    let root_fields = fields(&objects[query].node);
-    let mut pending: Vec<_> = root_fields
+    let mutation = objects.get("Mutation");
+    if let Some(mutation) = mutation {
+        directives(&mutation.node.directives, &[])?;
+        for field in fields(&mutation.node) {
+            if !has_rest(&field.node) {
+                return Err(error(field.pos, "declared mutation fields require @rest"));
+            }
+        }
+    }
+    let mut pending: Vec<_> = fields(&objects[query].node)
         .iter()
+        .chain(mutation.into_iter().flat_map(|ty| fields(&ty.node)))
         .filter(|f| has_rest(&f.node))
         .map(|f| named(&f.node.ty.node))
         .collect();
     let mut objects_reached = BTreeSet::new();
     while let Some(name) = pending.pop() {
         if name != query
+            && name != "Mutation"
             && !rows.contains(name)
             && let Some(object) = objects.get(name)
             && objects_reached.insert(name)
@@ -248,8 +344,12 @@ pub(super) fn load(
     };
     let input_type = |name: &str| scalars.contains(name) || inputs.contains_key(name);
     let mut catalog = RestCatalog::default();
-    for owner in std::iter::once(query).chain(objects_reached.iter().copied()) {
-        let root = owner == query;
+    for owner in std::iter::once(query)
+        .chain(mutation.map(|_| "Mutation"))
+        .chain(objects_reached.iter().copied())
+    {
+        let mutation = owner == "Mutation";
+        let root = owner == query || mutation;
         let t = &objects[owner];
         let fields = fields(&t.node);
         if !root {
@@ -286,8 +386,12 @@ pub(super) fn load(
                     return Err(error(f.pos, "@rest and @column apply to different fields"));
                 }
                 let args = validate_inputs(&f.node.arguments, &input_type)?;
-                let spec =
-                    definition(directive, &f.node, if root { &args } else { &parent_names })?;
+                let spec = definition(
+                    directive,
+                    &f.node,
+                    if root { &args } else { &parent_names },
+                    mutation,
+                )?;
                 catalog.fields.insert((owner.into(), name.into()), spec);
             } else {
                 if !f.node.arguments.is_empty() {
@@ -359,6 +463,12 @@ pub(super) fn uses_date_time(
     };
     fields(&objects[query].node)
         .iter()
+        .chain(
+            objects
+                .get("Mutation")
+                .into_iter()
+                .flat_map(|ty| fields(&ty.node)),
+        )
         .filter(|field| has_rest(&field.node))
         .any(output)
         || catalog
@@ -377,9 +487,14 @@ pub(super) fn reject_operation(
     document: &ExecutableDocument,
     operation: &OperationDefinition,
 ) -> Result<(), Error> {
-    if catalog.fields.is_empty() || operation.ty == OperationType::Mutation {
+    if catalog.fields.is_empty() {
         return Ok(());
     }
+    let root = if operation.ty == OperationType::Mutation {
+        "Mutation"
+    } else {
+        query
+    };
     let mut fragments = BTreeSet::new();
     let mut pending = vec![&operation.selection_set.node];
     while let Some(set) = pending.pop() {
@@ -387,7 +502,7 @@ pub(super) fn reject_operation(
             match &item.node {
                 async_graphql_parser::types::Selection::Field(field) => {
                     let name = field.node.name.node.as_str();
-                    if catalog.fields.contains_key(&(query.into(), name.into())) {
+                    if catalog.fields.contains_key(&(root.into(), name.into())) {
                         return Err(Error::RestField { field: name.into() });
                     }
                 }
@@ -396,7 +511,7 @@ pub(super) fn reject_operation(
                         .node
                         .type_condition
                         .as_ref()
-                        .is_none_or(|ty| ty.node.on.node == query)
+                        .is_none_or(|ty| ty.node.on.node == root)
                     {
                         pending.push(&fragment.node.selection_set.node);
                     }
@@ -405,7 +520,7 @@ pub(super) fn reject_operation(
                     let name = &spread.node.fragment_name.node;
                     if fragments.insert(name)
                         && let Some(fragment) = document.fragments.get(name)
-                        && fragment.node.type_condition.node.on.node == query
+                        && fragment.node.type_condition.node.on.node == root
                     {
                         pending.push(&fragment.node.selection_set.node);
                     }

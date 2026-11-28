@@ -1,9 +1,9 @@
 mod support;
 
 use async_graphql::dynamic::Schema;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json as AxumJson, Router};
 use rusuna_async_graphql::{Builder, RestSource};
@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use support::{post, request, serve};
+use support::{database, post, request, serve};
 use tokio::net::TcpListener;
 
 const POKEAPI: &str = include_str!("../../rusuna-axum/examples/pokeapi.graphql");
@@ -73,6 +73,7 @@ struct Counts {
     paths: BTreeMap<String, usize>,
     detail_in_flight: usize,
     max_detail_in_flight: usize,
+    writes: Vec<(Method, String, Json)>,
 }
 
 type Observed = Arc<Mutex<Counts>>;
@@ -81,8 +82,31 @@ fn fixture(text: &str) -> Json {
     serde_json::from_str(text).unwrap()
 }
 
-async fn upstream(State(counts): State<Observed>, uri: Uri, headers: HeaderMap) -> Response {
+async fn upstream(
+    State(counts): State<Observed>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let path = uri.path().strip_prefix("/api/v2").unwrap();
+    if matches!(path, "/write" | "/write/fail") {
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+        let body = serde_json::from_slice(&body).unwrap();
+        if method == Method::POST {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        counts
+            .lock()
+            .unwrap()
+            .writes
+            .push((method, path.into(), body));
+        return if path == "/write/fail" {
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        } else {
+            AxumJson(true).into_response()
+        };
+    }
     let is_detail = path.starts_with("/pokemon/") && path != "/pokemon/";
     let calls = {
         let mut counts = counts.lock().unwrap();
@@ -599,4 +623,147 @@ async fn the_role_schema_excludes_hidden_rests_and_subscriptions() {
         Builder::new(schema, "user").build(),
         Err(rusuna_async_graphql::Error::Rest { .. })
     ));
+}
+
+#[tokio::test]
+async fn rest_mutations_send_json_in_document_order_without_deduplication() {
+    let (base, observed) = server().await;
+    let schema = role_schema(
+        r#"
+        schema { query: Query mutation: Mutation }
+        type Query { ready: Boolean @rest(source: "api", path: "/ready") }
+        input Payload { count: Int!, enabled: Boolean = true }
+        type Mutation {
+          create(input: Payload!, count: Int!, note: String): Boolean!
+            @rest(source: "api", method: POST, path: "/write", body: {
+              count: "{{count}}", payload: "{{input}}", note: "{{note}}",
+              actor: "{{$actor}}", unknown: "{{$unknown}}",
+              list: ["{{count}}", {actor: "{{$actor}}"}, "prefix {{note}}", "{{count}}/{{note}}", "{{ not a marker }}"]
+            })
+          put(input: Payload!, note: String, count: Int = 3, omitted: Boolean): Boolean!
+            @rest(source: "api", method: PUT, path: "/write")
+          patch: Boolean! @rest(source: "api", method: PATCH, path: "/write", body: {})
+          delete: Boolean! @rest(source: "api", method: DELETE, path: "/write")
+        }
+        "#,
+        "admin",
+        &[config("api", &base)],
+    );
+    let response = execute(
+        &schema,
+        r#"mutation {
+          first: create(input: {count: 2}, count: 7, note: null)
+          second: put(input: {count: 4, enabled: false}, note: null)
+          third: patch
+          fourth: delete
+          fifth: delete
+        }"#,
+        rusuna::Session::new("admin")
+            .variable("actor", rusuna::Value::Int(42))
+            .variable("unknown", rusuna::Value::Null),
+    )
+    .await;
+    assert_eq!(
+        response,
+        json!({"data": {"first": true, "second": true, "third": true, "fourth": true, "fifth": true}})
+    );
+    assert_eq!(
+        observed.lock().unwrap().writes,
+        [
+            (
+                Method::POST,
+                "/write".into(),
+                json!({
+                    "count": 7, "payload": {"count": 2, "enabled": true}, "note": null,
+                    "actor": 42, "unknown": null, "list": [7, {"actor": 42}, "prefix {{note}}", "{{count}}/{{note}}", "{{ not a marker }}"]
+                })
+            ),
+            (
+                Method::PUT,
+                "/write".into(),
+                json!({"input": {"count": 4, "enabled": false}, "note": null, "count": 3})
+            ),
+            (Method::PATCH, "/write".into(), json!({})),
+            (Method::DELETE, "/write".into(), json!({})),
+            (Method::DELETE, "/write".into(), json!({})),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_rest_mutation_rolls_back_postgres_and_skips_later_fields() {
+    let (base, observed) = server().await;
+    let pool = database("http_rest_mutation", &[]).await;
+    sqlx::raw_sql("CREATE TABLE item (id integer PRIMARY KEY)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let schema = Arc::new(
+        rusuna::Schema::from_sdl(
+            r#"
+            type Query { items: [item!]! @list }
+            type item @table(name: "item") { id: Int! }
+            type Mutation {
+              send: Boolean @rest(source: "api", method: POST, path: "/write")
+              fail: Boolean @rest(source: "api", method: POST, path: "/write/fail")
+            }
+            "#,
+        )
+        .unwrap(),
+    );
+    let schema = Builder::new(schema, "admin")
+        .rest(config("api", &base).retry(2, Duration::ZERO))
+        .build()
+        .unwrap()
+        .schema()
+        .data(pool.clone())
+        .finish()
+        .unwrap();
+    let response = execute(
+        &schema,
+        r#"mutation {
+          insert_item(objects: [{id: 1}]) { affected_rows }
+          send
+          fail
+          later: send
+        }"#,
+        rusuna::Session::new("admin"),
+    )
+    .await;
+    assert_eq!(response["data"], Json::Null);
+    assert_eq!(
+        extensions(&response, json!(["fail"])),
+        &json!({"code": "rest-source-error", "http": {"status": 503}})
+    );
+    assert_eq!(
+        observed.lock().unwrap().writes,
+        [
+            (Method::POST, "/write".into(), json!({})),
+            (Method::POST, "/write/fail".into(), json!({})),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM item")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let response = execute(
+        &schema,
+        "mutation { insert_item(objects: [{id: 1}]) { affected_rows } send }",
+        rusuna::Session::new("admin"),
+    )
+    .await;
+    assert_eq!(
+        response,
+        json!({"data": {"insert_item": {"affected_rows": 1}, "send": true}})
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM item")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
 }

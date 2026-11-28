@@ -744,8 +744,8 @@ server; and remote subscriptions aren't forwarded.
 
 ## REST data sources
 
-`@rest` maps a GraphQL query field to a GET request. The SDL declares the arguments,
-response types, and roles. Rust configures the `RestSource` base URL and headers.
+`@rest` maps a GraphQL query field to a GET request and a mutation root field to a
+POST, PUT, PATCH, or DELETE request. The SDL declares the arguments, response types, and roles. Rust configures the `RestSource` base URL and headers.
 REST-only schemas run without a PostgreSQL connection.
 
 Run the [PokéAPI example](crates/rusuna-axum/examples/pokeapi.graphql).
@@ -779,10 +779,20 @@ its key, and an input object is sent as compact JSON.
 
 Add the configured source with `Builder::rest`. `header` sets a fixed header,
 `session_header` renders a session template, and `forward_header` allow-lists a client
-header, in descending precedence. Calls share a connection pool. Identical calls with the same transport limits and retry settings are deduplicated per
-GraphQL request. Each source allows eight concurrent calls
+header, in descending precedence. Calls share a connection pool. Identical GET requests
+with the same transport limits and retry settings are deduplicated per GraphQL request. Each source allows eight concurrent calls
 by default. The timeout is 60 seconds and the response limit is 16 MiB. Configure retries
-with `retry(times, delay)` for connection failures and HTTP 429, 502, 503, and 504.
+with `retry(times, delay)` for GET connection failures and HTTP 429, 502, 503, and 504.
+
+Declare REST mutation fields on `type Mutation`. The `body` directive argument is a JSON
+object template. A whole string such as `"{{input}}"` or `"{{$user_id}}"` inserts the typed
+argument or session value, including objects and nulls. Other strings are sent verbatim.
+With no template, the body contains the supplied field arguments and defaults, including explicit nulls.
+
+Mutation root fields run one at a time in document order. Each REST mutation sends one
+request from its resolver, with retries disabled. A failing REST mutation rolls back
+PostgreSQL writes from the same operation. PostgreSQL commits after all resolvers finish.
+Successful REST calls take effect upstream and survive a later resolver or commit failure.
 
 `admin` can see every REST field. Other roles see fields that list their role and the
 reachable types. `schema expand-sdl` preserves REST directives and `query compile-sql`

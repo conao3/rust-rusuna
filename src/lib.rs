@@ -27,7 +27,9 @@ mod mutation;
 mod statement;
 pub use mutation::*;
 
-pub use graphql::rest::{RestCatalog, RestColumn, RestField, Template, TemplatePart};
+pub use graphql::rest::{
+    BodyTemplate, RestCatalog, RestColumn, RestField, RestMethod, Template, TemplatePart,
+};
 pub use graphql::{CompiledField, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_DEPTH};
 
 use compiler::model;

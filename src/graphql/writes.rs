@@ -12,10 +12,10 @@ pub(super) fn definitions(
     fields: &BTreeMap<String, Vec<(String, String)>>,
     defs: &mut BTreeMap<String, String>,
     query: &str,
+    mutation: &mut String,
 ) -> Result<(MutationRoots, BTreeMap<String, String>), Error> {
     let mut roots = BTreeMap::new();
     let mut primary = BTreeMap::new();
-    let mut mutation = String::from("type Mutation {\n");
     for table in tables {
         let t = &table.name;
         let columns = &fields[t];
@@ -164,11 +164,6 @@ pub(super) fn definitions(
             );
         }
     }
-    mutation.push_str("}\n");
-    if roots.is_empty() {
-        mutation = "type Mutation\n".into();
-    }
-    insert(defs, "Mutation".into(), mutation, Pos::default())?;
     Ok((roots, primary))
 }
 
@@ -310,9 +305,10 @@ pub(super) fn restrict(
         });
     if let Some(TypeKind::Object(object)) = document.types.get_mut("Mutation") {
         object.fields.retain(|f| {
-            document
-                .mutation_roots
-                .contains_key(f.node.name.node.as_str())
+            rest::has_rest(&f.node)
+                || document
+                    .mutation_roots
+                    .contains_key(f.node.name.node.as_str())
         });
     }
     for table in &schema.tables {

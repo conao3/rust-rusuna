@@ -1,7 +1,7 @@
 //! Builds an async-graphql dynamic schema from a [`rusuna::Schema`] for one role.
 //!
 //! [`Builder`] produces [`Parts`]: the types, input types and root fields of the role,
-//! which share one schema with hand-written dynamic fields. Each root field resolves with
+//! which share one schema with hand-written dynamic fields. SQL root fields resolve with
 //! one PostgreSQL statement, and each subscription root field subscribes to that statement
 //! on a `rusuna_sqlx::Subscriptions`. The resolvers read a [`rusuna::Session`] from the
 //! request or connection data and a `sqlx::PgPool` and a `rusuna_sqlx::Subscriptions` from
@@ -381,8 +381,8 @@ impl Builder {
                             mutation = mutation.field(resolver);
                         } else {
                             query = query.field(resolver);
+                            roots.insert(root.definition.name.node.to_string(), root);
                         }
-                        roots.insert(root.definition.name.node.to_string(), root);
                     }
                 }
                 TypeKind::Object(object) => {
@@ -511,7 +511,6 @@ impl Parts {
     pub fn root_field(&self, name: &str) -> Option<Field> {
         self.roots
             .get(name)
-            .filter(|root| root.operation == Operation::Query)
             .map(|root| root_field(&self.shared, root))
     }
 
@@ -853,6 +852,39 @@ struct Slot {
     state: Mutex<State>,
 }
 
+impl Slot {
+    async fn resolve(
+        &self,
+        ctx: &ResolverContext<'_>,
+        run: impl AsyncFnOnce(&mut State) -> async_graphql::Result<Option<FieldValue<'static>>>,
+    ) -> async_graphql::Result<Option<FieldValue<'static>>> {
+        let mut state = self.state.lock().await;
+        if state.failed {
+            return Ok(None);
+        }
+        let field = ctx.ctx.field();
+        let key = field.alias().unwrap_or(field.name()).to_string();
+        let result = if state.keys.insert(key.clone()) {
+            run(&mut state).await
+        } else {
+            Err(coded(
+                format!("the mutation repeats the root response key {key}"),
+                "validation-failed",
+            ))
+        };
+        if result.is_err() {
+            state.failed = true;
+            if let Some(transaction) = state.transaction.take() {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|e| execution_error(&e.into()))?;
+            }
+        }
+        result
+    }
+}
+
 fn session<'a>(
     shared: &Shared,
     ctx: &ResolverContext<'a>,
@@ -957,57 +989,37 @@ async fn resolve_root(
             .map_err(|e| execution_error(&e))?;
         return Ok(owned(value));
     }
-    let slot = ctx.data::<Arc<Slot>>()?;
-    let mut state = slot.state.lock().await;
-    if state.failed {
-        return Ok(None);
-    }
-    let result = async {
-        let field = ctx.ctx.field();
-        let key = field.alias().unwrap_or(field.name()).to_string();
-        if !state.keys.insert(key.clone()) {
-            return Err(coded(
-                format!("the mutation repeats the root response key {key}"),
-                "validation-failed",
-            ));
-        }
-        let (text, variables) = render(shared, root, &field)?;
-        let fields = shared
-            .schema
-            .compile(&text, &variables, None, session)
-            .map_err(|e| coded(e.to_string(), "validation-failed"))?;
-        let Some(field) = fields.into_iter().next() else {
-            return Ok(Json::Null);
-        };
-        if state.transaction.is_none() {
-            state.transaction = Some(pool.begin().await.map_err(|e| execution_error(&e.into()))?);
-        }
-        let transaction = state.transaction.as_mut().unwrap();
-        rusuna_sqlx::fetch(transaction, &field.compiled)
-            .await
-            .map_err(|e| execution_error(&e))
-    }
-    .await;
-    match result {
-        Ok(value) => Ok(owned(value)),
-        Err(error) => {
-            state.failed = true;
-            if let Some(transaction) = state.transaction.take() {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(|e| execution_error(&e.into()))?;
+    ctx.data::<Arc<Slot>>()?
+        .resolve(ctx, async |state| {
+            let (text, variables) = render(shared, root, &ctx.ctx.field())?;
+            let fields = shared
+                .schema
+                .compile(&text, &variables, None, session)
+                .map_err(|e| coded(e.to_string(), "validation-failed"))?;
+            let Some(field) = fields.into_iter().next() else {
+                return Ok(None);
+            };
+            if state.transaction.is_none() {
+                state.transaction =
+                    Some(pool.begin().await.map_err(|e| execution_error(&e.into()))?);
             }
-            Err(error)
-        }
-    }
+            let transaction = state.transaction.as_mut().unwrap();
+            let value = rusuna_sqlx::fetch(transaction, &field.compiled)
+                .await
+                .map_err(|e| execution_error(&e))?;
+            Ok(owned(value))
+        })
+        .await
 }
 
 fn root_field(shared: &Arc<Shared>, root: &Root) -> Field {
     let definition = &root.definition;
-    if root.operation == Operation::Query
-        && let Some(rest) = rest_source::RestRuntime::field(shared, &shared.query, definition)
-    {
+    let owner = match root.operation {
+        Operation::Query => &shared.query,
+        Operation::Mutation => &shared.mutation,
+        Operation::Subscription => unreachable!(),
+    };
+    if let Some(rest) = rest_source::RestRuntime::field(shared, owner, definition) {
         return rest;
     }
     let mut field = Field::new(

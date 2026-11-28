@@ -81,6 +81,40 @@ fn compiling_a_document_with_a_rest_root_returns_rest_field() {
 }
 
 #[test]
+fn rest_mutation_roots_follow_roles_and_report_sql_compilation_errors() {
+    let schema = Schema::from_sdl(&format!(
+        "{SDL}{}",
+        r#"
+        type Mutation {
+          publish(flag: Boolean): Published
+            @rest(source: "api", method: PATCH, path: "/publish", body: {flag: "{{flag}}"}, roles: ["user"])
+          remove: Boolean @rest(source: "api", method: DELETE, path: "/remove")
+        }
+        type Published { time: DateTime }
+        "#
+    ))
+    .unwrap();
+    let user = schema.expanded_sdl("user").unwrap();
+    assert!(user.contains("publish(flag: Boolean): Published @rest("));
+    assert!(user.contains("scalar DateTime"));
+    assert!(!user.contains("remove:"));
+    let guest = schema.expanded_sdl("guest").unwrap();
+    assert!(!guest.contains("publish("));
+    assert!(!guest.contains("Published"));
+    assert_eq!(
+        schema.compile(
+            "mutation { ...Remote } fragment Remote on Mutation { publish { time } }",
+            &json!({}),
+            None,
+            &Session::new("user"),
+        ),
+        Err(Error::RestField {
+            field: "publish".into()
+        })
+    );
+}
+
+#[test]
 fn the_loader_rejects_invalid_rest_definitions() {
     for schema in [
         r#"type Query { info: String @rest(source: "api", path: "https://other.example/a") }"#,
@@ -93,6 +127,14 @@ fn the_loader_rejects_invalid_rest_definitions() {
         r#"type Query { info: String @rest(source: "api", path: "/{{unknown}}") }"#,
         r#"type Query { info: String @rest(source: "api", path: "/{{broken}") }"#,
         r#"type Query { info: String @rest(source: "api", method: POST, path: "/a") }"#,
+        r#"type Query { info: String @rest(source: "api", path: "/a", body: {}) }"#,
+        r#"type Query { info: String @rest(source: "api", path: "/a") } type Mutation { write: String @rest(source: "api", path: "/b") }"#,
+        r#"type Query { info: String @rest(source: "api", path: "/a") } type Mutation { write: String @rest(source: "api", method: GET, path: "/b") }"#,
+        r#"type Query { info: String @rest(source: "api", path: "/a") } type Mutation { write: String @rest(source: "api", method: POST, path: "/b", body: []) }"#,
+        r#"type Query { info: String @rest(source: "api", path: "/a") } type Mutation { write: String @rest(source: "api", method: POST, path: "/b", body: {nested: ["{{unknown}}"]}) }"#,
+        r#"type Query { info: String @rest(source: "api", path: "/a") } type Mutation { write: String @rest(source: "api", method: POST, path: "/b") @column(name: "other") }"#,
+        r#"type Query { info: String @rest(source: "api", path: "/a") } type Mutation { write: String }"#,
+        r#"type Query { rows: [Row!]! @list } type Row @table(name: "rows") { id: Int } type Mutation { insert_Row: String @rest(source: "api", method: POST, path: "/b") }"#,
         r#"type Query { info: String! @rest(source: "api", path: "/a", not_found: null) }"#,
         r#"type Query { info(n: Int = "two"): String @rest(source: "api", path: "/a") }"#,
         r#"type Query { info: Row @rest(source: "api", path: "/a") } type Row @table(name: "rows") { id: Int }"#,

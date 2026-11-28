@@ -715,29 +715,9 @@ async fn forward(
     if operation != Operation::Mutation {
         return request(remote, shared, operation, target, ctx).await;
     }
-    let slot = ctx.data::<Arc<Slot>>()?;
-    let mut state = slot.state.lock().await;
-    if state.failed {
-        return Ok(None);
-    }
-    let field = ctx.ctx.field();
-    let key = field.alias().unwrap_or(field.name()).to_string();
-    let result = if state.keys.insert(key.clone()) {
-        request(remote, shared, operation, target, ctx).await
-    } else {
-        Err(coded(
-            format!("the mutation repeats the root response key {key}"),
-            "validation-failed",
-        ))
-    };
-    if result.is_err() {
-        state.failed = true;
-        if let Some(transaction) = state.transaction.take() {
-            transaction
-                .rollback()
-                .await
-                .map_err(|e| execution_error(&e.into()))?;
-        }
-    }
-    result
+    ctx.data::<Arc<Slot>>()?
+        .resolve(ctx, async |_| {
+            request(remote, shared, operation, target, ctx).await
+        })
+        .await
 }
