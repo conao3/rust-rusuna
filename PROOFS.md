@@ -519,7 +519,10 @@ theorem resolveSelection_ok_iff (schema : Schema) (root : Selection) :
 ## Boundary
 
 REST data sources are outside the Lean proofs. Rust handles their role visibility,
-template rendering, HTTP execution, and response validation. For a REST-to-table
+template rendering, HTTP execution, and response validation. Rust evaluates REST
+row permissions and row limits after response validation and controls the role's
+visible REST columns. The HTTP integration tests cover these permissions.
+For a REST-to-table
 relationship, the core resolves the client selection and applies table permissions
 before Rust appends the declared join-key equality predicates to the root scan.
 The core then emits SQL for that scan. The HTTP integration tests cover the added

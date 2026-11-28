@@ -27,7 +27,14 @@ pub(super) fn directives<'a>(
             "relation" => &["columns", "references"],
             "aggregate" => &["target"],
             "list" => &[],
-            "permission" => &["role", "where", "columns", "allow_aggregations", "limit"],
+            "permission" => &[
+                "role",
+                "where",
+                "filter",
+                "columns",
+                "allow_aggregations",
+                "limit",
+            ],
             "native_query" => &["sql", "arguments"],
             "function" => &["name", "schema", "arguments"],
             "rest" => &[
@@ -40,6 +47,7 @@ pub(super) fn directives<'a>(
                 "not_found",
                 "roles",
                 "batch",
+                "filter",
             ],
             _ => unreachable!(),
         };
@@ -120,14 +128,97 @@ pub(super) fn insert(
     Ok(())
 }
 
-fn args(target: &str, arguments: &[(String, String)]) -> String {
+fn args(target: &str, arguments: impl IntoIterator<Item = String>) -> String {
     let declared: String = arguments
-        .iter()
-        .map(|(name, ty)| format!("{name}: {ty}, "))
+        .into_iter()
+        .map(|arg| format!("{arg}, "))
         .collect();
     format!(
         "({declared}where: {target}_bool_exp, order_by: [{target}_order_by!], limit: Int, offset: Int)"
     )
+}
+
+pub(super) fn boolean_input(name: &str) -> String {
+    format!(
+        "input {name}_bool_exp {{\n  _and: [{name}_bool_exp!]\n  _or: [{name}_bool_exp!]\n  _not: {name}_bool_exp\n"
+    )
+}
+
+pub(super) fn comparison_definition(
+    defs: &mut BTreeMap<String, String>,
+    scalar: &str,
+    pos: Pos,
+) -> Result<(), Error> {
+    let mut fields = format!("input {scalar}_comparison_exp {{\n");
+    for op in ["_eq", "_neq", "_gt", "_gte", "_lt", "_lte"] {
+        fields.push_str(&format!("  {op}: {scalar}\n"));
+    }
+    for op in ["_in", "_nin"] {
+        fields.push_str(&format!("  {op}: [{scalar}!]\n"));
+    }
+    fields.push_str("  _is_null: Boolean\n");
+    if scalar == "String" {
+        for op in ["_like", "_nlike", "_ilike", "_nilike"] {
+            fields.push_str(&format!("  {op}: String\n"));
+        }
+    }
+    fields.push_str("}\n");
+    insert(defs, format!("{scalar}_comparison_exp"), fields, pos)
+}
+
+pub(super) fn aggregate_definitions(
+    defs: &mut BTreeMap<String, String>,
+    name: &str,
+    columns: &[(String, String)],
+    pos: Pos,
+) -> Result<(), Error> {
+    insert(
+        defs,
+        format!("{name}_aggregate"),
+        format!(
+            "type {name}_aggregate {{\n  aggregate: {name}_aggregate_fields\n  nodes: [{name}!]!\n}}\n"
+        ),
+        pos,
+    )?;
+    let mut summary = format!("type {name}_aggregate_fields {{\n  count: Int!\n");
+    for op in ["sum", "avg", "min", "max"] {
+        let applicable: Vec<_> = columns
+            .iter()
+            .filter(|(_, s)| {
+                if op == "sum" || op == "avg" {
+                    s == "Int" || s == "Float"
+                } else {
+                    s != "Boolean"
+                }
+            })
+            .collect();
+        if applicable.is_empty() {
+            continue;
+        }
+        summary.push_str(&format!("  {op}: {name}_{op}_fields\n"));
+        let mut metrics = format!("type {name}_{op}_fields {{\n");
+        for (field, scalar) in applicable {
+            metrics.push_str(&format!(
+                "  {field}: {}\n",
+                if op == "avg" { "Float" } else { scalar }
+            ));
+        }
+        metrics.push_str("}\n");
+        insert(defs, format!("{name}_{op}_fields"), metrics, pos)?;
+    }
+    summary.push_str("}\n");
+    insert(defs, format!("{name}_aggregate_fields"), summary, pos)
+}
+
+pub(super) fn permission_limit(d: &ConstDirective) -> Result<Option<u64>, Error> {
+    match d.get_argument("limit") {
+        None => Ok(None),
+        Some(Positioned {
+            node: ConstValue::Number(n),
+            ..
+        }) if n.as_u64().is_some() => Ok(n.as_u64()),
+        Some(value) => Err(error(value.pos, "limit must be a non-negative integer")),
+    }
 }
 
 fn function_schema(d: &ConstDirective) -> Result<String, Error> {
@@ -207,6 +298,29 @@ fn render_field(field: &FieldDefinition) -> String {
     let mut rendered = format!("  {}{args}: {}", field.name.node, field.ty.node);
     render_directives(&mut rendered, &field.directives);
     rendered.push('\n');
+    rendered
+}
+
+fn render_rest_field(field: &FieldDefinition, rest: &crate::RestField, root: bool) -> String {
+    if !rest.filter {
+        return render_field(field);
+    }
+    let name = &field.name.node;
+    let ty = &field.ty.node;
+    let target = named(ty);
+    let arguments = args(
+        target,
+        field.arguments.iter().map(|arg| render_input(&arg.node)),
+    );
+    let mut rendered = format!("  {name}{arguments}: {ty}");
+    render_directives(&mut rendered, &field.directives);
+    rendered.push('\n');
+    if root {
+        let required = if ty.nullable { "" } else { "!" };
+        rendered.push_str(&format!(
+            "  {name}_aggregate{arguments}: {target}_aggregate{required}\n"
+        ));
+    }
     rendered
 }
 
@@ -361,7 +475,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     if json_scalar {
         rest_scalars.insert("JSON".into());
     }
-    let rest = rest::load(&query, &objects, &mapped_types, &rest_scalars, &inputs)?;
+    let mut rest = rest::load(&query, &objects, &mapped_types, &rest_scalars, &inputs)?;
     if !defs.contains_key("DateTime") && rest::uses_date_time(&query, &objects, &inputs, &rest) {
         defs.insert("DateTime".into(), "scalar DateTime\n".into());
     }
@@ -402,8 +516,11 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                         .iter()
                         .map(|f| {
                             let field = f.node.name.node.to_string();
-                            let Some(relation) = rest.relations.get(&(name.clone(), field.clone()))
-                            else {
+                            let key = (name.clone(), field.clone());
+                            if let Some(spec) = rest.fields.get(&key) {
+                                return render_rest_field(&f.node, spec, false);
+                            }
+                            let Some(relation) = rest.relations.get(&key) else {
                                 return render_field(&f.node);
                             };
                             targets.insert((name.clone(), field.clone()), relation.target.clone());
@@ -411,7 +528,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                             if !relation.list {
                                 ty.nullable = true;
                             }
-                            format!("  {field}{}: {ty}\n", args(&relation.target, &[]))
+                            format!("  {field}{}: {ty}\n", args(&relation.target, []))
                         })
                         .collect(),
                 ),
@@ -537,8 +654,8 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                     "reserved or repeated field, or explicitly declared arguments",
                 ));
             }
-            if rest.fields.contains_key(&(name.clone(), field.clone())) {
-                rendered.push_str(&render_field(&f.node));
+            if let Some(spec) = rest.fields.get(&(name.clone(), field.clone())) {
+                rendered.push_str(&render_rest_field(&f.node, spec, root));
                 continue;
             }
             let d = directives(
@@ -639,7 +756,13 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                 }
                 if root || list || aggregate.is_some() {
                     targets.insert((name.clone(), field.clone()), target.clone());
-                    rendered.push_str(&format!("  {field}{}: {ty}\n", args(&target, &declared)));
+                    rendered.push_str(&format!(
+                        "  {field}{}: {ty}\n",
+                        args(
+                            &target,
+                            declared.iter().map(|(name, ty)| format!("{name}: {ty}"))
+                        )
+                    ));
                 } else {
                     rendered.push_str(&format!("  {field}: {ty}\n"));
                 }
@@ -698,29 +821,14 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     let pos = objects[&query].pos;
     insert(&mut defs, "order_by".into(), "enum order_by { asc asc_nulls_first asc_nulls_last desc desc_nulls_first desc_nulls_last }\n".into(), pos)?;
     for scalar in &scalars {
-        let mut fields = format!("input {scalar}_comparison_exp {{\n");
-        for op in ["_eq", "_neq", "_gt", "_gte", "_lt", "_lte"] {
-            fields.push_str(&format!("  {op}: {scalar}\n"));
-        }
-        for op in ["_in", "_nin"] {
-            fields.push_str(&format!("  {op}: [{scalar}!]\n"));
-        }
-        fields.push_str("  _is_null: Boolean\n");
-        if scalar == "String" {
-            for op in ["_like", "_nlike", "_ilike", "_nilike"] {
-                fields.push_str(&format!("  {op}: String\n"));
-            }
-        }
-        fields.push_str("}\n");
-        insert(&mut defs, format!("{scalar}_comparison_exp"), fields, pos)?;
+        comparison_definition(&mut defs, scalar, pos)?;
     }
+    rest::definitions(&rest, &mut defs, &scalars, &objects)?;
     for table in &tables {
         let name = &table.name;
         let pos = objects[name].pos;
         let columns = scalar_fields.get(name).cloned().unwrap_or_default();
-        let mut boolean = format!(
-            "input {name}_bool_exp {{\n  _and: [{name}_bool_exp!]\n  _or: [{name}_bool_exp!]\n  _not: {name}_bool_exp\n"
-        );
+        let mut boolean = boolean_input(name);
         let mut order = format!("input {name}_order_by {{\n");
         for (field, scalar) in &columns {
             boolean.push_str(&format!("  {field}: {scalar}_comparison_exp\n"));
@@ -741,42 +849,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
         }
         insert(&mut defs, format!("{name}_bool_exp"), boolean, pos)?;
         insert(&mut defs, format!("{name}_order_by"), order, pos)?;
-        insert(
-            &mut defs,
-            format!("{name}_aggregate"),
-            format!(
-                "type {name}_aggregate {{\n  aggregate: {name}_aggregate_fields\n  nodes: [{name}!]!\n}}\n"
-            ),
-            pos,
-        )?;
-        let mut summary = format!("type {name}_aggregate_fields {{\n  count: Int!\n");
-        for op in ["sum", "avg", "min", "max"] {
-            let applicable: Vec<_> = columns
-                .iter()
-                .filter(|(_, s)| {
-                    if op == "sum" || op == "avg" {
-                        s == "Int" || s == "Float"
-                    } else {
-                        s != "Boolean"
-                    }
-                })
-                .collect();
-            if applicable.is_empty() {
-                continue;
-            }
-            summary.push_str(&format!("  {op}: {name}_{op}_fields\n"));
-            let mut metrics = format!("type {name}_{op}_fields {{\n");
-            for (field, scalar) in applicable {
-                metrics.push_str(&format!(
-                    "  {field}: {}\n",
-                    if op == "avg" { "Float" } else { scalar }
-                ));
-            }
-            metrics.push_str("}\n");
-            insert(&mut defs, format!("{name}_{op}_fields"), metrics, pos)?;
-        }
-        summary.push_str("}\n");
-        insert(&mut defs, format!("{name}_aggregate_fields"), summary, pos)?;
+        aggregate_definitions(&mut defs, name, &columns, pos)?;
     }
     let mut mutation_fields = String::new();
     let (mutation_roots, primary_roots) = writes::definitions(
@@ -791,13 +864,17 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             unreachable!()
         };
         for field in &object.fields {
-            if mutation_roots.contains_key(field.node.name.node.as_str()) {
+            let name = field.node.name.node.to_string();
+            let spec = &rest.fields[&("Mutation".into(), name.clone())];
+            if mutation_roots.contains_key(&name)
+                || (spec.filter && mutation_roots.contains_key(&format!("{name}_aggregate")))
+            {
                 return Err(error(
                     field.pos,
                     "generated mutation root collides with a declared field",
                 ));
             }
-            mutation_fields.push_str(&render_field(&field.node));
+            mutation_fields.push_str(&render_rest_field(&field.node, spec, true));
         }
         defs.remove("Mutation");
         mutation.pos
@@ -892,6 +969,9 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             }
             directives(std::slice::from_ref(directive), &["permission"])?;
             let d = &directive.node;
+            if let Some(value) = d.get_argument("filter") {
+                return Err(error(value.pos, "table permissions use where"));
+            }
             let role = string(d, "role")?;
             if role == "admin" || !roles.insert(role.clone()) {
                 return Err(error(
@@ -914,7 +994,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                 .get_argument("where")
                 .ok_or_else(|| error(directive.pos, "@permission requires where"))?;
             let (filter, session_types) =
-                query::permission_filter(&document, &table.name, &value.node, value.pos)?;
+                query::permission_filter(&document, &table.name, &value.node, value.pos, false)?;
             let allow_aggregations = match d.get_argument("allow_aggregations") {
                 None => false,
                 Some(Positioned {
@@ -923,16 +1003,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                 }) => *b,
                 _ => return Err(error(directive.pos, "allow_aggregations must be a boolean")),
             };
-            let limit = match d.get_argument("limit") {
-                None => None,
-                Some(Positioned {
-                    node: ConstValue::Number(n),
-                    ..
-                }) if n.as_u64().is_some() => n.as_u64(),
-                _ => {
-                    return Err(error(directive.pos, "limit must be a non-negative integer"));
-                }
-            };
+            let limit = permission_limit(d)?;
             document.session_types.extend(
                 session_types
                     .into_iter()
@@ -947,6 +1018,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             });
         }
     }
+    rest::permissions(&mut rest, &document, &objects)?;
     writes::permissions(&objects, &mut tables, &mut document)?;
     let mut schema = Schema::new(tables, roots)?;
     schema.document = Some(document);
@@ -1033,7 +1105,8 @@ pub(super) fn for_role(
             }
         }
     }
-    writes::restrict(&mut document, schema, catalog, role);
+    writes::restrict(&mut document, schema, catalog, rest, role);
+    rest::restrict(&mut document, rest, role);
     let names: BTreeSet<_> = document.types.keys().cloned().collect();
     for (name, kind) in &mut document.types {
         if let TypeKind::Object(object) = kind {
@@ -1060,7 +1133,9 @@ pub(super) fn for_role(
                     && rest
                         .fields
                         .get(&(name.clone(), f.node.name.node.to_string()))
-                        .is_none_or(|field| field.serves(role))
+                        .is_none_or(|field| {
+                            field.serves(role) && rest.type_visible(named(&field.output), role)
+                        })
                     && rest
                         .relations
                         .get(&(name.clone(), f.node.name.node.to_string()))
@@ -1072,6 +1147,15 @@ pub(super) fn for_role(
                             )
                         })
             });
+            for field in &mut object.fields {
+                if let Some(spec) = rest
+                    .fields
+                    .get(&(name.clone(), field.node.name.node.to_string()))
+                    && matches!(&spec.output.base, BaseType::Named(target) if rest.permission(target, role).is_some())
+                {
+                    field.node.ty.node.nullable = true;
+                }
+            }
         }
     }
     document.targets.retain(|(parent, field), _| matches!(document.types.get(parent), Some(TypeKind::Object(o)) if o.fields.iter().any(|f| f.node.name.node == field.as_str())));

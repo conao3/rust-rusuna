@@ -140,10 +140,66 @@ fn the_loader_rejects_invalid_rest_definitions() {
         r#"type Query { info: Row @rest(source: "api", path: "/a") } type Row @table(name: "rows") { id: Int }"#,
         r#"type Query { rows(id: Int): [Row!]! @list } type Row @table(name: "rows") { id: Int }"#,
         r#"type Query { rows: [Row!]! @list } type Row @table(name: "rows") { id: Int, ext: String @rest(source: "api", path: "/a/{{ext}}") }"#,
-        r#"type Query { info: Info @rest(source: "api", path: "/a") } type Info @permission(role: "user", where: {}, columns: ["id"]) { id: Int }"#,
         r#"type Query { info: Info @rest(source: "api", path: "/a") } type Info { ids: [Int], next: String @rest(source: "api", path: "/a/{{ids}}") }"#,
         r#"type Query { info: String @rest(source: "api", path: "/a") } type Orphan { id: Int }"#,
     ] {
         assert!(Schema::from_sdl(schema).is_err(), "{schema}");
     }
+}
+
+#[test]
+fn rest_filters_validate_directives_and_generated_names() {
+    for schema in [
+        r#"type Query { items: Item @rest(source: "api", path: "/a", filter: true) } type Item { id: Int }"#,
+        r#"type Query { items: [Item] @rest(source: "api", path: "/a", filter: 1) } type Item { id: Int }"#,
+        r#"type Query { items: [Item] @rest(source: "api", path: "/a", filter: true) items_aggregate: String @rest(source: "api", path: "/b") } type Item { id: Int }"#,
+        r#"type Query { rows: [Row!]! @list } type Row @table(name: "rows") { id: Int, items: [Item] @rest(source: "api", path: "/a", filter: true) } type Item { id: Int }"#,
+        r#"type Query { items: [Item] @rest(source: "api", path: "/a") } type Item @permission(role: "user", filter: {next: {id: {_eq: 1}}}, columns: ["id"]) { id: Int next: Item @rest(source: "api", path: "/b") }"#,
+        r#"type Query { items: [Item] @rest(source: "api", path: "/a") } type Item @permission(role: "user", filter: {}, columns: ["unknown"]) { id: Int }"#,
+        r#"type Query { items: [Item] @rest(source: "api", path: "/a") } type Item @permission(role: "user", filter: {}, columns: ["id"], limit: -1) { id: Int }"#,
+    ] {
+        assert!(Schema::from_sdl(schema).is_err(), "{schema}");
+    }
+    for name in ["where", "order_by", "limit", "offset"] {
+        let schema = format!(
+            r#"type Query {{ items({name}: Int): [Item] @rest(source: "api", path: "/a", filter: true) }} type Item {{ id: Int }}"#
+        );
+        assert!(Schema::from_sdl(&schema).is_err(), "{schema}");
+    }
+}
+
+#[test]
+fn rest_permissions_expand_role_scoped_inputs_and_aggregates() {
+    let schema = Schema::from_sdl(r#"
+        type Query {
+          items(page: Int = 1): [Item!]! @rest(source: "api", path: "/a", query: {page: "{{page}}"}, filter: true, roles: ["user", "guest"])
+          one: Item! @rest(source: "api", path: "/b", roles: ["user", "guest"])
+        }
+        type Item
+          @permission(role: "user", columns: ["id"], filter: {hidden: {_eq: "X-Hasura-User-Id"}})
+          @permission(role: "auditor", columns: ["hidden"], filter: {}) {
+          id: Int
+          hidden: Int
+        }
+    "#).unwrap();
+    let role = schema.expanded_sdl("user").unwrap();
+    assert!(role.contains("items(page: Int = 1, where: Item_bool_exp, order_by: [Item_order_by!], limit: Int, offset: Int): [Item!]!"));
+    assert!(role.contains("items_aggregate(page: Int = 1, where: Item_bool_exp, order_by: [Item_order_by!], limit: Int, offset: Int): Item_aggregate!"));
+    assert!(role.contains("one: Item @rest("));
+    assert!(!role.contains("  hidden:"));
+    let admin = schema.expanded_sdl("admin").unwrap();
+    assert!(admin.contains("one: Item! @rest("));
+    assert!(admin.contains("hidden: Int_comparison_exp"));
+    assert!(!schema.expanded_sdl("guest").unwrap().contains("items"));
+    assert_eq!(
+        schema.compile(
+            "{ items_aggregate { aggregate { count } } }",
+            &json!({}),
+            None,
+            &Session::new("user")
+        ),
+        Err(Error::RestField {
+            field: "items_aggregate".into()
+        })
+    );
 }

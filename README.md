@@ -796,6 +796,45 @@ request from its resolver, with retries disabled. A failing REST mutation rolls 
 PostgreSQL writes from the same operation. PostgreSQL commits after all resolvers finish.
 Successful REST calls take effect upstream and survive a later resolver or commit failure.
 
+Add `filter: true` to a root field or a REST-to-REST field returning a list
+of objects. Rusuna validates the HTTP response before applying `where`,
+`order_by`, `offset`, and `limit` in memory. A filtered root also emits
+`<field>_aggregate` with the same arguments, `nodes`, and
+`aggregate { count sum avg min max }`. Declared arguments can still configure
+the upstream request. The four generated argument names are reserved on
+filtered fields.
+
+```graphql
+type Query {
+  invoices: [Invoice!]!
+    @rest(source: "api", path: "/invoices", filter: true, roles: ["user"])
+}
+
+type Invoice
+  @permission(role: "user", filter: {customerId: {_eq: "X-Hasura-User-Id"}},
+              columns: ["id", "total"], limit: 100) {
+  id: ID!
+  customerId: Int! @column(name: "customer_id")
+  total: Float
+}
+```
+
+`where` uses the table comparison and boolean operators. It accepts conditions
+on embedded object fields. Sorting compares strings and enums in Unicode code
+point order, numbers as `f64`, and RFC 3339 `DateTime` values as instants.
+`_like` and `_ilike` use PostgreSQL wildcards and backslash escapes.
+`_ilike` lowercases Unicode, and ascending sort places nulls last by default.
+
+On a REST response type, `@permission` grants access to the declared role and
+exposes only its listed columns. The role's filter runs before the client's
+`where`, and the permission limit caps the result after client pagination.
+Aggregates summarize the resulting page. Permissions also apply when an
+`@rest` field returns the type without `filter: true`. A single object that
+fails the role filter resolves to null. REST permission filters accept typed
+session values with case-insensitive `X-Hasura-*` names. In the example, the
+session provides an integer under `x-hasura-user-id`. The `admin` role sees
+all columns and bypasses the permission filter and limit.
+
 A REST response object can use `@relation` to look up rows of a `@table` type.
 
 ```graphql
@@ -1492,8 +1531,8 @@ The Lean definitions and theorems are in `src/compiler.rs`. Each theorem is univ
 quantified over its Lean inputs.
 [PROOFS.md](PROOFS.md) lists the exact statements and their classification.
 The permission statements concern successful resolution with a schema and session.
-REST data sources, including role visibility, template rendering, and upstream
-execution, are outside the Lean proofs.
+REST data sources, including role visibility, row and column permissions,
+template rendering, and upstream execution, are outside the Lean proofs.
 
 Properties:
 

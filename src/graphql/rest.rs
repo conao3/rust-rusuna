@@ -1,5 +1,6 @@
 use super::schema::{directives, string, strings};
 use super::*;
+use crate::{Filter, Operand};
 use async_graphql_parser::Positioned;
 use async_graphql_value::ConstValue;
 use serde_json::Value as Json;
@@ -10,6 +11,17 @@ pub struct RestCatalog {
     pub fields: BTreeMap<(String, String), RestField>,
     pub objects: BTreeMap<String, BTreeMap<String, RestColumn>>,
     pub relations: BTreeMap<(String, String), RestRelation>,
+    pub permissions: BTreeMap<String, BTreeMap<String, RestPermission>>,
+    pub aggregate_types: BTreeSet<String>,
+    pub enums: BTreeMap<String, BTreeSet<String>>,
+    filter_types: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestPermission {
+    pub columns: BTreeSet<String>,
+    pub filter: Filter<Operand>,
+    pub limit: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +50,9 @@ pub struct RestField {
     pub roles: BTreeSet<String>,
     pub table_columns: Option<Vec<String>>,
     pub batch: Option<RestBatch>,
+    pub filter: bool,
+    pub output: Type,
+    pub aggregate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +61,22 @@ pub struct RestBatch {
     pub key: String,
     pub max_size: usize,
 }
+
+impl RestCatalog {
+    pub fn type_visible(&self, name: &str, role: &str) -> bool {
+        role == "admin"
+            || self
+                .permissions
+                .get(name)
+                .is_none_or(|roles| roles.contains_key(role))
+    }
+
+    pub fn permission(&self, name: &str, role: &str) -> Option<&RestPermission> {
+        self.permissions.get(name).and_then(|roles| roles.get(role))
+    }
+}
+
+pub(super) const FILTER_ARGUMENTS: [&str; 4] = ["where", "order_by", "limit", "offset"];
 
 impl RestField {
     pub fn serves(&self, role: &str) -> bool {
@@ -358,6 +389,29 @@ fn definition(
             .collect::<Result<_, _>>()?,
         _ => return Err(invalid("@rest result must be a list of strings")),
     };
+    let filter = match d.get_argument("filter").map(|value| &value.node) {
+        None | Some(ConstValue::Boolean(false)) => false,
+        Some(ConstValue::Boolean(true)) => {
+            if table
+                || !matches!(&field.ty.node.base, BaseType::List(inner) if matches!(inner.base, BaseType::Named(_)))
+            {
+                return Err(invalid(
+                    "@rest filter requires a list root or a REST-to-REST list field",
+                ));
+            }
+            if field
+                .arguments
+                .iter()
+                .any(|arg| FILTER_ARGUMENTS.contains(&arg.node.name.node.as_str()))
+            {
+                return Err(invalid(
+                    "declared argument collides with an @rest filter argument",
+                ));
+            }
+            true
+        }
+        _ => return Err(invalid("@rest filter must be a boolean")),
+    };
     Ok(RestField {
         source: string(d, "source")?,
         method,
@@ -368,6 +422,9 @@ fn definition(
         not_found_null,
         table_columns: table.then(|| columns.into_iter().collect()),
         batch,
+        filter,
+        output: field.ty.node.clone(),
+        aggregate: false,
         roles: if d.get_argument("roles").is_some() {
             strings(d, "roles")?.into_iter().collect()
         } else {
@@ -458,7 +515,12 @@ pub(super) fn load(
         let fields = fields(&t.node);
         let table = tables.contains(owner);
         if !root && !table {
-            directives(&t.node.directives, &[])?;
+            for directive in &t.node.directives {
+                directives(std::slice::from_ref(directive), &["permission"])?;
+            }
+            if !t.node.directives.is_empty() {
+                catalog.filter_types.insert(owner.into());
+            }
             if fields.is_empty() {
                 return Err(error(t.pos, "object types require fields"));
             }
@@ -546,6 +608,32 @@ pub(super) fn load(
                     mutation,
                     table,
                 )?;
+                if spec.filter {
+                    if !objects_reached.contains(target) {
+                        return Err(error(f.pos, "@rest filter requires a list of REST objects"));
+                    }
+                    catalog.filter_types.insert(target.into());
+                    if root {
+                        let aggregate_name = format!("{name}_aggregate");
+                        if fields
+                            .iter()
+                            .any(|field| field.node.name.node == aggregate_name.as_str())
+                        {
+                            return Err(error(
+                                f.pos,
+                                "generated REST aggregate root collides with a declared field",
+                            ));
+                        }
+                        catalog.aggregate_types.insert(target.into());
+                        catalog.fields.insert(
+                            (owner.into(), aggregate_name),
+                            RestField {
+                                aggregate: true,
+                                ..spec.clone()
+                            },
+                        );
+                    }
+                }
                 catalog.fields.insert((owner.into(), name.into()), spec);
             } else {
                 if !f.node.arguments.is_empty() {
@@ -591,6 +679,10 @@ pub(super) fn load(
                 if names.is_empty() {
                     return Err(error(t.pos, "enum types require values"));
                 }
+                catalog.enums.insert(
+                    t.node.name.node.to_string(),
+                    names.into_iter().map(str::to_owned).collect(),
+                );
             }
             TypeKind::InputObject(input) => {
                 if input.fields.is_empty() {
@@ -601,7 +693,175 @@ pub(super) fn load(
             _ => unreachable!(),
         }
     }
+    let mut pending: Vec<_> = catalog.filter_types.iter().cloned().collect();
+    while let Some(name) = pending.pop() {
+        for column in catalog.objects[&name].values() {
+            let BaseType::Named(ty) = &column.ty.base else {
+                continue;
+            };
+            if catalog.objects.contains_key(ty.as_str())
+                && catalog.filter_types.insert(ty.to_string())
+            {
+                pending.push(ty.to_string());
+            }
+        }
+    }
     Ok(catalog)
+}
+
+pub(super) fn definitions(
+    catalog: &RestCatalog,
+    defs: &mut BTreeMap<String, String>,
+    table_scalars: &BTreeSet<String>,
+    objects: &BTreeMap<String, Positioned<TypeDefinition>>,
+) -> Result<(), Error> {
+    let mut comparisons = BTreeSet::new();
+    for name in &catalog.filter_types {
+        let pos = objects[name].pos;
+        let mut boolean = schema::boolean_input(name);
+        let mut order = format!("input {name}_order_by {{\n");
+        let mut columns = Vec::new();
+        for (field, column) in &catalog.objects[name] {
+            let BaseType::Named(ty) = &column.ty.base else {
+                continue;
+            };
+            if ty == "JSON" {
+                continue;
+            }
+            if ["_and", "_or", "_not"].contains(&field.as_str()) {
+                return Err(error(pos, format!("reserved filter field {name}.{field}")));
+            }
+            if catalog.objects.contains_key(ty.as_str()) {
+                boolean.push_str(&format!("  {field}: {ty}_bool_exp\n"));
+            } else {
+                boolean.push_str(&format!("  {field}: {ty}_comparison_exp\n"));
+                order.push_str(&format!("  {field}: order_by\n"));
+                columns.push((field.clone(), ty.to_string()));
+                if !table_scalars.contains(ty.as_str()) && comparisons.insert(ty.clone()) {
+                    schema::comparison_definition(defs, ty, pos)?;
+                }
+            }
+        }
+        boolean.push_str("}\n");
+        schema::insert(defs, format!("{name}_bool_exp"), boolean, pos)?;
+        if catalog
+            .fields
+            .values()
+            .any(|f| f.filter && named(&f.output) == name)
+        {
+            order.push_str("}\n");
+            schema::insert(defs, format!("{name}_order_by"), order, pos)?;
+        }
+        if catalog.aggregate_types.contains(name) {
+            schema::aggregate_definitions(defs, name, &columns, pos)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn permissions(
+    catalog: &mut RestCatalog,
+    document: &DocumentSchema,
+    objects: &BTreeMap<String, Positioned<TypeDefinition>>,
+) -> Result<(), Error> {
+    for name in catalog.objects.keys() {
+        for directive in &objects[name].node.directives {
+            let d = &directive.node;
+            let role = string(d, "role")?;
+            if role == "admin" || catalog.permission(name, &role).is_some() {
+                return Err(error(
+                    directive.pos,
+                    "permission roles must be distinct and cannot be admin",
+                ));
+            }
+            if d.get_argument("where").is_some() || d.get_argument("allow_aggregations").is_some() {
+                return Err(error(
+                    directive.pos,
+                    "REST permissions use filter, columns and limit",
+                ));
+            }
+            let columns = strings(d, "columns")?;
+            let declared = fields(&objects[name].node);
+            let unique: BTreeSet<_> = columns.iter().cloned().collect();
+            if unique.len() != columns.len()
+                || columns
+                    .iter()
+                    .any(|f| !declared.iter().any(|d| d.node.name.node == f.as_str()))
+            {
+                return Err(error(
+                    directive.pos,
+                    "permission columns must be distinct REST field names",
+                ));
+            }
+            let value = d
+                .get_argument("filter")
+                .ok_or_else(|| error(directive.pos, "@permission requires filter"))?;
+            let (filter, _) =
+                query::permission_filter(document, name, &value.node, value.pos, true)?;
+            catalog.permissions.entry(name.clone()).or_default().insert(
+                role,
+                RestPermission {
+                    columns: unique,
+                    filter,
+                    limit: schema::permission_limit(d)?,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn restrict(document: &mut DocumentSchema, catalog: &RestCatalog, role: &str) {
+    let denied: BTreeSet<_> = catalog
+        .objects
+        .keys()
+        .filter(|name| !catalog.type_visible(name, role))
+        .cloned()
+        .collect();
+    for name in catalog.objects.keys() {
+        if denied.contains(name) {
+            document.types.remove(name);
+        } else if let Some(permission) = catalog.permission(name, role)
+            && let Some(TypeKind::Object(object)) = document.types.get_mut(name)
+        {
+            object
+                .fields
+                .retain(|field| permission.columns.contains(field.node.name.node.as_str()));
+        }
+        for suffix in [
+            "_bool_exp",
+            "_order_by",
+            "_sum_fields",
+            "_avg_fields",
+            "_min_fields",
+            "_max_fields",
+        ] {
+            if !catalog.filter_types.contains(name) {
+                break;
+            }
+            let fields = document.types.get_mut(&format!("{name}{suffix}"));
+            let visible = |field: &str| {
+                catalog
+                    .permission(name, role)
+                    .is_none_or(|permission| permission.columns.contains(field))
+            };
+            match fields {
+                Some(TypeKind::InputObject(input)) => input.fields.retain(|field| {
+                    let field = field.node.name.node.as_str();
+                    (suffix == "_bool_exp" && ["_and", "_or", "_not"].contains(&field))
+                        || (!denied.contains(name)
+                            && visible(field)
+                            && catalog.objects[name]
+                                .get(field)
+                                .is_none_or(|column| !denied.contains(named(&column.ty))))
+                }),
+                Some(TypeKind::Object(object)) => object
+                    .fields
+                    .retain(|field| visible(field.node.name.node.as_str())),
+                _ => {}
+            }
+        }
+    }
 }
 
 pub(super) fn uses_date_time(

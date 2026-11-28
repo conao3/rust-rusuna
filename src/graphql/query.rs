@@ -27,6 +27,29 @@ fn compatible(actual: &Type, expected: &Type) -> bool {
         }
 }
 
+#[derive(Clone, Copy)]
+enum SessionSyntax {
+    None,
+    Dollar,
+    Hasura,
+}
+
+impl SessionSyntax {
+    fn accepts(self, value: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::Dollar => value.starts_with('$'),
+            Self::Hasura => value.starts_with('$') || hasura_session_name(value),
+        }
+    }
+}
+
+fn hasura_session_name(value: &str) -> bool {
+    value
+        .get(..9)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("x-hasura-"))
+}
+
 fn coerce_input(
     schema: &DocumentSchema,
     value: C,
@@ -34,7 +57,7 @@ fn coerce_input(
     json: bool,
     pos: Pos,
     depth: usize,
-    permission: bool,
+    permission: SessionSyntax,
 ) -> Result<C, Error> {
     if depth > MAX_DOCUMENT_DEPTH {
         return Err(error(pos, "input nesting limit exceeded"));
@@ -60,6 +83,9 @@ fn coerce_input(
     }
     let name = named(ty);
     match schema.types.get(name) {
+        Some(TypeKind::Scalar | TypeKind::Enum(_)) if matches!(&value, C::String(s) if permission.accepts(s)) => {
+            Ok(value)
+        }
         Some(TypeKind::InputObject(object)) => {
             let C::Object(values) = value else {
                 return Err(error(pos, format!("expected {ty} object")));
@@ -110,9 +136,6 @@ fn coerce_input(
             }
         }
         Some(TypeKind::Scalar) => {
-            if permission && matches!(&value, C::String(s) if s.starts_with('$')) {
-                return Ok(value);
-            }
             let valid = match (name, &value) {
                 ("Int", C::Number(n)) => n.as_i64().is_some_and(|n| i32::try_from(n).is_ok()),
                 ("Float", C::Number(n)) => n.as_f64().is_some_and(f64::is_finite),
@@ -141,7 +164,7 @@ pub(super) fn coerce(
     pos: Pos,
     depth: usize,
 ) -> Result<C, Error> {
-    coerce_input(schema, value, ty, json, pos, depth, false)
+    coerce_input(schema, value, ty, json, pos, depth, SessionSyntax::None)
 }
 
 impl Context<'_> {
@@ -559,6 +582,7 @@ pub(super) fn scalar(value: &C, ty: &str, pos: Pos) -> Result<Value, Error> {
         }
         C::Number(v) => Value::Int(v.as_i64().ok_or_else(|| error(pos, "invalid integer"))?),
         C::String(v) => Value::Text(v.clone()),
+        C::Enum(v) => Value::Text(v.to_string()),
         C::Boolean(v) => Value::Bool(*v),
         C::Null => Value::Null,
         _ => return Err(error(pos, "expected a scalar value")),
@@ -691,9 +715,15 @@ pub(super) fn permission_filter(
     target: &str,
     value: &C,
     pos: Pos,
+    rest: bool,
 ) -> Result<PermissionFilter, Error> {
     let ty = Type::new(&format!("{target}_bool_exp!")).unwrap();
-    let value = coerce_input(schema, value.clone(), &ty, false, pos, 0, true)?;
+    let syntax = if rest {
+        SessionSyntax::Hasura
+    } else {
+        SessionSyntax::Dollar
+    };
+    let value = coerce_input(schema, value.clone(), &ty, false, pos, 0, syntax)?;
     let mut types = Vec::new();
     let filter = filter(schema, target, &value, pos, 0, &mut |value, ty, pos| {
         if let C::String(text) = value
@@ -712,6 +742,19 @@ pub(super) fn permission_filter(
             }
             types.push((name.to_string(), ty.to_string()));
             return Ok(crate::Operand::Session(name.to_string()));
+        }
+        if rest
+            && let C::String(name) = value
+            && hasura_session_name(name)
+        {
+            if name.len() == 9
+                || !name[9..]
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            {
+                return Err(error(pos, "invalid X-Hasura session variable name"));
+            }
+            return Ok(crate::Operand::Session(name.to_ascii_lowercase()));
         }
         scalar(value, ty, pos).map(crate::Operand::Literal)
     })?;
@@ -782,6 +825,36 @@ fn order(value: &C, pos: Pos) -> Result<Vec<Order>, Error> {
         }
     }
     Ok(out)
+}
+
+pub(super) fn rest_selection<'a>(
+    schema: &DocumentSchema,
+    target: &str,
+    arguments: impl IntoIterator<Item = (&'a str, C)>,
+) -> Result<Selection, Error> {
+    let pos = Pos::default();
+    let mut selection = Selection::new(target);
+    for (name, value) in arguments {
+        if value == C::Null || !rest::FILTER_ARGUMENTS.contains(&name) {
+            continue;
+        }
+        match name {
+            "where" => {
+                let ty = Type::new(&format!("{target}_bool_exp")).unwrap();
+                let value = coerce(schema, value, &ty, true, pos, 0)?;
+                selection.filter = Some(filter(schema, target, &value, pos, 0, &mut scalar)?);
+            }
+            "order_by" => {
+                let ty = Type::new(&format!("[{target}_order_by!]")).unwrap();
+                let value = coerce(schema, value, &ty, true, pos, 0)?;
+                selection.order_by = order(&value, pos)?;
+            }
+            "limit" => selection.limit = Some(unsigned(&value, pos)?),
+            "offset" => selection.offset = Some(unsigned(&value, pos)?),
+            _ => unreachable!(),
+        }
+    }
+    Ok(selection)
 }
 
 pub(super) fn parse(

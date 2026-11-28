@@ -230,7 +230,7 @@ pub(super) fn permissions(
                         };
                     };
                     let (filter, types) =
-                        query::permission_filter(document, &table.name, &v.node, v.pos)?;
+                        query::permission_filter(document, &table.name, &v.node, v.pos, false)?;
                     document
                         .session_types
                         .extend(types.into_iter().map(|(name, ty)| (role.clone(), name, ty)));
@@ -271,6 +271,7 @@ pub(super) fn restrict(
     document: &mut DocumentSchema,
     schema: &crate::compiler::model::Schema,
     catalog: &crate::compiler::model::WriteCatalog,
+    rest: &crate::RestCatalog,
     role: &str,
 ) {
     use crate::compiler::model;
@@ -305,7 +306,8 @@ pub(super) fn restrict(
         });
     if let Some(TypeKind::Object(object)) = document.types.get_mut("Mutation") {
         object.fields.retain(|f| {
-            rest::has_rest(&f.node)
+            rest.fields
+                .contains_key(&("Mutation".into(), f.node.name.node.to_string()))
                 || document
                     .mutation_roots
                     .contains_key(f.node.name.node.as_str())

@@ -14,6 +14,7 @@ use std::sync::Mutex as SyncMutex;
 use std::time::Duration;
 use tokio::sync::{OnceCell, Semaphore};
 
+mod filter;
 mod relation;
 mod table;
 
@@ -691,22 +692,10 @@ impl RestRuntime {
         if schema.rest_catalog().fields.is_empty() {
             return Ok(runtime);
         }
+        runtime.enums.clone_from(&schema.rest_catalog().enums);
         for (name, kind) in types {
-            match kind {
-                TypeKind::InputObject(input) => {
-                    runtime.inputs.insert(name.clone(), input.clone());
-                }
-                TypeKind::Enum(values) => {
-                    runtime.enums.insert(
-                        name.clone(),
-                        values
-                            .values
-                            .iter()
-                            .map(|value| value.node.value.node.to_string())
-                            .collect(),
-                    );
-                }
-                _ => {}
+            if let TypeKind::InputObject(input) = kind {
+                runtime.inputs.insert(name.clone(), input.clone());
             }
         }
         Ok(runtime)
@@ -726,7 +715,7 @@ impl RestRuntime {
             .get(&(owner.into(), name.clone()))
             .map(|relation| relation.list);
         if call.is_none() && key.is_none() && relation.is_none() {
-            return None;
+            return filter::aggregate_field(shared, owner, definition);
         }
         let table = call.is_some_and(|call| call.table_columns.is_some());
         let mutation = call.is_some_and(|call| call.method != RestMethod::Get);
@@ -775,10 +764,21 @@ impl RestRuntime {
                         .unwrap_or_else(|| Err(unexpected()));
                     match outcome {
                         Ok(Some(value)) => {
-                            shared
-                                .rest
-                                .complete(&shared, &ctx, &spec.ty.node, &value, None)
-                                .await
+                            async {
+                                let call = &shared.schema.rest_catalog().fields
+                                    [&(owner, spec.name.node.to_string())];
+                                let plan = filter::Plan::new(
+                                    &shared,
+                                    &ctx,
+                                    call,
+                                    session(&shared, &ctx)?,
+                                )?;
+                                shared
+                                    .rest
+                                    .complete_call(&shared, &ctx, plan, &value, None)
+                                    .await
+                            }
+                            .await
                         }
                         Ok(None) => empty_value(&spec.ty.node),
                         Err(error) => Err(error),
@@ -830,6 +830,7 @@ impl RestRuntime {
         let field = &catalog.fields[&(owner.into(), definition.name.node.to_string())];
         let source = &self.sources[&field.source];
         let session = session(shared, ctx)?;
+        let plan = filter::Plan::new(shared, ctx, field, session)?;
         let omitted = |syntax: Option<&InputSyntax>| {
             matches!(syntax, Some(InputSyntax::Variable(name)) if !state.provided_variables.contains(name)
                 && ctx.query_env.operation.node.variable_definitions.iter().any(|definition|
@@ -884,6 +885,13 @@ impl RestRuntime {
                 None => definition
                     .arguments
                     .iter()
+                    .filter(|arg| {
+                        !field.filter
+                            || !matches!(
+                                arg.node.name.node.as_str(),
+                                "where" | "order_by" | "limit" | "offset"
+                            )
+                    })
                     .filter_map(|argument| {
                         argument_value(&argument.node).transpose().map(|value| {
                             value.map(|value| (input_key(&argument.node).to_owned(), value))
@@ -908,11 +916,79 @@ impl RestRuntime {
         let ty = &definition.ty.node;
         match response_json(source, field, response)? {
             Some(value) => {
-                self.complete(shared, ctx, ty, value, transaction_state)
+                self.complete_call(shared, ctx, plan, value, transaction_state)
                     .await
             }
             None => empty_value(ty),
         }
+    }
+
+    async fn complete_call(
+        &self,
+        shared: &Shared,
+        ctx: &ResolverContext<'_>,
+        plan: filter::Plan<'_>,
+        value: &Json,
+        transaction_state: Option<&mut State>,
+    ) -> async_graphql::Result<Option<FieldValue<'static>>> {
+        let ty = &plan.field.output;
+        if !plan.active() {
+            return self
+                .complete(shared, ctx, ty, value, transaction_state)
+                .await;
+        }
+        self.validate_response(shared.schema.rest_catalog(), ty, value)?;
+        let value = plan.apply(value.clone(), ty);
+        if value.is_null() {
+            return Ok(None);
+        }
+        if plan.field.aggregate {
+            return Ok(Some(FieldValue::owned_any(Arc::new(value))));
+        }
+        self.complete(shared, ctx, ty, &value, transaction_state)
+            .await
+    }
+
+    fn validate_response(
+        &self,
+        catalog: &rusuna::RestCatalog,
+        ty: &Type,
+        value: &Json,
+    ) -> async_graphql::Result<()> {
+        if value.is_null() {
+            return if ty.nullable {
+                Ok(())
+            } else {
+                Err(unexpected())
+            };
+        }
+        match &ty.base {
+            BaseType::List(item) => {
+                for value in value.as_array().ok_or_else(unexpected)? {
+                    self.validate_response(catalog, item, value)?;
+                }
+            }
+            BaseType::Named(name) => {
+                if let Some(columns) = catalog.objects.get(name.as_str()) {
+                    let row = value.as_object().ok_or_else(unexpected)?;
+                    for column in columns.values() {
+                        self.validate_response(
+                            catalog,
+                            &column.ty,
+                            row.get(&column.key).unwrap_or(&Json::Null),
+                        )?;
+                    }
+                } else if name == "DateTime" {
+                    value
+                        .as_str()
+                        .and_then(filter::date_time)
+                        .ok_or_else(unexpected)?;
+                } else if name != "JSON" && self.scalar(name, value).is_none() {
+                    return Err(unexpected());
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn complete(

@@ -28,8 +28,8 @@ mod statement;
 pub use mutation::*;
 
 pub use graphql::rest::{
-    BodyTemplate, RestBatch, RestCatalog, RestColumn, RestField, RestMethod, RestRelation,
-    Template, TemplatePart,
+    BodyTemplate, RestBatch, RestCatalog, RestColumn, RestField, RestMethod, RestPermission,
+    RestRelation, Template, TemplatePart,
 };
 pub use graphql::{CompiledField, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_DEPTH, RestRelationQuery};
 
@@ -765,6 +765,12 @@ impl Schema {
         let mut roles: Vec<String> = std::iter::once("admin".to_string())
             .chain(self.model.permissions.iter().map(|p| p.role.clone()))
             .chain(self.writes.permissions.iter().map(|p| p.role.clone()))
+            .chain(
+                self.rest
+                    .permissions
+                    .values()
+                    .flat_map(|roles| roles.keys().cloned()),
+            )
             .chain(
                 self.rest
                     .fields

@@ -105,6 +105,14 @@ impl Schema {
             .collect()
     }
 
+    pub fn rest_selection<'a>(
+        &self,
+        target: &str,
+        arguments: impl IntoIterator<Item = (&'a str, async_graphql_value::ConstValue)>,
+    ) -> Result<Selection, Error> {
+        query::rest_selection(self.document()?, target, arguments)
+    }
+
     pub fn rest_relation_query(
         &self,
         parent: &str,
