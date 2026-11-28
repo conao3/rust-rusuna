@@ -1,0 +1,16 @@
+type Query {
+  list_pets(limit: Int): [Pet!]! @rest(source: "petstore", path: "/pets", query: {limit: "{{limit}}"})
+  show_pet_by_id(petId: String!): Pet! @rest(source: "petstore", path: "/pets/{{petId}}")
+}
+
+type Mutation {
+  create_pets(id: Int!, name: String!, tag: String): JSON @rest(source: "petstore", path: "/pets", method: POST)
+}
+
+scalar JSON
+
+type Pet {
+  id: Int!
+  name: String!
+  tag: String
+}

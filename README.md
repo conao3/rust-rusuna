@@ -788,6 +788,8 @@ Declare REST mutation fields on `type Mutation`. The `body` directive argument i
 object template. A whole string such as `"{{input}}"` or `"{{$user_id}}"` inserts the typed
 argument or session value, including objects and nulls. Other strings are sent verbatim.
 With no template, the body contains the supplied field arguments and defaults, including explicit nulls.
+Use `@column(name: "wire-key")` on an argument or input field to preserve its original
+REST key. A matching key in the `query` template uses the same alias.
 
 Mutation root fields run one at a time in document order. Each REST mutation sends one
 request from its resolver, with retries disabled. A failing REST mutation rolls back
@@ -1358,6 +1360,7 @@ Ctrl-C stops the server, then the worker after its deliveries in progress.
 ## CLI
 
 ```sh
+nix run . -- schema import-openapi crates/rusuna-cli/tests/fixtures/openapi/petstore.yaml --source petstore --role reader
 nix run . -- schema expand-sdl --role admin --schema file://tests/fixtures/schema.graphql --output text
 nix run . -- query compile-sql --role admin --schema file://tests/fixtures/schema.graphql --query file://tests/fixtures/queries/a.graphql
 nix run . -- query compile-sql --role user --session '{"user_id":3}' --schema file://tests/fixtures/permissions.graphql --query '{ article { id } }'
@@ -1374,6 +1377,14 @@ JSON keys are `Sdl`, `Sql` (the migration), or `Fields` containing `ResponseKey`
 expansion and the migration are raw text; query text is tab-separated and table output adds column names.
 Exit codes are 0 for success, 252 for command syntax or parameter errors, 254 for SDL or
 query errors, and 255 for other failures. Diagnostics go to stderr.
+
+`schema import-openapi <path> --source <name>` reads an OpenAPI 3.0 or 3.1 document
+in JSON or YAML and prints raw mapping SDL. Use repeated `--role` flags to grant
+access to roles in addition to `admin` and repeated `--include-tag` flags to keep
+operations with any of those tags. Configure a `RestSource` with the same name and
+the base URL when building the GraphQL schema. The SDL begins with a list of
+skipped operations and parameters when applicable. Import errors exit with code 2.
+The Petstore fixture comes from the [OpenAPI Initiative's Petstore example](https://github.com/OAI/OpenAPI-Specification/blob/main/_archive_/schemas/v3.0/pass/petstore.yaml).
 
 ## Schema and selection values
 

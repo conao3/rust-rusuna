@@ -98,6 +98,7 @@ fn all_help_levels_and_version_succeed() {
         vec!["help"],
         vec!["schema", "help"],
         vec!["schema", "expand-sdl", "help"],
+        vec!["schema", "import-openapi", "help"],
         vec!["query", "compile-sql", "help"],
         vec!["events", "help"],
         vec!["events", "generate-migration", "help"],
@@ -275,5 +276,76 @@ fn event_trigger_errors_have_distinct_exit_codes() {
         assert_eq!(result.status.code(), Some(254), "{triggers}");
         let error: serde_json::Value = serde_json::from_slice(&result.stderr).unwrap();
         assert!(error["Error"].is_string());
+    }
+}
+
+fn import_openapi(file: &str, source: &str, options: &[&str]) -> Output {
+    let path = format!(
+        "{}/tests/fixtures/openapi/{file}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut args = vec!["schema", "import-openapi", &path, "--source", source];
+    args.extend(options);
+    run(&args)
+}
+
+#[test]
+fn openapi_imports_match_the_committed_sdl() {
+    for (file, source, roles, expected) in [
+        (
+            "petstore.yaml",
+            "petstore",
+            &[][..],
+            include_str!("fixtures/openapi/petstore.graphql"),
+        ),
+        (
+            "inventory.json",
+            "inventory",
+            &["--role", "user", "--role", "viewer"],
+            include_str!("fixtures/openapi/inventory.graphql"),
+        ),
+    ] {
+        let result = import_openapi(file, source, roles);
+        assert!(result.status.success(), "{file}: {:?}", result.stderr);
+        assert_eq!(std::str::from_utf8(&result.stdout).unwrap(), expected);
+        assert!(result.stderr.is_empty());
+        rusuna::Schema::from_sdl(expected).unwrap();
+    }
+}
+
+#[test]
+fn openapi_import_keeps_operations_with_any_requested_tag() {
+    let result = import_openapi(
+        "inventory.json",
+        "inventory",
+        &["--include-tag", "write", "--include-tag", "devices"],
+    );
+    assert!(result.status.success(), "{:?}", result.stderr);
+    let sdl = std::str::from_utf8(&result.stdout).unwrap();
+    assert!(sdl.contains("get_devices_by_device_id"));
+    assert!(sdl.contains("record_inventory"));
+    assert!(!sdl.contains("load_inventory"));
+    assert!(!sdl.contains("Skipped HEAD"));
+    assert!(!sdl.contains("LoadInventoryResponse"));
+
+    let result = import_openapi("inventory.json", "inventory", &["--include-tag", "write"]);
+    assert!(result.status.success(), "{:?}", result.stderr);
+    let sdl = std::str::from_utf8(&result.stdout).unwrap();
+    assert!(sdl.contains("type Query\n"));
+    assert!(sdl.contains("input DetailsInput"));
+    assert!(!sdl.contains("type Details "));
+}
+
+#[test]
+fn openapi_import_errors_leave_stdout_empty() {
+    for (file, expected) in [
+        ("external.json", "external reference"),
+        ("invalid-sdl.yaml", "invalid generated SDL"),
+    ] {
+        let result = import_openapi(file, "test", &[]);
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+        let error = std::str::from_utf8(&result.stderr).unwrap();
+        assert!(error.contains(expected), "{file}: {error}");
     }
 }

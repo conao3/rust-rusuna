@@ -25,7 +25,7 @@ Release; don't push release tags by hand.
 - `src/graphql.rs` and `src/graphql/`: SDL loading, deterministic expansion, typed GraphQL
   parsing with async-graphql-parser 7 and conversion to `Selection`.
 - `crates/rusuna-cli/`: the clap CLI `rusuna` (not published): `schema expand-sdl`,
-  `query compile-sql` and `events generate-migration`.
+  `schema import-openapi`, `query compile-sql` and `events generate-migration`.
 - `crates/rusuna-sqlx/`: `fetch` and `execute` with sqlx 0.9. Parameters are encoded
   for the types PostgreSQL infers when sqlx prepares the statement. `src/subscription.rs`
   holds `Multiplexed`, the statement that runs one compiled statement for many parameter

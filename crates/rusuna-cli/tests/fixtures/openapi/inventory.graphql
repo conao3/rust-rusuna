@@ -1,0 +1,60 @@
+# Skipped GET /echo cookie parameter "tracking"
+# Skipped GET /echo header parameter "X-Api-Version"
+# Skipped HEAD /echo: unsupported HTTP method
+# Skipped POST /raw: request body must be an application/json object
+# Skipped PATCH /overlap: request body property "label" overlaps a path or query parameter
+
+type Query {
+  load_inventory(id: [Int!], view_mode: String @column(name: "view-mode")): LoadInventoryResponse! @rest(source: "inventory", path: "/echo", query: {id: "{{id}}", view_mode: "{{view_mode}}"}, roles: ["user", "viewer"])
+  load_inventory_2: Inventory @rest(source: "inventory", path: "/typed", not_found: null, roles: ["user", "viewer"])
+  get_devices_by_device_id(device_id: Int!): GetDevicesByDeviceIdResponse! @rest(source: "inventory", path: "/devices/{{device_id}}", roles: ["user", "viewer"])
+}
+
+type Mutation {
+  record_inventory(input: DetailsInput!, note: String, external_id: String! @column(name: "external-id")): Boolean! @rest(source: "inventory", path: "/write", method: POST, roles: ["user", "viewer"])
+  delete_empty: Boolean! @rest(source: "inventory", path: "/empty", method: DELETE, roles: ["user", "viewer"])
+}
+
+scalar JSON
+
+scalar DateTime
+
+type LoadInventoryResponse {
+  query: String
+}
+
+enum Status {
+  draft
+  paid
+}
+
+type Details {
+  count: Int!
+  status: Status
+  is_active: Boolean @column(name: "is-active")
+}
+
+type Inventory {
+  label: String!
+  date: DateTime
+  status: Status
+  meta_2: JSON @column(name: "@meta")
+  meta: JSON
+  details: Details
+  smallFloat: Float
+  stopped: Boolean
+  legacy: String
+  variants: JSON
+  selection: JSON
+  previous: Inventory
+}
+
+input DetailsInput {
+  count: Int!
+  status: Status
+  is_active: Boolean @column(name: "is-active")
+}
+
+type GetDevicesByDeviceIdResponse {
+  data: [Inventory!]!
+}

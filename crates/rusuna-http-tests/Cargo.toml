@@ -14,6 +14,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 rusuna = { workspace = true }
 rusuna-async-graphql = { workspace = true }
 rusuna-axum = { workspace = true }
+rusuna-cli = { path = "../rusuna-cli" }
 rusuna-sqlx = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }

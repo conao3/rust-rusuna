@@ -745,6 +745,52 @@ async fn rest_mutations_send_json_in_document_order_without_deduplication() {
 }
 
 #[tokio::test]
+async fn imported_openapi_schema_executes_get_and_post() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rusuna-cli/tests/fixtures/openapi/inventory.json");
+    let sdl =
+        rusuna_cli::import_openapi(&path, "inventory", &["user".into()], &["read".into()]).unwrap();
+    let (base, observed) = server().await;
+    let schema = role_schema(&sdl, "user", &[config("inventory", &base)]);
+    let response = execute(
+        &schema,
+        "{ load_inventory(id: [7, 9], view_mode: \"full\") { query } load_inventory_2 { label date status meta_2 } }",
+        rusuna::Session::new("user"),
+    )
+    .await;
+    assert_eq!(
+        response,
+        json!({"data": {
+            "load_inventory": {"query": "id=7&id=9&view-mode=full"},
+            "load_inventory_2": {
+                "label": "kept",
+                "date": "2026-11-28T00:00:00Z",
+                "status": "draft",
+                "meta_2": {"arbitrary": [null, true]}
+            }
+        }})
+    );
+    let sdl = rusuna_cli::import_openapi(&path, "inventory", &["user".into()], &["write".into()])
+        .unwrap();
+    let schema = role_schema(&sdl, "user", &[config("inventory", &base)]);
+    let response = execute(
+        &schema,
+        "mutation { record_inventory(input: {count: 3, status: paid, is_active: true}, external_id: \"A7\", note: null) }",
+        rusuna::Session::new("user"),
+    )
+    .await;
+    assert_eq!(response, json!({"data": {"record_inventory": true}}));
+    assert_eq!(
+        observed.lock().unwrap().writes,
+        [(
+            Method::POST,
+            "/write".into(),
+            json!({"input": {"count": 3, "status": "paid", "is-active": true}, "external-id": "A7", "note": null})
+        )]
+    );
+}
+
+#[tokio::test]
 async fn a_failed_rest_mutation_rolls_back_postgres_and_skips_later_fields() {
     let (base, observed) = server().await;
     let pool = database("http_rest_mutation", &[]).await;

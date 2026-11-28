@@ -470,6 +470,21 @@ impl Builder {
                 _ => {}
             }
         }
+        if roots.is_empty()
+            && attached.query.is_empty()
+            && shared
+                .schema
+                .rest_catalog()
+                .fields
+                .iter()
+                .any(|((owner, _), field)| owner == &mutation_name && field.serves(&shared.role))
+        {
+            query = query.field(Field::new(
+                "_empty",
+                TypeRef::named_nn(TypeRef::BOOLEAN),
+                |_| FieldFuture::Value(Some(FieldValue::value(true))),
+            ));
+        }
         for field in attached.query {
             query = query.field(field);
         }

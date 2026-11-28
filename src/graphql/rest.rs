@@ -265,10 +265,17 @@ fn definition(
                     let ConstValue::String(template) = value else {
                         return Err(invalid("@rest query values must be template strings"));
                     };
-                    Ok((
-                        name.to_string(),
-                        Template::parse(template).map_err(invalid)?,
-                    ))
+                    let key = field
+                        .arguments
+                        .iter()
+                        .find(|argument| argument.node.name.node == *name)
+                        .and_then(|argument| column_key(&argument.node.directives))
+                        .and_then(|value| match &value.node {
+                            ConstValue::String(key) => Some(key.as_str()),
+                            _ => None,
+                        })
+                        .unwrap_or(name.as_str());
+                    Ok((key.to_owned(), Template::parse(template).map_err(invalid)?))
                 })
                 .collect::<Result<_, _>>()?,
             _ => return Err(invalid("@rest query must be an object")),
@@ -531,7 +538,7 @@ pub(super) fn load(
                 if d.contains_key("column") {
                     return Err(error(f.pos, "@rest and @column apply to different fields"));
                 }
-                let args = validate_inputs(&f.node.arguments, &input_type)?;
+                let args = validate_inputs(&f.node.arguments, &input_type, root)?;
                 let spec = definition(
                     directive,
                     &f.node,
@@ -589,7 +596,7 @@ pub(super) fn load(
                 if input.fields.is_empty() {
                     return Err(error(t.pos, "input types require fields"));
                 }
-                validate_inputs(&input.fields, &input_type)?;
+                validate_inputs(&input.fields, &input_type, true)?;
             }
             _ => unreachable!(),
         }
@@ -689,20 +696,43 @@ pub(super) fn reject_operation(
     Ok(())
 }
 
+fn column_key(values: &[Positioned<ConstDirective>]) -> Option<&Positioned<ConstValue>> {
+    values
+        .iter()
+        .find(|directive| directive.node.name.node == "column")
+        .and_then(|directive| directive.node.get_argument("name"))
+}
+
 fn validate_inputs<'a>(
     fields: &'a [Positioned<InputValueDefinition>],
     input_type: &impl Fn(&str) -> bool,
+    allow_column: bool,
 ) -> Result<BTreeSet<&'a str>, Error> {
     let mut names = BTreeSet::new();
+    let mut keys = BTreeSet::new();
     for field in fields {
         let name = field.node.name.node.as_str();
-        directives(&field.node.directives, &[])?;
+        let allowed: &[_] = if allow_column { &["column"] } else { &[] };
+        let directives = directives(&field.node.directives, allowed)?;
         if name.starts_with("__") || !names.insert(name) || !input_type(named(&field.node.ty.node))
         {
             return Err(error(
                 field.pos,
                 "reserved or repeated name or invalid input type",
             ));
+        }
+        let key = match column_key(&field.node.directives) {
+            Some(value) => match &value.node {
+                ConstValue::String(key) => key.as_str(),
+                _ => return Err(error(value.pos, "@column name must be a string")),
+            },
+            None if directives.contains_key("column") => {
+                return Err(error(field.pos, "@column requires a name"));
+            }
+            None => name,
+        };
+        if !keys.insert(key) {
+            return Err(error(field.pos, "repeated REST input key"));
         }
     }
     Ok(names)

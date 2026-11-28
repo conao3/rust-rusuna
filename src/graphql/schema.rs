@@ -168,11 +168,25 @@ fn native_arguments(
     }
 }
 
+fn render_directives(rendered: &mut String, directives: &[Positioned<ConstDirective>]) {
+    for directive in directives {
+        let directive = &directive.node;
+        let args = directive
+            .arguments
+            .iter()
+            .map(|(name, value)| format!("{}: {}", name.node, value.node))
+            .collect::<Vec<_>>()
+            .join(", ");
+        rendered.push_str(&format!(" @{}({args})", directive.name.node));
+    }
+}
+
 fn render_input(field: &InputValueDefinition) -> String {
     let mut rendered = format!("{}: {}", field.name.node, field.ty.node);
     if let Some(value) = &field.default_value {
         rendered.push_str(&format!(" = {}", value.node));
     }
+    render_directives(&mut rendered, &field.directives);
     rendered
 }
 
@@ -191,16 +205,7 @@ fn render_field(field: &FieldDefinition) -> String {
         )
     };
     let mut rendered = format!("  {}{args}: {}", field.name.node, field.ty.node);
-    for directive in &field.directives {
-        let directive = &directive.node;
-        let args = directive
-            .arguments
-            .iter()
-            .map(|(name, value)| format!("{}: {}", name.node, value.node))
-            .collect::<Vec<_>>()
-            .join(", ");
-        rendered.push_str(&format!(" @{}({args})", directive.name.node));
-    }
+    render_directives(&mut rendered, &field.directives);
     rendered.push('\n');
     rendered
 }
@@ -659,7 +664,11 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             }
         }
         if fields.is_empty() {
-            return Err(error(t.pos, "object types require fields"));
+            if !root || !rest.fields.keys().any(|(owner, _)| owner == "Mutation") {
+                return Err(error(t.pos, "object types require fields"));
+            }
+            defs.insert(name.clone(), format!("type {name}\n"));
+            continue;
         }
         rendered.push_str("}\n");
         defs.insert(name.clone(), rendered);

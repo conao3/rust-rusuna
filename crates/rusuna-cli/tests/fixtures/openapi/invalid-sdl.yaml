@@ -1,0 +1,10 @@
+openapi: 3.0.0
+info:
+  title: Invalid REST path
+  version: 1.0.0
+paths:
+  /bad//path:
+    get:
+      responses:
+        204:
+          description: No content

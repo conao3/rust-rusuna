@@ -380,6 +380,19 @@ fn session_value(session: &rusuna::Session, name: &str) -> Result<Json, async_gr
     }
 }
 
+fn input_key(field: &InputValueDefinition) -> &str {
+    field
+        .directives
+        .iter()
+        .find(|directive| directive.node.name.node == "column")
+        .and_then(|directive| directive.node.get_argument("name"))
+        .and_then(|value| match &value.node {
+            Value::String(key) => Some(key.as_str()),
+            _ => None,
+        })
+        .unwrap_or(field.name.node.as_str())
+}
+
 fn body_value(
     template: &BodyTemplate,
     field: &impl Fn(&str) -> Result<Json, async_graphql::Error>,
@@ -873,7 +886,7 @@ impl RestRuntime {
                     .iter()
                     .filter_map(|argument| {
                         argument_value(&argument.node).transpose().map(|value| {
-                            value.map(|value| (argument.node.name.node.to_string(), value))
+                            value.map(|value| (input_key(&argument.node).to_owned(), value))
                         })
                     })
                     .collect::<Result<_, _>>()?,
@@ -979,7 +992,7 @@ impl RestRuntime {
                         .or_else(|| field.default_value.as_ref().map(|default| &default.node));
                     value.map(|value| {
                         self.argument(&field.ty.node, value, syntax, omitted, depth + 1)
-                            .map(|value| (name.to_string(), value))
+                            .map(|value| (input_key(field).to_owned(), value))
                     })
                 })
                 .collect::<Result<serde_json::Map<_, _>, _>>()

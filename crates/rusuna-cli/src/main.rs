@@ -4,6 +4,7 @@ use rusuna_events::EventTrigger;
 use serde_json::{Value as Json, json};
 use std::fmt;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -66,6 +67,16 @@ struct Triggers(Vec<EventTrigger>);
 
 #[derive(Subcommand)]
 enum SchemaCommand {
+    #[command(about = "Generate REST mapping SDL from an OpenAPI document")]
+    ImportOpenapi {
+        path: PathBuf,
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        role: Vec<String>,
+        #[arg(long)]
+        include_tag: Vec<String>,
+    },
     #[command(about = "Expand mapping SDL into a GraphQL schema")]
     ExpandSdl {
         #[arg(long)]
@@ -119,6 +130,7 @@ fn triggers(value: &str) -> Result<Triggers, String> {
 enum Error {
     Schema(rusuna::Error),
     Events(rusuna_events::Error),
+    OpenApi(String),
 }
 
 impl fmt::Display for Error {
@@ -126,6 +138,7 @@ impl fmt::Display for Error {
         match self {
             Error::Schema(error) => error.fmt(f),
             Error::Events(error) => error.fmt(f),
+            Error::OpenApi(error) => f.write_str(error),
         }
     }
 }
@@ -154,6 +167,17 @@ fn parameter(value: Value) -> Json {
 
 fn execute(command: Command) -> Result<Json, Error> {
     match command {
+        Command::Schema {
+            command:
+                SchemaCommand::ImportOpenapi {
+                    path,
+                    source,
+                    role,
+                    include_tag,
+                },
+        } => rusuna_cli::import_openapi(&path, &source, &role, &include_tag)
+            .map(|sdl| json!({"Sdl": sdl}))
+            .map_err(Error::OpenApi),
         Command::Schema {
             command: SchemaCommand::ExpandSdl { schema, role },
         } => Ok(json!({"Sdl": Schema::from_sdl(&schema)?.expanded_sdl(&role)?})),
@@ -223,6 +247,7 @@ fn main() -> ExitCode {
                 "query",
                 "events",
                 "expand-sdl",
+                "import-openapi",
                 "compile-sql",
                 "generate-migration",
             ]
@@ -242,9 +267,19 @@ fn main() -> ExitCode {
             return ExitCode::from(code);
         }
     };
+    let format = if matches!(
+        &cli.command,
+        Command::Schema {
+            command: SchemaCommand::ImportOpenapi { .. }
+        }
+    ) {
+        Output::Text
+    } else {
+        cli.output
+    };
     match execute(cli.command) {
         Ok(value) => {
-            if writeln!(io::stdout().lock(), "{}", output(&value, cli.output)).is_err() {
+            if writeln!(io::stdout().lock(), "{}", output(&value, format)).is_err() {
                 return ExitCode::from(255);
             }
             ExitCode::SUCCESS
@@ -258,7 +293,11 @@ fn main() -> ExitCode {
             if writeln!(io::stderr().lock(), "{}", json!({"Error": message})).is_err() {
                 return ExitCode::from(255);
             }
-            ExitCode::from(254)
+            ExitCode::from(if matches!(error, Error::OpenApi(_)) {
+                2
+            } else {
+                254
+            })
         }
     }
 }

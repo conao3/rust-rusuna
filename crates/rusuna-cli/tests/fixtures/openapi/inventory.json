@@ -1,0 +1,176 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Inventory", "version": "1.0.0"},
+  "servers": [{"url": "https://inventory.example.com/api"}],
+  "paths": {
+    "/echo": {
+      "get": {
+        "operationId": "loadInventory",
+        "tags": ["read"],
+        "parameters": [
+          {"name": "id", "in": "query", "schema": {"type": "array", "items": {"type": "integer"}}},
+          {"name": "view-mode", "in": "query", "schema": {"type": "string"}},
+          {"$ref": "#/components/parameters/ApiVersion"},
+          {"name": "tracking", "in": "cookie", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Echoed query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["query"],
+                  "properties": {"query": {"type": ["string", "null"]}}
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {"tags": ["read"], "responses": {"204": {"description": "No content"}}}
+    },
+    "/typed": {
+      "get": {
+        "operationId": "load_inventory",
+        "tags": ["read"],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {"application/json": {"schema": {"type": "boolean"}}}
+          },
+          "200": {"$ref": "#/components/responses/Inventory"},
+          "404": {"description": "Inventory missing"}
+        }
+      }
+    },
+    "/write": {
+      "post": {
+        "operationId": "recordInventory",
+        "tags": ["write"],
+        "requestBody": {"$ref": "#/components/requestBodies/RecordInventory"},
+        "responses": {
+          "200": {"description": "Accepted without a body"},
+          "201": {
+            "description": "Inventory recorded",
+            "content": {"application/json": {"schema": {"type": "boolean"}}}
+          }
+        }
+      }
+    },
+    "/empty": {
+      "delete": {
+        "tags": ["write"],
+        "responses": {"204": {"description": "Removed"}}
+      }
+    },
+    "/devices/{device-id}": {
+      "parameters": [
+        {"name": "device-id", "in": "path", "required": true, "schema": {"type": "string"}}
+      ],
+      "get": {
+        "tags": ["devices"],
+        "parameters": [
+          {"name": "device-id", "in": "path", "required": true, "schema": {"type": "integer", "format": "int64"}}
+        ],
+        "responses": {
+          "202": {
+            "description": "Device records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["data"],
+                  "properties": {"data": {"type": "array", "items": {"$ref": "#/components/schemas/Inventory"}}}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/raw": {
+      "post": {
+        "tags": ["write"],
+        "requestBody": {
+          "content": {"application/json": {"schema": {"type": "array", "items": {"type": "string"}}}}
+        },
+        "responses": {"204": {"description": "Recorded"}}
+      }
+    },
+    "/overlap": {
+      "patch": {
+        "tags": ["write"],
+        "parameters": [{"name": "label", "in": "query", "schema": {"type": "string"}}],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {"type": "object", "properties": {"label": {"type": "string"}}}
+            }
+          }
+        },
+        "responses": {"204": {"description": "Updated"}}
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "ApiVersion": {"name": "X-Api-Version", "in": "header", "schema": {"type": "string"}}
+    },
+    "responses": {
+      "Inventory": {
+        "description": "Inventory record",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Inventory"}}}
+      }
+    },
+    "requestBodies": {
+      "RecordInventory": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": ["input", "external-id"],
+              "properties": {
+                "input": {"$ref": "#/components/schemas/Details"},
+                "note": {"type": "string"},
+                "external-id": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Inventory": {
+        "type": "object",
+        "required": ["label"],
+        "properties": {
+          "label": {"type": "string"},
+          "date": {"type": "string", "format": "date-time"},
+          "status": {"$ref": "#/components/schemas/Status"},
+          "@meta": {"type": "object", "additionalProperties": true},
+          "meta": {},
+          "details": {"$ref": "#/components/schemas/Details"},
+          "smallFloat": {"type": "number"},
+          "stopped": {"type": "boolean"},
+          "legacy": {"type": "string", "enum": ["old-value", "new-value"]},
+          "variants": {"oneOf": [{"type": "integer"}, {"type": "boolean"}]},
+          "selection": {"anyOf": [{"type": "string"}, {"type": "boolean"}]},
+          "previous": {"$ref": "#/components/schemas/Inventory"}
+        }
+      },
+      "Details": {
+        "type": "object",
+        "required": ["count"],
+        "properties": {
+          "count": {"type": "integer"},
+          "status": {"$ref": "#/components/schemas/Status"},
+          "is-active": {"type": "boolean"}
+        }
+      },
+      "Status": {"type": "string", "enum": ["draft", "paid"]},
+      "Unused": {"type": "object", "properties": {"id": {"type": "string"}}}
+    }
+  }
+}
