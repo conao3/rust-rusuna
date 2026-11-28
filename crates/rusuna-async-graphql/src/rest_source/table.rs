@@ -2,7 +2,7 @@ use super::*;
 use futures_util::future::join_all;
 use rusuna::RestBatch;
 
-type Outcome = async_graphql::Result<Option<Arc<Json>>>;
+type Outcome = async_graphql::Result<Option<Arc<RestValue<'static>>>>;
 pub(super) type Outcomes = HashMap<String, Outcome>;
 type FieldKey = (String, String);
 
@@ -127,6 +127,11 @@ impl<'a> Plan<'a> {
                         source,
                         session,
                         headers: &headers,
+                        wrapped: shared
+                            .schema
+                            .rest_catalog()
+                            .response_fields
+                            .contains_key(named(&field.output)),
                     };
                     match &field.batch {
                         Some(batch) => execution.batch(batch, &tuples).await,
@@ -153,6 +158,7 @@ struct Execution<'a> {
     source: &'a RestSource,
     session: &'a rusuna::Session,
     headers: &'a HeaderMap,
+    wrapped: bool,
 }
 
 impl Execution<'_> {
@@ -183,9 +189,14 @@ impl Execution<'_> {
                 key.clone(),
                 tuple.iter().map(|&value| value.clone()).collect(),
             ));
-            let response = cached_get(self.state, self.source, uri, self.headers, key).await;
-            Ok(response_json(self.source, self.field, &response)?
-                .map(|value| Arc::new(value.clone())))
+            let value = if self.field.paginate.is_some() {
+                paginate::fetch(self.state, self.source, self.field, uri, self.headers, key).await?
+            } else {
+                let response = cached_get(self.state, self.source, uri, self.headers, key).await;
+                response_json(self.source, self.field, &response, true)?
+                    .map(|reply| reply.output(self.wrapped).into_owned())
+            };
+            Ok(value.map(Arc::new))
         }))
         .await;
         indices
@@ -220,20 +231,25 @@ impl Execution<'_> {
             .source
             .request(Method::GET, &uri, self.headers, None)
             .await;
-        let Some(value) = response_json(self.source, self.field, &response)? else {
+        let Some(reply) = response_json(self.source, self.field, &response, true)? else {
             return Ok(vec![Ok(None); keys.len()]);
         };
         let mut values = HashMap::new();
-        for item in value.as_array().ok_or_else(unexpected)? {
+        let metadata = reply.metadata(self.wrapped);
+        for item in reply.value.as_array().ok_or_else(unexpected)? {
             let key = item
                 .get(&batch.key)
                 .and_then(scalar_key)
                 .ok_or_else(unexpected)?;
             match values.entry(key) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(Arc::new(item.clone()));
+                    entry.insert(Arc::new(RestValue::new(
+                        Cow::Owned(item.clone()),
+                        metadata.clone(),
+                    )));
                 }
-                std::collections::hash_map::Entry::Occupied(entry) if **entry.get() == *item => {}
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if entry.get().value.as_ref() == item => {}
                 _ => return Err(unexpected()),
             }
         }
@@ -241,7 +257,7 @@ impl Execution<'_> {
             .iter()
             .map(|key| {
                 let Some(key) = scalar_key(key) else {
-                    return Ok(Some(Arc::new(Json::Null)));
+                    return Ok(Some(Arc::new(RestValue::from(Json::Null))));
                 };
                 match values.get(&key) {
                     Some(value) => Ok(Some(value.clone())),

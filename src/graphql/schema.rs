@@ -23,7 +23,8 @@ pub(super) fn directives<'a>(
             "insert_permission" => &["role", "columns", "check", "set"],
             "update_permission" => &["role", "columns", "where", "check", "set"],
             "delete_permission" => &["role", "where"],
-            "column" => &["name"],
+            "column" | "response_header" => &["name"],
+            "body" => &[],
             "relation" => &["columns", "references"],
             "aggregate" => &["target"],
             "list" => &[],
@@ -48,6 +49,7 @@ pub(super) fn directives<'a>(
                 "roles",
                 "batch",
                 "filter",
+                "paginate",
             ],
             _ => unreachable!(),
         };
@@ -262,13 +264,17 @@ fn native_arguments(
 fn render_directives(rendered: &mut String, directives: &[Positioned<ConstDirective>]) {
     for directive in directives {
         let directive = &directive.node;
+        rendered.push_str(&format!(" @{}", directive.name.node));
+        if directive.arguments.is_empty() {
+            continue;
+        }
         let args = directive
             .arguments
             .iter()
             .map(|(name, value)| format!("{}: {}", name.node, value.node))
             .collect::<Vec<_>>()
             .join(", ");
-        rendered.push_str(&format!(" @{}({args})", directive.name.node));
+        rendered.push_str(&format!("({args})"));
     }
 }
 

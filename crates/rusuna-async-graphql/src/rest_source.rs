@@ -4,17 +4,18 @@ use async_graphql::parser::types::{InputObjectType, OperationType};
 use async_graphql::{PathSegment, QueryPathNode};
 use async_graphql_value::Value as InputSyntax;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use rusuna::{BodyTemplate, RestField, RestMethod, Template, TemplatePart};
+use rusuna::{BodyTemplate, RestField, RestMethod, RestResponseField, Template, TemplatePart};
 use rusuna_http_client::http::{
     HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header::CONTENT_TYPE,
 };
 use rusuna_http_client::{Client, Limits, Uri};
-use std::collections::HashMap;
 use std::sync::Mutex as SyncMutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+use std::{borrow::Cow, collections::HashMap};
 use tokio::sync::{OnceCell, Semaphore};
 
 mod filter;
+mod paginate;
 mod relation;
 mod table;
 
@@ -36,6 +37,7 @@ pub struct RestSource {
     limits: Limits,
     permits: Arc<Semaphore>,
     retry: (usize, Duration),
+    max_retry_delay: Duration,
     expose_error_body: bool,
     client: Client,
 }
@@ -72,6 +74,7 @@ impl RestSource {
             },
             permits: Arc::new(Semaphore::new(8)),
             retry: (0, Duration::ZERO),
+            max_retry_delay: Duration::from_secs(60),
             expose_error_body: false,
             client: Client::new(),
         })
@@ -135,6 +138,11 @@ impl RestSource {
 
     pub fn retry(mut self, times: usize, delay: Duration) -> Self {
         self.retry = (times, delay);
+        self
+    }
+
+    pub fn max_retry_delay(mut self, max_retry_delay: Duration) -> Self {
+        self.max_retry_delay = max_retry_delay;
         self
     }
 
@@ -255,9 +263,18 @@ impl RestSource {
                 Err(error) => matches!(error, HttpError::Connection(_)),
             };
             if retryable && retries < times {
-                retries += 1;
-                tokio::time::sleep(delay).await;
-                continue;
+                let retry_after = response
+                    .as_ref()
+                    .ok()
+                    .filter(|response| matches!(response.status.as_u16(), 429 | 503))
+                    .and_then(|response| {
+                        paginate::retry_delay(&response.headers, SystemTime::now())
+                    });
+                if retry_after.is_none_or(|delay| delay <= self.max_retry_delay) {
+                    retries += 1;
+                    tokio::time::sleep(retry_after.unwrap_or(delay)).await;
+                    continue;
+                }
             }
             return match response {
                 Err(HttpError::Timeout) => Upstream::Failed("timeout"),
@@ -282,7 +299,10 @@ impl RestSource {
                 }
                 Ok(response) if is_json(&response.headers) => {
                     serde_json::from_slice(&response.body)
-                        .map(Upstream::Json)
+                        .map(|value| Upstream::Json {
+                            value,
+                            headers: Arc::new(response.headers),
+                        })
                         .unwrap_or(Upstream::Failed("unexpected-response"))
                 }
                 Ok(_) => Upstream::Failed("unexpected-response"),
@@ -454,6 +474,7 @@ type TableCall = ((String, String), Vec<Json>);
 struct Call {
     limits: Limits,
     retry: (usize, Duration),
+    max_retry_delay: Duration,
     table: Option<TableCall>,
     uri: Uri,
     headers: Vec<(HeaderName, Vec<HeaderValue>)>,
@@ -466,6 +487,7 @@ impl Call {
         Self {
             limits: source.limits,
             retry: source.retry,
+            max_retry_delay: source.max_retry_delay,
             table,
             uri,
             headers: keys
@@ -482,9 +504,15 @@ impl Call {
 }
 
 enum Upstream {
-    Json(Json),
+    Json {
+        value: Json,
+        headers: Arc<HeaderMap>,
+    },
     Empty,
-    Http { status: StatusCode, body: String },
+    Http {
+        status: StatusCode,
+        body: String,
+    },
     Failed(&'static str),
     InvalidHeader,
 }
@@ -532,28 +560,125 @@ async fn cached_get(
         .clone()
 }
 
+struct Reply<'a> {
+    body: &'a Json,
+    value: &'a Json,
+    headers: &'a Arc<HeaderMap>,
+}
+
+impl<'a> Reply<'a> {
+    fn metadata(&self, wrapped: bool) -> Option<Arc<ResponseMetadata>> {
+        wrapped.then(|| {
+            Arc::new(ResponseMetadata {
+                body: self.value.clone(),
+                headers: self.headers.clone(),
+            })
+        })
+    }
+
+    fn output(self, wrapped: bool) -> RestValue<'a> {
+        RestValue::new(Cow::Borrowed(self.value), self.metadata(wrapped))
+    }
+}
+
+struct ResponseMetadata {
+    body: Json,
+    headers: Arc<HeaderMap>,
+}
+
+struct RestValue<'a> {
+    value: Cow<'a, Json>,
+    metadata: Option<Arc<ResponseMetadata>>,
+}
+
+impl<'a> RestValue<'a> {
+    fn new(value: Cow<'a, Json>, metadata: Option<Arc<ResponseMetadata>>) -> Self {
+        let value = if metadata.is_some() && !value.is_object() {
+            Cow::Owned(Json::Object(Default::default()))
+        } else {
+            value
+        };
+        Self { value, metadata }
+    }
+
+    fn into_owned(self) -> RestValue<'static> {
+        RestValue {
+            value: Cow::Owned(self.value.into_owned()),
+            metadata: self.metadata,
+        }
+    }
+
+    fn borrowed(&self) -> RestValue<'_> {
+        RestValue {
+            value: Cow::Borrowed(&self.value),
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
+impl<'a> From<&'a Json> for RestValue<'a> {
+    fn from(value: &'a Json) -> Self {
+        Self::new(Cow::Borrowed(value), None)
+    }
+}
+
+impl From<Json> for RestValue<'static> {
+    fn from(value: Json) -> Self {
+        Self::new(Cow::Owned(value), None)
+    }
+}
+
+fn header_value(headers: &HeaderMap, name: &str, ty: &str) -> async_graphql::Result<Json> {
+    let Some(value) = headers.get(name) else {
+        return Ok(Json::Null);
+    };
+    let text = std::str::from_utf8(value.as_bytes()).map_err(|_| unexpected())?;
+    match ty {
+        "String" => Some(Json::from(text)),
+        "Int" => text.parse::<i32>().ok().map(Json::from),
+        "Float" => text
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Json::Number),
+        "Boolean" => text.parse::<bool>().ok().map(Json::from),
+        _ => unreachable!(),
+    }
+    .ok_or_else(unexpected)
+}
+
 fn response_json<'a>(
     source: &RestSource,
     field: &RestField,
     response: &'a Upstream,
-) -> async_graphql::Result<Option<&'a Json>> {
+    allow_not_found: bool,
+) -> async_graphql::Result<Option<Reply<'a>>> {
     match response {
         Upstream::Empty => Ok(None),
         Upstream::Http {
             status: StatusCode::NOT_FOUND,
             ..
-        } if field.not_found_null => Ok(None),
+        } if allow_not_found && field.not_found_null => Ok(None),
         Upstream::Http { status, body } => Err(status_error(
             *status,
             source.expose_error_body.then_some(body.as_str()),
         )),
         Upstream::Failed(reason) => Err(failure(reason)),
         Upstream::InvalidHeader => Err(invalid("invalid REST request header")),
-        Upstream::Json(json) => field
-            .result
-            .iter()
-            .try_fold(json, |value, key| value.get(key).ok_or_else(unexpected))
-            .map(Some),
+        Upstream::Json {
+            value: body,
+            headers,
+        } => {
+            let value = field
+                .result
+                .iter()
+                .try_fold(body, |value, key| value.get(key).ok_or_else(unexpected))?;
+            Ok(Some(Reply {
+                body,
+                value,
+                headers,
+            }))
+        }
     }
 }
 
@@ -665,6 +790,7 @@ pub(super) struct RestRuntime {
 
 struct RestRow {
     value: Json,
+    metadata: Option<Arc<ResponseMetadata>>,
     relations: Arc<relation::Outcomes>,
 }
 
@@ -714,7 +840,11 @@ impl RestRuntime {
             .relations
             .get(&(owner.into(), name.clone()))
             .map(|relation| relation.list);
-        if call.is_none() && key.is_none() && relation.is_none() {
+        let response = catalog
+            .response_fields
+            .get(owner)
+            .and_then(|fields| fields.get(&name));
+        if call.is_none() && key.is_none() && relation.is_none() && response.is_none() {
             return filter::aggregate_field(shared, owner, definition);
         }
         let table = call.is_some_and(|call| call.table_columns.is_some());
@@ -723,10 +853,12 @@ impl RestRuntime {
         let owner = owner.to_string();
         let spec = Arc::new(definition.clone());
         let key = key.cloned();
+        let response = response.cloned();
         let mut field = Field::new(name, type_ref(&definition.ty.node), move |ctx| {
             let shared = shared.clone();
             let spec = spec.clone();
             let key = key.clone();
+            let response = response.clone();
             let owner = owner.clone();
             FieldFuture::new(async move {
                 let state = ctx.data::<RestRequest>()?;
@@ -750,11 +882,42 @@ impl RestRuntime {
                         &ctx,
                         state,
                         &spec.ty.node,
-                        row.value.get(&key.key).unwrap_or(&Json::Null),
+                        row.value.get(&key.key).unwrap_or(&Json::Null).into(),
                         row.relations.clone(),
                     ));
                 }
-                let result = if table {
+                let result = if let Some(response) = response {
+                    let row = ctx.parent_value.try_downcast_ref::<RestRow>()?;
+                    let metadata = row.metadata.as_deref().ok_or_else(unexpected)?;
+                    match response {
+                        RestResponseField::Body => {
+                            shared
+                                .rest
+                                .complete(
+                                    &shared,
+                                    &ctx,
+                                    &spec.ty.node,
+                                    (&metadata.body).into(),
+                                    None,
+                                )
+                                .await
+                        }
+                        RestResponseField::Header(name) => {
+                            header_value(&metadata.headers, &name, named(&spec.ty.node)).map(
+                                |value| {
+                                    shared.rest.output(
+                                        &shared,
+                                        &ctx,
+                                        state,
+                                        &spec.ty.node,
+                                        value.into(),
+                                        row.relations.clone(),
+                                    )
+                                },
+                            )
+                        }
+                    }
+                } else if table {
                     let outcome = state
                         .table
                         .lock()
@@ -775,7 +938,7 @@ impl RestRuntime {
                                 )?;
                                 shared
                                     .rest
-                                    .complete_call(&shared, &ctx, plan, &value, None)
+                                    .complete_call(&shared, &ctx, plan, value.borrowed(), None)
                                     .await
                             }
                             .await
@@ -876,9 +1039,12 @@ impl RestRuntime {
         let mut headers = source.headers(session, ctx.data_opt::<ClientHeaders>())?;
         let upstream;
         let cached;
-        let response = if field.method == RestMethod::Get {
+        let wrapped = catalog.response_fields.contains_key(named(&field.output));
+        let value = if field.paginate.is_some() {
+            paginate::fetch(state, source, field, uri, &headers, None).await?
+        } else if field.method == RestMethod::Get {
             cached = cached_get(state, source, uri, &headers, None).await;
-            &*cached
+            response_json(source, field, &cached, true)?.map(|reply| reply.output(wrapped))
         } else {
             let body = match &field.body {
                 Some(template) => body_object(template, &value, session)?,
@@ -911,10 +1077,10 @@ impl RestRuntime {
                 RestMethod::Get => unreachable!(),
             };
             upstream = source.request(method, &uri, &headers, Some(body)).await;
-            &upstream
+            response_json(source, field, &upstream, true)?.map(|reply| reply.output(wrapped))
         };
         let ty = &definition.ty.node;
-        match response_json(source, field, response)? {
+        match value {
             Some(value) => {
                 self.complete_call(shared, ctx, plan, value, transaction_state)
                     .await
@@ -928,7 +1094,7 @@ impl RestRuntime {
         shared: &Shared,
         ctx: &ResolverContext<'_>,
         plan: filter::Plan<'_>,
-        value: &Json,
+        mut value: RestValue<'_>,
         transaction_state: Option<&mut State>,
     ) -> async_graphql::Result<Option<FieldValue<'static>>> {
         let ty = &plan.field.output;
@@ -937,20 +1103,21 @@ impl RestRuntime {
                 .complete(shared, ctx, ty, value, transaction_state)
                 .await;
         }
-        self.validate_response(shared.schema.rest_catalog(), ty, value)?;
-        let value = plan.apply(value.clone(), ty);
-        if value.is_null() {
+        self.validate_response(shared.schema.rest_catalog(), ty, &value.value)?;
+        let filtered = plan.apply(value.value.into_owned(), ty);
+        if filtered.is_null() {
             return Ok(None);
         }
         if plan.field.aggregate {
             return Ok(Some(FieldValue::owned_any(Arc::new(
                 filter::AggregateRows {
-                    value,
+                    value: filtered,
                     permission_limit: plan.permission_limit,
                 },
             ))));
         }
-        self.complete(shared, ctx, ty, &value, transaction_state)
+        value.value = Cow::Owned(filtered);
+        self.complete(shared, ctx, ty, value, transaction_state)
             .await
     }
 
@@ -1001,7 +1168,7 @@ impl RestRuntime {
         shared: &Shared,
         ctx: &ResolverContext<'_>,
         ty: &Type,
-        value: &Json,
+        value: RestValue<'_>,
         transaction_state: Option<&mut State>,
     ) -> async_graphql::Result<Option<FieldValue<'static>>> {
         let catalog = shared.schema.rest_catalog();
@@ -1018,7 +1185,8 @@ impl RestRuntime {
         } else {
             None
         };
-        let relations = relation::collect(shared, ctx, ty, value, session, connection).await?;
+        let relations =
+            relation::collect(shared, ctx, ty, &value.value, session, connection).await?;
         Ok(self.output(shared, ctx, state, ty, value, Arc::new(relations)))
     }
 
@@ -1122,7 +1290,7 @@ impl RestRuntime {
         ctx: &ResolverContext<'_>,
         state: &RestRequest,
         ty: &Type,
-        value: &Json,
+        value: RestValue<'_>,
         relations: Arc<relation::Outcomes>,
     ) -> Option<FieldValue<'static>> {
         let mut output = Output {
@@ -1132,8 +1300,9 @@ impl RestRuntime {
             state,
             indices: Vec::new(),
             relations,
+            metadata: value.metadata,
         };
-        match output.convert(ty, value) {
+        match output.convert(ty, &value.value) {
             Ok(value) => value,
             Err(()) => {
                 state.null_at(path_key(ctx.path_node.as_ref()));
@@ -1150,6 +1319,7 @@ struct Output<'a, 'ctx> {
     state: &'a RestRequest,
     indices: Vec<usize>,
     relations: Arc<relation::Outcomes>,
+    metadata: Option<Arc<ResponseMetadata>>,
 }
 
 impl Output<'_, '_> {
@@ -1208,6 +1378,7 @@ impl Output<'_, '_> {
                 .then(|| {
                     FieldValue::owned_any(RestRow {
                         value: value.clone(),
+                        metadata: self.metadata.clone(),
                         relations: self.relations.clone(),
                     })
                 })

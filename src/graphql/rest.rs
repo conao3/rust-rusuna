@@ -11,6 +11,7 @@ pub struct RestCatalog {
     pub fields: BTreeMap<(String, String), RestField>,
     pub objects: BTreeMap<String, BTreeMap<String, RestColumn>>,
     pub relations: BTreeMap<(String, String), RestRelation>,
+    pub response_fields: BTreeMap<String, BTreeMap<String, RestResponseField>>,
     pub permissions: BTreeMap<String, BTreeMap<String, RestPermission>>,
     pub aggregate_types: BTreeSet<String>,
     pub enums: BTreeMap<String, BTreeSet<String>>,
@@ -28,6 +29,12 @@ pub struct RestPermission {
 pub struct RestColumn {
     pub key: String,
     pub ty: Type,
+}
+
+#[derive(Debug, Clone)]
+pub enum RestResponseField {
+    Body,
+    Header(String),
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +57,7 @@ pub struct RestField {
     pub roles: BTreeSet<String>,
     pub table_columns: Option<Vec<String>>,
     pub batch: Option<RestBatch>,
+    pub paginate: Option<RestPagination>,
     pub filter: bool,
     pub output: Type,
     pub aggregate: bool,
@@ -60,6 +68,19 @@ pub struct RestBatch {
     pub query: String,
     pub key: String,
     pub max_size: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestPagination {
+    pub mode: RestPaginationMode,
+    pub max_pages: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum RestPaginationMode {
+    Link,
+    Cursor { next: Vec<String>, query: String },
+    Offset { query: String, size: usize },
 }
 
 impl RestCatalog {
@@ -247,6 +268,76 @@ fn body_template(
     }
 }
 
+fn pagination(value: &Positioned<ConstValue>) -> Result<RestPagination, Error> {
+    let invalid = |message| error(value.pos, message);
+    let ConstValue::Object(options) = &value.node else {
+        return Err(invalid("@rest paginate must be an object"));
+    };
+    let positive = |value: &ConstValue| match value {
+        ConstValue::Number(number) => number
+            .as_u64()
+            .and_then(|number| usize::try_from(number).ok())
+            .filter(|&number| number > 0),
+        _ => None,
+    };
+    let query = |value: Option<&ConstValue>| match value {
+        Some(ConstValue::String(query)) if !query.is_empty() => Ok(query.clone()),
+        _ => Err(invalid(
+            "@rest pagination requires a nonempty query parameter name",
+        )),
+    };
+    let max_pages = options
+        .get("max_pages")
+        .map(|value| {
+            positive(value)
+                .filter(|&value| value <= 1000)
+                .ok_or_else(|| invalid("@rest max_pages must be an integer from 1 through 1000"))
+        })
+        .transpose()?
+        .unwrap_or(10);
+    let mut modes = options
+        .iter()
+        .filter(|(name, _)| name.as_str() != "max_pages");
+    let mode = match (modes.next(), modes.next()) {
+        (Some((name, value)), None) => match (name.as_str(), value) {
+            ("link", ConstValue::Boolean(true)) => RestPaginationMode::Link,
+            ("cursor", ConstValue::Object(cursor)) if cursor.len() == 2 => {
+                let Some(ConstValue::List(next)) = cursor.get("next") else {
+                    return Err(invalid("@rest cursor next must be a list of strings"));
+                };
+                let next = next
+                    .iter()
+                    .map(|key| match key {
+                        ConstValue::String(key) => Ok(key.clone()),
+                        _ => Err(invalid("@rest cursor next must be a list of strings")),
+                    })
+                    .collect::<Result<_, _>>()?;
+                RestPaginationMode::Cursor {
+                    next,
+                    query: query(cursor.get("query"))?,
+                }
+            }
+            ("offset", ConstValue::Object(offset)) if offset.len() == 2 => {
+                let size = offset
+                    .get("size")
+                    .and_then(positive)
+                    .ok_or_else(|| invalid("@rest offset size must be a positive integer"))?;
+                RestPaginationMode::Offset {
+                    query: query(offset.get("query"))?,
+                    size,
+                }
+            }
+            _ => return Err(invalid("invalid @rest pagination mode")),
+        },
+        _ => {
+            return Err(invalid(
+                "@rest paginate requires exactly one pagination mode",
+            ));
+        }
+    };
+    Ok(RestPagination { mode, max_pages })
+}
+
 fn definition(
     d: &ConstDirective,
     field: &FieldDefinition,
@@ -412,6 +503,18 @@ fn definition(
         }
         _ => return Err(invalid("@rest filter must be a boolean")),
     };
+    let paginate = d
+        .get_argument("paginate")
+        .map(|value| {
+            if method != RestMethod::Get || !matches!(field.ty.node.base, BaseType::List(_)) {
+                return Err(invalid("@rest paginate requires a GET list field"));
+            }
+            if batch.is_some() {
+                return Err(invalid("@rest paginate and batch cannot share a field"));
+            }
+            pagination(value)
+        })
+        .transpose()?;
     Ok(RestField {
         source: string(d, "source")?,
         method,
@@ -422,6 +525,7 @@ fn definition(
         not_found_null,
         table_columns: table.then(|| columns.into_iter().collect()),
         batch,
+        paginate,
         filter,
         output: field.ty.node.clone(),
         aggregate: false,
@@ -530,11 +634,12 @@ pub(super) fn load(
         let parent_names: BTreeSet<_> = fields
             .iter()
             .filter(|f| {
-                !f.node
-                    .directives
-                    .iter()
-                    .any(|d| matches!(d.node.name.node.as_str(), "rest" | "relation" | "aggregate"))
-                    && matches!(&f.node.ty.node.base, BaseType::Named(name) if scalar_output(name))
+                !f.node.directives.iter().any(|d| {
+                    matches!(
+                        d.node.name.node.as_str(),
+                        "rest" | "relation" | "aggregate" | "body" | "response_header"
+                    )
+                }) && matches!(&f.node.ty.node.base, BaseType::Named(name) if scalar_output(name))
             })
             .map(|f| f.node.name.node.as_str())
             .collect();
@@ -552,7 +657,7 @@ pub(super) fn load(
                 if root || table {
                     &["rest"]
                 } else {
-                    &["rest", "column", "relation"]
+                    &["rest", "column", "relation", "body", "response_header"]
                 },
             )?;
             if let Some(directive) = d.get("relation") {
@@ -596,7 +701,40 @@ pub(super) fn load(
             if !scalar_output(target) && !objects_reached.contains(target) {
                 return Err(error(f.pos, format!("invalid REST output type {target}")));
             }
-            if let Some(directive) = d.get("rest") {
+            if let Some(directive) = d.get("body").or_else(|| d.get("response_header")) {
+                if d.len() != 1 || !f.node.arguments.is_empty() {
+                    return Err(error(
+                        f.pos,
+                        "@body and @response_header apply to individual REST response fields",
+                    ));
+                }
+                let response = if d.contains_key("body") {
+                    RestResponseField::Body
+                } else {
+                    if directive.arguments.len() != 1
+                        || !matches!(&f.node.ty.node.base, BaseType::Named(name) if matches!(name.as_str(), "String" | "Int" | "Float" | "Boolean"))
+                    {
+                        return Err(error(
+                            f.pos,
+                            "@response_header requires a name and a String, Int, Float or Boolean field",
+                        ));
+                    }
+                    let name = string(directive, "name")?;
+                    if name.is_empty()
+                        || !name.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+                        })
+                    {
+                        return Err(error(f.pos, "invalid @response_header name"));
+                    }
+                    RestResponseField::Header(name.to_ascii_lowercase())
+                };
+                catalog
+                    .response_fields
+                    .entry(owner.into())
+                    .or_default()
+                    .insert(name.into(), response);
+            } else if let Some(directive) = d.get("rest") {
                 if d.contains_key("column") {
                     return Err(error(f.pos, "@rest and @column apply to different fields"));
                 }
@@ -660,6 +798,23 @@ pub(super) fn load(
         }
         if !root && !table {
             catalog.objects.insert(owner.into(), keys);
+        }
+    }
+    for (owner, ty) in objects {
+        for field in fields(&ty.node) {
+            if catalog
+                .response_fields
+                .contains_key(named(&field.node.ty.node))
+                && (!matches!(field.node.ty.node.base, BaseType::Named(_))
+                    || !catalog
+                        .fields
+                        .contains_key(&(owner.clone(), field.node.name.node.to_string())))
+            {
+                return Err(error(
+                    field.pos,
+                    "types with @body or @response_header must be returned directly by @rest",
+                ));
+            }
         }
     }
     for t in inputs.values() {

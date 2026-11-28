@@ -11,6 +11,7 @@ async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }
 axum = { workspace = true }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+httpdate = "1.0"
 rusuna = { workspace = true }
 rusuna-async-graphql = { workspace = true }
 rusuna-axum = { workspace = true }

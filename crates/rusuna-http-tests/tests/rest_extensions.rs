@@ -3,14 +3,20 @@ mod support;
 use async_graphql::{Request, Variables, dynamic::Schema};
 use axum::{
     Json as Response, Router,
-    extract::Path,
+    extract::{Path, Query},
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
     routing::{get, post},
 };
 use rusuna::Session;
 use rusuna_async_graphql::{Builder, RestSource};
 use serde_json::{Value as Json, json};
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime},
+};
 use tokio::net::TcpListener;
 
 const SDL: &str = r#"
@@ -170,14 +176,22 @@ async fn source() -> RestSource {
                 Response(rows)
             }),
         );
+    serve(router, "").await
+}
+
+async fn serve(router: Router, base_path: &str) -> RestSource {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    RestSource::new("api", &format!("http://{address}")).unwrap()
+    RestSource::new("api", &format!("http://{address}{base_path}")).unwrap()
 }
 
 fn schema(source: RestSource, role: &str, pool: Option<PgPool>) -> Schema {
-    let mut schema = Builder::new(Arc::new(rusuna::Schema::from_sdl(SDL).unwrap()), role)
+    schema_from(SDL, source, role, pool)
+}
+
+fn schema_from(sdl: &str, source: RestSource, role: &str, pool: Option<PgPool>) -> Schema {
+    let mut schema = Builder::new(Arc::new(rusuna::Schema::from_sdl(sdl).unwrap()), role)
         .rest(source)
         .build()
         .unwrap()
@@ -430,4 +444,434 @@ async fn rest_mutation_filters_the_result_after_sending_declared_arguments() {
             }
         }})
     );
+}
+
+#[tokio::test]
+async fn rest_pagination_joins_all_modes_and_stops_at_max_pages() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::new().route(
+        "/api/{mode}",
+        get({
+            let calls = calls.clone();
+            move |Path(mode): Path<String>, Query(query): Query<BTreeMap<String, String>>| {
+                let calls = calls.clone();
+                async move {
+                    assert_eq!(query.get("fixed").map(String::as_str), Some("a&b"));
+                    let page = match mode.as_str() {
+                        "link" => query.get("page").map_or(0, |s| s.parse().unwrap()),
+                        "cursor" => match query.get("after").map(String::as_str) {
+                            Some("initial") => 0,
+                            Some("a &+") => 1,
+                            Some("b") => 2,
+                            _ => panic!("{query:?}"),
+                        },
+                        "offset" => {
+                            let offset = query["skip"].parse::<usize>().unwrap();
+                            assert_eq!(offset % 2, 0);
+                            offset / 2
+                        }
+                        _ => panic!("{mode}"),
+                    };
+                    calls.lock().unwrap().push((mode.clone(), page));
+                    let items = (page * 2..(page * 2 + 2).min(5))
+                        .map(|id| json!({"id": id}))
+                        .collect::<Vec<_>>();
+                    let mut body = json!({"data": {"items": items}});
+                    if mode == "cursor" {
+                        body["meta"] = match (page, query.get("end").map(String::as_str)) {
+                            (0, _) => json!({"next": "a &+"}),
+                            (1, _) => json!({"next": "b"}),
+                            (2, Some("missing")) => json!({}),
+                            (2, Some("null")) => json!({"next": null}),
+                            (2, _) => json!({"next": ""}),
+                            _ => panic!("{query:?}"),
+                        };
+                    }
+                    let mut response = Response(body).into_response();
+                    if mode == "link" && page < 2 {
+                        let headers = response.headers_mut();
+                        headers.append("link", "</api/link>; rel=first".parse().unwrap());
+                        headers.append("link", format!(
+                            r#"<?fixed=a%26b&page={}>; title="more, please; \"next\""; REL="alternate next""#,
+                            page + 1
+                        ).parse().unwrap());
+                    }
+                    response
+                }
+            }
+        }),
+    );
+    let source = serve(router, "/api").await;
+    let session = Session::new("admin");
+    for (mode, pagination, query) in [
+        ("link", "link: true", r#"fixed: "a&b""#),
+        (
+            "cursor",
+            r#"cursor: {next: ["meta", "next"], query: "after"}"#,
+            r#"fixed: "a&b", after: "initial""#,
+        ),
+        (
+            "offset",
+            r#"offset: {query: "skip", size: 2}"#,
+            r#"fixed: "a&b", skip: "100""#,
+        ),
+    ] {
+        let sdl = format!(
+            r#"
+            type Query {{
+                all: [Item!]! @rest(source: "api", path: "/{mode}", query: {{{query}}},
+                    result: ["data", "items"], paginate: {{{pagination}}})
+                capped: [Item!]! @rest(source: "api", path: "/{mode}", query: {{{query}}},
+                    result: ["data", "items"], paginate: {{{pagination}, max_pages: 2}})
+                afterFilter: [Item!]! @rest(source: "api", path: "/{mode}", query: {{{query}}},
+                    result: ["data", "items"], paginate: {{{pagination}}}, filter: true)
+            }}
+            type Item {{ id: Int! }}
+        "#
+        );
+        let schema = schema_from(&sdl, source.clone(), "admin", None);
+        for (field, count) in [("all", 5usize), ("capped", 4)] {
+            let response = execute(
+                &schema,
+                &session,
+                &format!("{{ {field} {{ id }} }}"),
+                json!({}),
+            )
+            .await;
+            let items: Vec<_> = (0..count).map(|id| json!({"id": id})).collect();
+            assert_eq!(response, json!({"data": {field: items}}), "{mode} {field}");
+            let requested: Vec<_> = calls.lock().unwrap().drain(..).collect();
+            assert_eq!(
+                requested,
+                (0..count.div_ceil(2))
+                    .map(|page| (mode.to_string(), page))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let response = execute(
+            &schema,
+            &session,
+            "{ afterFilter_aggregate(where: {id: {_gte: 2}}, order_by: {id: desc}, limit: 2) { aggregate { count } nodes { id } } }",
+            json!({}),
+        )
+        .await;
+        assert_eq!(
+            response,
+            json!({"data": {"afterFilter_aggregate": {"aggregate": {"count": 2}, "nodes": [{"id": 4}, {"id": 3}]}}}),
+            "{mode}"
+        );
+        calls.lock().unwrap().clear();
+    }
+
+    for end in ["missing", "null"] {
+        let sdl = format!(
+            r#"
+            type Query {{
+                items: [Item!]! @rest(source: "api", path: "/cursor",
+                    query: {{fixed: "a&b", after: "initial", end: "{end}"}},
+                    result: ["data", "items"],
+                    paginate: {{cursor: {{next: ["meta", "next"], query: "after"}}}})
+            }}
+            type Item {{ id: Int! }}
+        "#
+        );
+        let schema = schema_from(&sdl, source.clone(), "admin", None);
+        let response = execute(&schema, &session, "{ items { id } }", json!({})).await;
+        assert_eq!(response["data"]["items"].as_array().unwrap().len(), 5);
+        assert!(response.get("errors").is_none(), "{response}");
+        assert_eq!(calls.lock().unwrap().drain(..).count(), 3);
+    }
+}
+
+#[tokio::test]
+async fn rest_link_pagination_rejects_out_of_scope_targets_and_failed_pages() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::new()
+        .route(
+            "/api/{case}",
+            get(|Path(case): Path<String>, headers: HeaderMap| async move {
+                let host = headers["host"].to_str().unwrap();
+                let (_, port) = host.split_once(':').unwrap();
+                let target = match case.as_str() {
+                    "host" => format!("http://localhost:{port}/api/target"),
+                    "port" => "http://127.0.0.1:1/api/target".into(),
+                    "scheme" => format!("https://{host}/api/target"),
+                    "prefix" => "/api-outside".into(),
+                    "traversal" => "/api/%2E%2E/api-outside".into(),
+                    "encoded" => "/api/..%2Fapi-outside".into(),
+                    "failure" => "/api/target".into(),
+                    _ => panic!("{case}"),
+                };
+                (
+                    [("link", format!("<{target}>; rel=next"))],
+                    Response(json!([1])),
+                )
+            }),
+        )
+        .route(
+            "/api/target",
+            get({
+                let calls = calls.clone();
+                move || {
+                    let calls = calls.clone();
+                    async move {
+                        calls.lock().unwrap().push("target");
+                        StatusCode::NOT_FOUND
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api-outside",
+            get({
+                let calls = calls.clone();
+                move || {
+                    let calls = calls.clone();
+                    async move {
+                        calls.lock().unwrap().push("outside");
+                    }
+                }
+            }),
+        );
+    let source = serve(router, "/api").await;
+    let session = Session::new("admin");
+    let schema = schema_from(
+        r#"
+        type Query {
+            items(case: String!): [Int!] @rest(source: "api", path: "/{{case}}",
+                paginate: {link: true}, not_found: null)
+        }
+        "#,
+        source,
+        "admin",
+        None,
+    );
+    for case in [
+        "host",
+        "port",
+        "scheme",
+        "prefix",
+        "traversal",
+        "encoded",
+        "failure",
+    ] {
+        let response = execute(
+            &schema,
+            &session,
+            "query($case: String!) { items(case: $case) }",
+            json!({"case": case}),
+        )
+        .await;
+        assert!(response["data"]["items"].is_null(), "{case}: {response}");
+        let extensions = &response["errors"][0]["extensions"];
+        assert_eq!(
+            extensions["code"], "rest-source-error",
+            "{case}: {response}"
+        );
+        if case == "failure" {
+            assert_eq!(extensions["http"]["status"], 404, "{response}");
+            assert_eq!(&*calls.lock().unwrap(), &["target"]);
+        } else {
+            assert_eq!(
+                extensions["reason"], "unexpected-response",
+                "{case}: {response}"
+            );
+            assert!(calls.lock().unwrap().is_empty(), "{case}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn rest_response_fields_read_result_and_typed_headers() {
+    let router = Router::new().route(
+        "/page",
+        get(|| async {
+            (
+                [
+                    ("x-total-count", "42"),
+                    ("x-title", "invoice list"),
+                    ("x-ratio", "1.25"),
+                    ("x-more", "true"),
+                    ("x-invalid", "forty two"),
+                ],
+                Response(json!({"data": {"items": [{"id": 1}, {"id": 2}]}})),
+            )
+        }),
+    );
+    let schema = schema_from(
+        r#"
+        scalar JSON
+        type Query {
+            page: Page! @rest(source: "api", path: "/page", result: ["data", "items"])
+        }
+        type Page {
+            items: [Item!]! @body
+            raw: JSON! @body
+            total: Int @response_header(name: "X-Total-Count")
+            title: String @response_header(name: "x-title")
+            ratio: Float @response_header(name: "x-ratio")
+            more: Boolean @response_header(name: "x-more")
+            missing: String @response_header(name: "x-missing")
+            invalid: Int @response_header(name: "x-invalid")
+        }
+        type Item { id: Int! }
+        "#,
+        serve(router, "").await,
+        "admin",
+        None,
+    );
+    let response = execute(
+        &schema,
+        &Session::new("admin"),
+        "{ page { items { id } raw total title ratio more missing invalid } }",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        response["data"],
+        json!({"page": {
+            "items": [{"id": 1}, {"id": 2}],
+            "raw": [{"id": 1}, {"id": 2}],
+            "total": 42,
+            "title": "invoice list",
+            "ratio": 1.25,
+            "more": true,
+            "missing": null,
+            "invalid": null
+        }})
+    );
+    let errors = response["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1, "{response}");
+    assert_eq!(errors[0]["path"], json!(["page", "invalid"]));
+    assert_eq!(errors[0]["extensions"]["code"], "rest-source-error");
+    assert_eq!(errors[0]["extensions"]["reason"], "unexpected-response");
+}
+
+#[test]
+fn rest_pagination_and_response_field_sdl_require_valid_placements_and_options() {
+    for query in [
+        r#"type Query { items: [Int] @rest(source: "api", path: "/", paginate: {}) }"#,
+        r#"type Query { items: [Int] @rest(source: "api", path: "/", paginate: {link: false}) }"#,
+        r#"type Query { items: [Int] @rest(source: "api", path: "/", paginate: {link: true, offset: {query: "skip", size: 1}}) }"#,
+        r#"type Query { items: [Int] @rest(source: "api", path: "/", paginate: {link: true, max_pages: 0}) }"#,
+        r#"type Query { items: [Int] @rest(source: "api", path: "/", paginate: {link: true, max_pages: 1001}) }"#,
+        r#"type Query { items: [Int] @rest(source: "api", path: "/", paginate: {cursor: {query: "after", next: ["cursor", 1]}}) }"#,
+        r#"type Query { items: [Int] @rest(source: "api", path: "/", paginate: {offset: {query: "", size: 1}}) }"#,
+        r#"type Query { items: [Int] @rest(source: "api", path: "/", paginate: {offset: {query: "skip", size: 0}}) }"#,
+        r#"type Query { item: Int @rest(source: "api", path: "/", paginate: {link: true}) }"#,
+        r#"type Query { item: Int @rest(source: "api", path: "/") } type Mutation { items: [Int] @rest(source: "api", path: "/", method: POST, paginate: {link: true}) }"#,
+        r#"type Query { items: [Page] @rest(source: "api", path: "/") } type Page { raw: Int @body }"#,
+        r#"type Query { item: Wrapper @rest(source: "api", path: "/") } type Wrapper { page: Page } type Page { header: String @response_header(name: "etag") }"#,
+        r#"type Query { page: Page @rest(source: "api", path: "/") } type Page { header: [Int] @response_header(name: "etag") }"#,
+        r#"type Query { page: Page @rest(source: "api", path: "/") } type Page { header: ID @response_header(name: "etag") }"#,
+        r#"type Query { page: Page @rest(source: "api", path: "/") } type Page { header: String @response_header(name: "bad name") }"#,
+        r#"type Query { page: Page @rest(source: "api", path: "/") } type Page { raw: Int @body @column(name: "other") }"#,
+    ] {
+        assert!(rusuna::Schema::from_sdl(query).is_err(), "{query}");
+    }
+}
+
+#[tokio::test]
+async fn rest_retry_after_honors_seconds_and_http_date_and_caps_waits() {
+    let seconds = Arc::new(Mutex::new(Vec::new()));
+    let dates = Arc::new(Mutex::new(Vec::new()));
+    let exceeded = Arc::new(Mutex::new(0));
+    let router = Router::new()
+        .route(
+            "/seconds",
+            get({
+                let seconds = seconds.clone();
+                move || {
+                    let seconds = seconds.clone();
+                    async move {
+                        let mut times = seconds.lock().unwrap();
+                        times.push(Instant::now());
+                        if times.len() == 1 {
+                            (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "1")]).into_response()
+                        } else {
+                            Response(json!(1)).into_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/date",
+            get({
+                let dates = dates.clone();
+                move || {
+                    let dates = dates.clone();
+                    async move {
+                        let mut times = dates.lock().unwrap();
+                        let now = SystemTime::now();
+                        if times.is_empty() {
+                            let date = httpdate::fmt_http_date(now + Duration::from_secs(2));
+                            times.push(httpdate::parse_http_date(&date).unwrap());
+                            (StatusCode::SERVICE_UNAVAILABLE, [("retry-after", date)])
+                                .into_response()
+                        } else {
+                            times.push(now);
+                            Response(json!(2)).into_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/exceeded",
+            get({
+                let exceeded = exceeded.clone();
+                move || {
+                    let exceeded = exceeded.clone();
+                    async move {
+                        *exceeded.lock().unwrap() += 1;
+                        (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "61")])
+                    }
+                }
+            }),
+        );
+    let source = serve(router, "").await;
+    let sdl = r#"
+        type Query {
+            seconds: Int @rest(source: "api", path: "/seconds")
+            date: Int @rest(source: "api", path: "/date")
+            exceeded: Int @rest(source: "api", path: "/exceeded")
+        }
+    "#;
+    let session = Session::new("admin");
+    let schema = schema_from(sdl, source.clone().retry(1, Duration::ZERO), "admin", None);
+    let response = execute(&schema, &session, "{ seconds date exceeded }", json!({})).await;
+    assert_eq!(
+        response["data"],
+        json!({"seconds": 1, "date": 2, "exceeded": null})
+    );
+    assert_eq!(
+        response["errors"].as_array().unwrap().len(),
+        1,
+        "{response}"
+    );
+    assert_eq!(response["errors"][0]["extensions"]["http"]["status"], 429);
+    {
+        let seconds = seconds.lock().unwrap();
+        assert_eq!(seconds.len(), 2);
+        assert!(seconds[1].duration_since(seconds[0]) >= Duration::from_secs(1));
+        let dates = dates.lock().unwrap();
+        assert_eq!(dates.len(), 2);
+        assert!(dates[1] >= dates[0]);
+    }
+    assert_eq!(*exceeded.lock().unwrap(), 1);
+
+    let schema = schema_from(
+        sdl,
+        source
+            .retry(1, Duration::ZERO)
+            .max_retry_delay(Duration::ZERO),
+        "admin",
+        None,
+    );
+    seconds.lock().unwrap().clear();
+    let response = execute(&schema, &session, "{ seconds }", json!({})).await;
+    assert_eq!(response["data"], json!({"seconds": null}));
+    assert_eq!(response["errors"][0]["extensions"]["http"]["status"], 429);
+    assert_eq!(seconds.lock().unwrap().len(), 1);
 }

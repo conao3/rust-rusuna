@@ -481,7 +481,10 @@ pub(super) fn aggregate_field(
                     } else {
                         &rows.value
                     };
-                    shared.rest.complete(&shared, &ctx, &ty, value, None).await
+                    shared
+                        .rest
+                        .complete(&shared, &ctx, &ty, value.into(), None)
+                        .await
                 }
                 ("", "count") => {
                     let count = i32::try_from(values.len())

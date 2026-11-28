@@ -783,6 +783,54 @@ header, in descending precedence. Calls share a connection pool. Identical GET r
 with the same transport limits and retry settings are deduplicated per GraphQL request. Each source allows eight concurrent calls
 by default. The timeout is 60 seconds and the response limit is 16 MiB. Configure retries
 with `retry(times, delay)` for GET connection failures and HTTP 429, 502, 503, and 504.
+On 429 and 503, a valid `Retry-After` supplies the wait as seconds or an HTTP-date.
+The configured `delay` applies when the header is absent or invalid. A wait from the
+header that exceeds `max_retry_delay` (60 seconds by default) returns the upstream
+HTTP error immediately.
+
+A GET field that returns a list can declare one pagination mode. Rusuna appends the
+array at `result` from each page, in page order, before applying GraphQL filters and
+aggregates. The `max_pages` setting defaults to 10 and accepts values from 1 through
+1000. At that limit, the field returns the pages read so far. An error on a later page
+fails the field.
+
+```graphql
+type Query {
+  repositories: [Repository!]! @rest(source: "api", path: "/repos",
+    paginate: {link: true})
+  events: [Event!]! @rest(source: "api", path: "/events", result: ["items"],
+    paginate: {cursor: {next: ["next_cursor"], query: "cursor"}, max_pages: 20})
+  logs: [Log!]! @rest(source: "api", path: "/logs",
+    paginate: {offset: {query: "offset", size: 50}, max_pages: 5})
+}
+```
+
+- `link: true` follows a `Link` with `rel="next"`. Relative URLs resolve against the
+  current page. The next URL must use the source's scheme, host, port, and base path.
+  A target outside that scope returns `rest-source-error` with reason
+  `unexpected-response`.
+- `cursor` reads the next value at the listed JSON keys in the response body, then
+  replaces the named query parameter. A missing key, null, or empty string ends pagination.
+- `offset` starts the named query parameter at zero and increases it by `size` on
+  each request. A page with fewer than `size` items ends pagination.
+
+To expose a single HTTP response as an object, declare fields with `@body` and
+`@response_header`. The object type must be returned directly by an `@rest` field.
+
+```graphql
+type Query {
+  invoicePage: InvoicePage @rest(source: "api", path: "/invoices", result: ["items"])
+}
+
+type InvoicePage {
+  items: [Invoice!]! @body
+  total: Int @response_header(name: "x-total-count")
+}
+```
+
+`@body` reads the entire JSON value selected by `result`. Headers can be read as
+`String`, `Int`, `Float`, or `Boolean`. Missing headers resolve to null. A header value
+that cannot be converted to its declared type returns `unexpected-response`.
 
 Declare REST mutation fields on `type Mutation`. The `body` directive argument is a JSON
 object template. A whole string such as `"{{input}}"` or `"{{$user_id}}"` inserts the typed
