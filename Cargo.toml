@@ -22,7 +22,7 @@ default-members = [
 exclude = ["bench"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/conao3/rust-rusuna"
@@ -30,12 +30,12 @@ homepage = "https://github.com/conao3/rust-rusuna"
 readme = "README.md"
 
 [workspace.dependencies]
-rusuna = { path = ".", version = "0.2.1" }
-rusuna-http-client = { path = "crates/rusuna-http-client", version = "0.2.1" }
-rusuna-sqlx = { path = "crates/rusuna-sqlx", version = "0.2.1" }
-rusuna-events = { path = "crates/rusuna-events", version = "0.2.1" }
-rusuna-async-graphql = { path = "crates/rusuna-async-graphql", version = "0.2.1" }
-rusuna-axum = { path = "crates/rusuna-axum", version = "0.2.1" }
+rusuna = { path = ".", version = "0.3.0" }
+rusuna-http-client = { path = "crates/rusuna-http-client", version = "0.3.0" }
+rusuna-sqlx = { path = "crates/rusuna-sqlx", version = "0.3.0" }
+rusuna-events = { path = "crates/rusuna-events", version = "0.3.0" }
+rusuna-async-graphql = { path = "crates/rusuna-async-graphql", version = "0.3.0" }
+rusuna-axum = { path = "crates/rusuna-axum", version = "0.3.0" }
 async-graphql = { version = "7.2.1", default-features = false, features = ["dynamic-schema"] }
 async-graphql-axum = "7.2.1"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
