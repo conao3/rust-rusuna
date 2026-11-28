@@ -1,38 +1,58 @@
 //! The HTTP client of rusuna: hyper 1 with rustls on the ring provider and the webpki root
 //! certificates, so it builds without OpenSSL or CMake.
 //!
-//! `rusuna-events` sends webhooks with it and `rusuna-async-graphql` forwards remote
-//! schema requests with it.
+//! `rusuna-events` sends webhooks with it and `rusuna-async-graphql` calls remote schemas
+//! and REST data sources with it.
 
 pub use hyper::Uri;
 pub use hyper::http;
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
-use hyper::{Request, StatusCode};
+use hyper::{Method, Request, StatusCode};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use std::fmt;
+use std::{fmt, time::Duration};
 
-/// A request that did not produce a response: a connection, TLS or protocol error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Limits {
+    pub timeout: Duration,
+    pub max_body_bytes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Error(pub String);
+#[non_exhaustive]
+pub enum Error {
+    Timeout,
+    TooLarge,
+    InvalidHeader,
+    Connection(String),
+}
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::Timeout => f.write_str("the HTTP request timed out"),
+            Self::TooLarge => f.write_str("the HTTP response exceeded the body limit"),
+            Self::InvalidHeader => {
+                f.write_str("an HTTP header contains a carriage return or newline")
+            }
+            Self::Connection(error) => f.write_str(error),
+        }
     }
 }
 
 impl std::error::Error for Error {}
 
-/// The status and the whole body of a response.
+/// The status, headers and body of a response.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Response {
     pub status: StatusCode,
+    pub headers: HeaderMap,
     pub body: Bytes,
 }
 
@@ -65,27 +85,78 @@ impl Client {
         headers: &HeaderMap,
         body: impl Into<Bytes>,
     ) -> Result<Response, Error> {
-        let mut request = Request::post(uri.clone())
-            .body(Full::new(body.into()))
-            .expect("a POST request with a parsed URI is valid");
-        request
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         for (name, value) in headers {
-            request.headers_mut().append(name.clone(), value.clone());
+            request_headers.append(name.clone(), value.clone());
         }
+        self.send(
+            Method::POST,
+            uri,
+            request_headers,
+            Some(body.into()),
+            usize::MAX,
+        )
+        .await
+    }
+
+    pub async fn request(
+        &self,
+        method: Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+        body: Option<Bytes>,
+        limits: Limits,
+    ) -> Result<Response, Error> {
+        tokio::time::timeout(
+            limits.timeout,
+            self.send(method, uri, headers.clone(), body, limits.max_body_bytes),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+    }
+
+    async fn send(
+        &self,
+        method: Method,
+        uri: &Uri,
+        headers: HeaderMap,
+        body: Option<Bytes>,
+        max_body_bytes: usize,
+    ) -> Result<Response, Error> {
+        if headers.values().any(|value| {
+            value
+                .as_bytes()
+                .iter()
+                .any(|byte| matches!(byte, b'\r' | b'\n'))
+        }) {
+            return Err(Error::InvalidHeader);
+        }
+        let mut request = Request::new(Full::new(body.unwrap_or_default()));
+        *request.method_mut() = method;
+        *request.uri_mut() = uri.clone();
+        *request.headers_mut() = headers;
         let response = self
             .0
             .request(request)
             .await
-            .map_err(|e| Error(e.to_string()))?;
-        let status = response.status();
-        let body = response
-            .into_body()
+            .map_err(|e| Error::Connection(e.to_string()))?;
+        let (parts, body) = response.into_parts();
+        let body = Limited::new(body, max_body_bytes)
             .collect()
             .await
-            .map_err(|e| Error(e.to_string()))?
+            .map_err(|error| {
+                if error.is::<LengthLimitError>() {
+                    Error::TooLarge
+                } else {
+                    Error::Connection(error.to_string())
+                }
+            })?
             .to_bytes();
-        Ok(Response { status, body })
+        Ok(Response {
+            status: parts.status,
+            headers: parts.headers,
+            body,
+        })
     }
 }
