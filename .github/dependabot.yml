@@ -4,7 +4,6 @@ updates:
     directories:
       - /
       - /bench
-      - /crates/rusuna-cli
     schedule:
       interval: weekly
     groups:
