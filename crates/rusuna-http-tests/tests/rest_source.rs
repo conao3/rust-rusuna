@@ -68,12 +68,46 @@ const API: &str = r#"
     }
 "#;
 
+const TABLE_API: &str = r#"
+    type Query {
+      accounts: [account!]! @list
+      upstreamAccounts: [UpstreamAccount!]! @rest(source: "api", path: "/account-ids")
+    }
+    type account @table(name: "account")
+      @primary_key(columns: ["id"])
+      @permission(role: "user", columns: ["id", "code", "region"], where: {id: {_lte: 5}})
+      @permission(role: "reader", columns: ["id"], where: {}) {
+      id: Int!
+      code: Int! @column(name: "score_code")
+      region: String!
+      peers: [account!]! @relation(columns: ["region"], references: ["region"])
+      score: String @rest(source: "api", path: "/score/{{region}}{{code}}",
+                          roles: ["user", "reader"])
+      batched: Score @rest(source: "api", path: "/scores", query: {id: "{{code}}", kind: "score"},
+                           result: ["scores"], batch: {query: "id", key: "id", max_size: 2},
+                           roles: ["user", "reader"])
+      batchMissing: Score @rest(source: "api", path: "/scores", query: {id: "{{code}}", kind: "score"},
+                                 result: ["scores"], batch: {query: "id", key: "id", max_size: 2},
+                                 not_found: null)
+      notFound: Score @rest(source: "api", path: "/missing", not_found: null, roles: ["user"])
+      unavailable: Score @rest(source: "api", path: "/failure", roles: ["user"])
+      invalid: Int @rest(source: "api", path: "/echo", roles: ["user"])
+      adminOnly: Int @rest(source: "api", path: "/retry")
+    }
+    type Score { id: ID!, label: String! }
+    type UpstreamAccount {
+      id: Int!
+      account: account @relation(columns: ["id"], references: ["id"])
+    }
+"#;
+
 #[derive(Default)]
 struct Counts {
     paths: BTreeMap<String, usize>,
     detail_in_flight: usize,
     max_detail_in_flight: usize,
     writes: Vec<(Method, String, Json)>,
+    score_batches: Vec<Vec<i32>>,
 }
 
 type Observed = Arc<Mutex<Counts>>;
@@ -108,12 +142,13 @@ async fn upstream(
         };
     }
     let is_detail = path.starts_with("/pokemon/") && path != "/pokemon/";
+    let is_score = path.starts_with("/score/");
     let calls = {
         let mut counts = counts.lock().unwrap();
         let calls = counts.paths.entry(path.into()).or_default();
         *calls += 1;
         let calls = *calls;
-        if is_detail {
+        if is_detail || is_score {
             counts.detail_in_flight += 1;
             counts.max_detail_in_flight = counts.max_detail_in_flight.max(counts.detail_in_flight);
         }
@@ -131,6 +166,26 @@ async fn upstream(
             pokemon["name"] = json!(path.split('/').nth(2).unwrap());
             pokemon
         }
+        _ if is_score => {
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            counts.lock().unwrap().detail_in_flight -= 1;
+            json!(path.trim_start_matches("/score/"))
+        }
+        "/scores" => {
+            let (params, kind) = uri.query().unwrap().rsplit_once('&').unwrap();
+            assert_eq!(kind, "kind=score");
+            let ids: Vec<i32> = params
+                .split('&')
+                .map(|param| param.strip_prefix("id=").unwrap().parse().unwrap())
+                .collect();
+            let mut scores = ids.clone();
+            scores.sort_unstable();
+            scores.dedup();
+            counts.lock().unwrap().score_batches.push(ids);
+            json!({"scores": scores.into_iter().rev().filter(|&id| id != 0)
+                .map(|id| json!({"id": id, "label": format!("score {id}")})).collect::<Vec<_>>()})
+        }
+        "/account-ids" => json!([{"id": 1}, {"id": 3}, {"id": 5}]),
         "/pokemon-species/bulbasaur/" => fixture(include_str!("fixtures/pokeapi/species.json")),
         "/type/grass/" => fixture(include_str!("fixtures/pokeapi/grass.json")),
         "/type/poison/" => fixture(include_str!("fixtures/pokeapi/poison.json")),
@@ -766,4 +821,252 @@ async fn a_failed_rest_mutation_rolls_back_postgres_and_skips_later_fields() {
             .unwrap(),
         1
     );
+}
+
+async fn table_schema(name: &str, role: &str, base: &str) -> Schema {
+    let pool = database(name, &[]).await;
+    sqlx::raw_sql(
+        "CREATE TABLE account (id integer PRIMARY KEY, score_code integer NOT NULL, region text NOT NULL);
+         INSERT INTO account VALUES (1, 12, 'w'), (2, 12, 'w'), (3, 2, 'w1'),
+           (4, 12, 'w'), (5, 7, 'e'), (6, 0, 'x');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    Builder::new(Arc::new(rusuna::Schema::from_sdl(TABLE_API).unwrap()), role)
+        .rest(config("api", base).concurrency(2))
+        .build()
+        .unwrap()
+        .schema()
+        .data(pool)
+        .finish()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn table_rest_counts_distinct_tuples_and_limits_concurrent_requests() {
+    let (base, observed) = server().await;
+    let schema = table_schema("http_table_rest_tuples", "user", &base).await;
+    let response = execute(
+        &schema,
+        r#"{
+          accounts(order_by: [{id: asc}]) {
+            id
+            ...Calls
+          }
+        }
+        fragment Calls on account {
+          score
+          same: score
+          skipped: invalid @skip(if: true)
+        }"#,
+        rusuna::Session::new("user"),
+    )
+    .await;
+    assert_eq!(
+        response,
+        json!({"data": {"accounts": [
+            {"id": 1, "score": "w12", "same": "w12"},
+            {"id": 2, "score": "w12", "same": "w12"},
+            {"id": 3, "score": "w12", "same": "w12"},
+            {"id": 4, "score": "w12", "same": "w12"},
+            {"id": 5, "score": "e7", "same": "e7"}
+        ]}})
+    );
+    let observed = observed.lock().unwrap();
+    assert_eq!(
+        observed.paths,
+        BTreeMap::from([("/score/e7".into(), 1), ("/score/w12".into(), 2)])
+    );
+    assert_eq!(observed.max_detail_in_flight, 2);
+}
+
+#[tokio::test]
+async fn table_rest_batch_splits_rows_and_maps_reordered_results_by_key() {
+    let (base, observed) = server().await;
+    let schema = table_schema("http_table_rest_batch", "user", &base).await;
+    let response = execute(
+        &schema,
+        "{ accounts(order_by: [{id: asc}]) { id batched { id } alias: batched { label } } }",
+        rusuna::Session::new("user"),
+    )
+    .await;
+    let rows: Vec<_> = [12, 12, 2, 12, 7].into_iter().enumerate().map(|(i, code)| {
+        json!({"id": i + 1, "batched": {"id": code.to_string()}, "alias": {"label": format!("score {code}")}})
+    }).collect();
+    assert_eq!(response, json!({"data": {"accounts": rows}}));
+    let mut observed = observed.lock().unwrap();
+    assert_eq!(
+        observed.paths,
+        BTreeMap::from([("/scores".into(), 5_usize.div_ceil(2))])
+    );
+    observed.score_batches.sort_unstable();
+    assert_eq!(observed.score_batches, [vec![2, 12], vec![7], vec![12, 12]]);
+}
+
+#[tokio::test]
+async fn table_rest_resolves_nested_sql_rows_mutation_returning_and_rest_relationships() {
+    let (base, observed) = server().await;
+    let schema = table_schema("http_table_rest_nested", "admin", &base).await;
+    let session = rusuna::Session::new("admin");
+    let response = execute(
+        &schema,
+        "{ account_by_pk(id: 1) { children: peers(order_by: [{id: asc}]) { id batched { id } } } }",
+        session.clone(),
+    )
+    .await;
+    assert_eq!(
+        response,
+        json!({"data": {"account_by_pk": {"children": [
+            {"id": 1, "batched": {"id": "12"}},
+            {"id": 2, "batched": {"id": "12"}},
+            {"id": 4, "batched": {"id": "12"}}
+        ]}}})
+    );
+    let response = execute(
+        &schema,
+        r#"mutation {
+          insert_account(objects: [{id: 9, code: 19, region: "added"}]) {
+            returning { score }
+          }
+        }"#,
+        session.clone(),
+    )
+    .await;
+    assert_eq!(
+        response,
+        json!({"data": {"insert_account": {"returning": [{"score": "added19"}]}}})
+    );
+    let response = execute(
+        &schema,
+        "{ upstreamAccounts { account { batched { id } } } }",
+        session,
+    )
+    .await;
+    assert_eq!(
+        response,
+        json!({"data": {"upstreamAccounts": [
+            {"account": {"batched": {"id": "12"}}},
+            {"account": {"batched": {"id": "2"}}},
+            {"account": {"batched": {"id": "7"}}}
+        ]}})
+    );
+    assert_eq!(
+        observed.lock().unwrap().paths,
+        BTreeMap::from([
+            ("/score/added19".into(), 1),
+            ("/account-ids".into(), 1),
+            ("/scores".into(), 4),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn table_rest_preserves_errors_and_hides_fields_without_roles_or_column_access() {
+    let (base, observed) = server().await;
+    let schema = table_schema("http_table_rest_errors", "user", &base).await;
+    let response = execute(
+        &schema,
+        "{ accounts(limit: 1) { notFound { id } unavailable { id } invalid } }",
+        rusuna::Session::new("user"),
+    )
+    .await;
+    assert_eq!(
+        response["data"],
+        json!({"accounts": [{"notFound": null, "unavailable": null, "invalid": null}]}),
+        "{response}"
+    );
+    assert_eq!(response["errors"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        extensions(&response, json!(["accounts", 0, "unavailable"])),
+        &json!({"code": "rest-source-error", "http": {"status": 418}})
+    );
+    assert_eq!(
+        extensions(&response, json!(["accounts", 0, "invalid"])),
+        &json!({"code": "rest-source-error", "reason": "unexpected-response"})
+    );
+    let response = execute(
+        &schema,
+        r#"{ __type(name: "account") { fields { name } } }"#,
+        rusuna::Session::new("user"),
+    )
+    .await;
+    let fields = response["data"]["__type"]["fields"].as_array().unwrap();
+    assert!(fields.contains(&json!({"name": "score"})));
+    assert!(!fields.contains(&json!({"name": "adminOnly"})));
+    let schema = role_schema(TABLE_API, "reader", &[config("api", &base)]);
+    let response = execute(
+        &schema,
+        r#"{ __type(name: "account") { fields { name } } }"#,
+        rusuna::Session::new("reader"),
+    )
+    .await;
+    let fields = response["data"]["__type"]["fields"].as_array().unwrap();
+    assert!(!fields.contains(&json!({"name": "score"})));
+    assert!(!fields.contains(&json!({"name": "batched"})));
+    let schema = table_schema("http_table_rest_missing", "admin", &base).await;
+    let response = execute(
+        &schema,
+        "{ account_by_pk(id: 6) { batched { id } batchMissing { id } } }",
+        rusuna::Session::new("admin"),
+    )
+    .await;
+    assert_eq!(
+        response["data"],
+        json!({"account_by_pk": {"batched": null, "batchMissing": null}})
+    );
+    assert_eq!(response["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        extensions(&response, json!(["account_by_pk", "batched"])),
+        &json!({"code": "rest-source-error", "reason": "unexpected-response"})
+    );
+    assert_eq!(observed.lock().unwrap().paths["/scores"], 2);
+}
+
+#[tokio::test]
+async fn a_subscription_with_table_rest_fails_before_sql_or_http() {
+    use futures_util::StreamExt;
+
+    let (base, observed) = server().await;
+    let schema = role_schema(TABLE_API, "user", &[config("api", &base)]);
+    let mut responses = schema.execute_stream(async_graphql::Request::new(
+        "subscription { accounts { peers { ...Fields } } } fragment Fields on account { score }",
+    ).data(rusuna::Session::new("user")));
+    let response = responses.next().await.unwrap();
+    assert_eq!(
+        response.errors[0].message,
+        "subscriptions cannot select table-to-REST fields"
+    );
+    assert!(responses.next().await.is_none());
+    assert!(observed.lock().unwrap().paths.is_empty());
+}
+
+#[test]
+fn table_rest_batch_requires_one_parent_column_and_a_positive_size() {
+    let invalid = [
+        (
+            r#"id: "{{code}}", other: "{{region}}""#,
+            "2",
+            "one parent column",
+        ),
+        (r#"id: "constant""#, "2", "one parent column"),
+        (r#"id: "{{code}}""#, "0", "positive integer"),
+        (r#"other: "{{code}}""#, "2", "its query parameter"),
+        (r#"id: "{{absent}}""#, "2", "absent"),
+    ];
+    for (query, max_size, expected) in invalid {
+        let sdl = format!(
+            r#"
+            type Query {{ accounts: [account!]! @list }}
+            type account @table(name: "account") {{
+              code: Int!
+              region: String!
+              score: String @rest(source: "api", path: "/scores", query: {{{query}}},
+                                  batch: {{query: "id", key: "id", max_size: {max_size}}})
+            }}
+        "#
+        );
+        let error = rusuna::Schema::from_sdl(&sdl).unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
 }

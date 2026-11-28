@@ -19,11 +19,11 @@ pub(super) async fn collect(
     value: &Json,
     session: &rusuna::Session,
     mut connection: Option<&mut PgConnection>,
-) -> Outcomes {
+) -> async_graphql::Result<Outcomes> {
     let mut outcomes = Outcomes::new();
     let catalog = shared.schema.rest_catalog();
     if catalog.relations.is_empty() || !catalog.objects.contains_key(named(ty)) {
-        return outcomes;
+        return Ok(outcomes);
     }
     let mut rows = Vec::new();
     collect_rows(ty, value, path_key(ctx.path_node.as_ref()), &mut rows);
@@ -74,11 +74,20 @@ pub(super) async fn collect(
                     connection.as_deref_mut(),
                 )
                 .await;
+                if let Ok((results, true)) = &results {
+                    let mut plan = table::Plan::default();
+                    for (path, index) in &paths {
+                        if let Ok(value) = &results[*index] {
+                            plan.add(&shared.catalog, &relation.target, path, value, &fields);
+                        }
+                    }
+                    plan.run(shared, ctx, session).await?;
+                }
                 for (path, index) in paths {
                     outcomes.insert(
                         path,
                         match &results {
-                            Ok(results) => results[index].clone(),
+                            Ok((results, _)) => results[index].clone(),
                             Err(error) => Err(error.clone()),
                         },
                     );
@@ -102,7 +111,7 @@ pub(super) async fn collect(
             }
         }
     }
-    outcomes
+    Ok(outcomes)
 }
 
 fn collect_rows<'a>(ty: &Type, value: &'a Json, path: String, rows: &mut Vec<Row<'a>>) {
@@ -127,13 +136,14 @@ async fn resolve(
     keys: &[Vec<&Json>],
     session: &rusuna::Session,
     connection: Option<&mut PgConnection>,
-) -> async_graphql::Result<Vec<Outcome>> {
+) -> async_graphql::Result<(Vec<Outcome>, bool)> {
     let mut document = Document {
         catalog: &shared.catalog,
         text: String::new(),
         definitions: Vec::new(),
         variables: serde_json::Map::new(),
         omit_null: false,
+        has_table_rest: false,
     };
     let relation =
         &shared.schema.rest_catalog().relations[&(parent.into(), fields[0].name().into())];
@@ -141,6 +151,7 @@ async fn resolve(
         document.field(parent, field, Some(&relation.target), None)?;
         document.text.push(' ');
     }
+    let has_table_rest = document.has_table_rest;
     let (text, variables) = document.finish("query");
     let query = shared
         .schema
@@ -187,7 +198,7 @@ async fn resolve(
             .fetch(connection, &compiled, relation, &params, &mut results)
             .await?;
     }
-    Ok(results)
+    Ok((results, has_table_rest))
 }
 
 #[derive(Default)]

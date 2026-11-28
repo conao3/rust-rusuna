@@ -39,6 +39,7 @@ pub(super) fn directives<'a>(
                 "result",
                 "not_found",
                 "roles",
+                "batch",
             ],
             _ => unreachable!(),
         };
@@ -531,7 +532,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                     "reserved or repeated field, or explicitly declared arguments",
                 ));
             }
-            if root && rest::has_rest(&f.node) {
+            if rest.fields.contains_key(&(name.clone(), field.clone())) {
                 rendered.push_str(&render_field(&f.node));
                 continue;
             }
@@ -987,7 +988,14 @@ pub(super) fn for_role(
                 Some(TypeKind::Object(object)) => {
                     if suffix.is_empty() {
                         object.fields.retain(|f| {
-                            column(f.node.name.node.as_str()) || relation(f.node.name.node.as_str())
+                            let field = f.node.name.node.as_str();
+                            column(field)
+                                || relation(field)
+                                || rest
+                                    .fields
+                                    .get(&(name.clone(), field.into()))
+                                    .and_then(|field| field.table_columns.as_ref())
+                                    .is_some_and(|columns| columns.iter().all(|c| column(c)))
                         });
                         for field in &mut object.fields {
                             if permitted.relations.iter().any(|r| {

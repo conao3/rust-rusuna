@@ -104,7 +104,12 @@ enum Shape {
 struct Catalog {
     children: BTreeMap<(String, String), String>,
     arguments: BTreeMap<(String, String), BTreeMap<String, String>>,
-    extras: BTreeMap<(String, String), Vec<String>>,
+    extras: BTreeMap<(String, String), Projection>,
+}
+
+struct Projection {
+    columns: Vec<String>,
+    rest: bool,
 }
 
 struct Shared {
@@ -255,7 +260,23 @@ impl Builder {
             row_columns(&self.schema)?
         };
 
-        let mut extras = BTreeMap::new();
+        let mut extras = self
+            .schema
+            .rest_catalog()
+            .fields
+            .iter()
+            .filter_map(|(key, field)| {
+                field.table_columns.as_ref().map(|columns| {
+                    (
+                        key.clone(),
+                        Projection {
+                            columns: columns.clone(),
+                            rest: true,
+                        },
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut extra_fields: BTreeMap<String, Vec<Field>> = BTreeMap::new();
         for extra in self.extras {
             let Some(declared) = columns.get(&extra.type_name) else {
@@ -302,7 +323,10 @@ impl Builder {
             }
             extras.insert(
                 (extra.type_name.clone(), extra.name.clone()),
-                extra.requires,
+                Projection {
+                    columns: extra.requires,
+                    rest: false,
+                },
             );
             extra_fields
                 .entry(extra.type_name)
@@ -573,7 +597,14 @@ fn row_columns(schema: &rusuna::Schema) -> Result<BTreeMap<String, BTreeSet<Stri
                     .fields
                     .iter()
                     .filter(|f| {
-                        !matches!(types.get(named(&f.node.ty.node)), Some(TypeKind::Object(_)))
+                        !f.node
+                            .directives
+                            .iter()
+                            .any(|directive| directive.node.name.node == "rest")
+                            && !matches!(
+                                types.get(named(&f.node.ty.node)),
+                                Some(TypeKind::Object(_))
+                            )
                     })
                     .map(|f| f.node.name.node.to_string())
                     .collect(),
@@ -730,6 +761,7 @@ struct Document<'a> {
     definitions: Vec<String>,
     variables: serde_json::Map<String, Json>,
     omit_null: bool,
+    has_table_rest: bool,
 }
 
 impl Document<'_> {
@@ -792,8 +824,9 @@ impl Document<'_> {
                 continue;
             }
             let key = (parent.to_string(), name.to_string());
-            if let Some(requires) = self.catalog.extras.get(&key) {
-                for column in requires {
+            if let Some(projection) = self.catalog.extras.get(&key) {
+                self.has_table_rest |= projection.rest;
+                for column in &projection.columns {
                     write!(self.text, " {HIDDEN_PREFIX}{column}: {column}")?;
                 }
                 continue;
@@ -821,7 +854,7 @@ fn render(
     shared: &Shared,
     root: &Root,
     field: &SelectionField<'_>,
-) -> async_graphql::Result<(String, Json)> {
+) -> async_graphql::Result<(String, Json, bool)> {
     let (parent, operation) = match root.operation {
         Operation::Query => (shared.query.as_str(), "query"),
         Operation::Mutation => (shared.mutation.as_str(), "mutation"),
@@ -838,9 +871,12 @@ fn render(
         definitions: Vec::new(),
         variables: serde_json::Map::new(),
         omit_null: false,
+        has_table_rest: false,
     };
     document.field(parent, field, child, None)?;
-    Ok(document.finish(operation))
+    let has_table_rest = document.has_table_rest;
+    let (text, variables) = document.finish(operation);
+    Ok((text, variables, has_table_rest))
 }
 
 #[derive(Default)]
@@ -913,8 +949,14 @@ async fn subscribe<'a>(
     ctx: &ResolverContext<'a>,
 ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<FieldValue<'a>>> + use<'a>> {
     let session = session(shared, ctx)?;
+    let (text, variables, has_table_rest) = render(shared, root, &ctx.ctx.field())?;
+    if has_table_rest {
+        return Err(coded(
+            "subscriptions cannot select table-to-REST fields",
+            "validation-failed",
+        ));
+    }
     let subscriptions = ctx.data::<rusuna_sqlx::Subscriptions>()?;
-    let (text, variables) = render(shared, root, &ctx.ctx.field())?;
     let field = shared
         .schema
         .compile(&text, &variables, None, session)
@@ -975,7 +1017,7 @@ async fn resolve_root(
     let session = session(shared, ctx)?;
     let pool = ctx.data::<PgPool>()?;
     if root.operation == Operation::Query {
-        let (text, variables) = render(shared, root, &ctx.ctx.field())?;
+        let (text, variables, has_table_rest) = render(shared, root, &ctx.ctx.field())?;
         let fields = shared
             .schema
             .compile(&text, &variables, None, session)
@@ -990,11 +1032,16 @@ async fn resolve_root(
         let value = rusuna_sqlx::fetch(&mut conn, &field.compiled)
             .await
             .map_err(|e| execution_error(&e))?;
+        drop(conn);
+        if has_table_rest {
+            rest_source::prepare_table(shared, ctx, &root.definition.ty.node, &value, session)
+                .await?;
+        }
         return Ok(owned(value));
     }
     ctx.data::<Arc<Slot>>()?
         .resolve(ctx, async |state| {
-            let (text, variables) = render(shared, root, &ctx.ctx.field())?;
+            let (text, variables, has_table_rest) = render(shared, root, &ctx.ctx.field())?;
             let fields = shared
                 .schema
                 .compile(&text, &variables, None, session)
@@ -1010,6 +1057,10 @@ async fn resolve_root(
             let value = rusuna_sqlx::fetch(transaction, &field.compiled)
                 .await
                 .map_err(|e| execution_error(&e))?;
+            if has_table_rest {
+                rest_source::prepare_table(shared, ctx, &root.definition.ty.node, &value, session)
+                    .await?;
+            }
             Ok(owned(value))
         })
         .await

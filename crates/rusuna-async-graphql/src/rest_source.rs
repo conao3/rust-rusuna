@@ -15,6 +15,9 @@ use std::time::Duration;
 use tokio::sync::{OnceCell, Semaphore};
 
 mod relation;
+mod table;
+
+pub(super) use table::prepare as prepare_table;
 
 const ENCODE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -172,6 +175,7 @@ impl RestSource {
         field: &RestField,
         value: impl Fn(&str) -> Result<Json, async_graphql::Error>,
         session: &rusuna::Session,
+        batch_keys: &[&Json],
     ) -> Result<Uri, async_graphql::Error> {
         let mut path = self.url.path().trim_end_matches('/').to_string();
         for segment in &field.path {
@@ -180,12 +184,30 @@ impl RestSource {
         }
         let mut query = '?';
         for (name, template) in &field.query {
-            for value in render(template, &value, session, Render::Query)? {
-                path.push(query);
-                query = '&';
-                path.push_str(name);
-                path.push('=');
-                path.push_str(&utf8_percent_encode(&value, ENCODE).to_string());
+            let mut append = |values: Vec<String>| {
+                for value in values {
+                    path.push(query);
+                    query = '&';
+                    path.push_str(name);
+                    path.push('=');
+                    path.push_str(&utf8_percent_encode(&value, ENCODE).to_string());
+                }
+            };
+            if field
+                .batch
+                .as_ref()
+                .is_some_and(|batch| &batch.query == name)
+            {
+                for key in batch_keys {
+                    append(render(
+                        template,
+                        |_| Ok((*key).clone()),
+                        session,
+                        Render::Query,
+                    )?);
+                }
+            } else {
+                append(render(template, &value, session, Render::Query)?);
             }
         }
         let mut parts = self.url.clone().into_parts();
@@ -412,21 +434,25 @@ fn is_json(headers: &HeaderMap) -> bool {
         })
 }
 
+type TableCall = ((String, String), Vec<Json>);
+
 #[derive(PartialEq, Eq, Hash)]
 struct Call {
     limits: Limits,
     retry: (usize, Duration),
+    table: Option<TableCall>,
     uri: Uri,
     headers: Vec<(HeaderName, Vec<HeaderValue>)>,
 }
 
 impl Call {
-    fn new(source: &RestSource, uri: Uri, headers: &HeaderMap) -> Self {
+    fn new(source: &RestSource, uri: Uri, headers: &HeaderMap, table: Option<TableCall>) -> Self {
         let mut keys: Vec<_> = headers.keys().collect();
         keys.sort_unstable_by_key(|name| name.as_str());
         Self {
             limits: source.limits,
             retry: source.retry,
+            table,
             uri,
             headers: keys
                 .into_iter()
@@ -475,11 +501,62 @@ fn status_error(status: StatusCode, body: Option<&str>) -> async_graphql::Error 
     })
 }
 
-type Calls = HashMap<Call, Arc<OnceCell<Upstream>>>;
+type Calls = HashMap<Call, Arc<OnceCell<Arc<Upstream>>>>;
+
+async fn cached_get(
+    state: &RestRequest,
+    source: &RestSource,
+    uri: Uri,
+    headers: &HeaderMap,
+    table: Option<TableCall>,
+) -> Arc<Upstream> {
+    let key = Call::new(source, uri.clone(), headers, table);
+    let cached = state.calls.lock().await.entry(key).or_default().clone();
+    cached
+        .get_or_init(async || Arc::new(source.request(Method::GET, &uri, headers, None).await))
+        .await
+        .clone()
+}
+
+fn response_json<'a>(
+    source: &RestSource,
+    field: &RestField,
+    response: &'a Upstream,
+) -> async_graphql::Result<Option<&'a Json>> {
+    match response {
+        Upstream::Empty => Ok(None),
+        Upstream::Http {
+            status: StatusCode::NOT_FOUND,
+            ..
+        } if field.not_found_null => Ok(None),
+        Upstream::Http { status, body } => Err(status_error(
+            *status,
+            source.expose_error_body.then_some(body.as_str()),
+        )),
+        Upstream::Failed(reason) => Err(failure(reason)),
+        Upstream::InvalidHeader => Err(invalid("invalid REST request header")),
+        Upstream::Json(json) => field
+            .result
+            .iter()
+            .try_fold(json, |value, key| value.get(key).ok_or_else(unexpected))
+            .map(Some),
+    }
+}
+
+fn empty_value(ty: &Type) -> async_graphql::Result<Option<FieldValue<'static>>> {
+    if ty.nullable {
+        Ok(None)
+    } else if matches!(&ty.base, BaseType::Named(name) if name == "Boolean") {
+        Ok(Some(FieldValue::value(true)))
+    } else {
+        Err(unexpected())
+    }
+}
 
 #[derive(Default)]
 struct RestRequest {
     calls: Mutex<Calls>,
+    table: SyncMutex<table::Outcomes>,
     null_paths: SyncMutex<BTreeSet<String>>,
     provided_variables: BTreeSet<Name>,
 }
@@ -638,6 +715,7 @@ impl RestRuntime {
         if call.is_none() && key.is_none() && relation.is_none() {
             return None;
         }
+        let table = call.is_some_and(|call| call.table_columns.is_some());
         let mutation = call.is_some_and(|call| call.method != RestMethod::Get);
         let shared = shared.clone();
         let owner = owner.to_string();
@@ -674,7 +752,25 @@ impl RestRuntime {
                         row.relations.clone(),
                     ));
                 }
-                let result = if mutation {
+                let result = if table {
+                    let outcome = state
+                        .table
+                        .lock()
+                        .unwrap()
+                        .get(&path_key(ctx.path_node.as_ref()))
+                        .cloned()
+                        .unwrap_or_else(|| Err(unexpected()));
+                    match outcome {
+                        Ok(Some(value)) => {
+                            shared
+                                .rest
+                                .complete(&shared, &ctx, &spec.ty.node, &value, None)
+                                .await
+                        }
+                        Ok(None) => empty_value(&spec.ty.node),
+                        Err(error) => Err(error),
+                    }
+                } else if mutation {
                     ctx.data::<Arc<Slot>>()?
                         .resolve(&ctx, async |slot| {
                             shared
@@ -762,16 +858,13 @@ impl RestRuntime {
                 .unwrap();
             Ok(argument_value(&argument.node)?.unwrap_or(Json::Null))
         };
-        let uri = source.uri(field, value, session)?;
+        let uri = source.uri(field, value, session, &[])?;
         let mut headers = source.headers(session, ctx.data_opt::<ClientHeaders>())?;
         let upstream;
         let cached;
         let response = if field.method == RestMethod::Get {
-            let key = Call::new(source, uri.clone(), &headers);
-            cached = state.calls.lock().await.entry(key).or_default().clone();
-            cached
-                .get_or_init(|| source.request(Method::GET, &uri, &headers, None))
-                .await
+            cached = cached_get(state, source, uri, &headers, None).await;
+            &*cached
         } else {
             let body = match &field.body {
                 Some(template) => body_object(template, &value, session)?,
@@ -800,29 +893,26 @@ impl RestRuntime {
             &upstream
         };
         let ty = &definition.ty.node;
-        let value = match response {
-            Upstream::Empty if ty.nullable => return Ok(None),
-            Upstream::Empty if matches!(&ty.base, BaseType::Named(name) if name == "Boolean") => {
-                return Ok(Some(FieldValue::value(true)));
+        match response_json(source, field, response)? {
+            Some(value) => {
+                self.complete(shared, ctx, ty, value, transaction_state)
+                    .await
             }
-            Upstream::Empty => return Err(unexpected()),
-            Upstream::Http {
-                status: StatusCode::NOT_FOUND,
-                ..
-            } if field.not_found_null => return Ok(None),
-            Upstream::Http { status, body } => {
-                return Err(status_error(
-                    *status,
-                    source.expose_error_body.then_some(body.as_str()),
-                ));
-            }
-            Upstream::Failed(reason) => return Err(failure(reason)),
-            Upstream::InvalidHeader => return Err(invalid("invalid REST request header")),
-            Upstream::Json(json) => field
-                .result
-                .iter()
-                .try_fold(json, |value, key| value.get(key).ok_or_else(unexpected))?,
-        };
+            None => empty_value(ty),
+        }
+    }
+
+    async fn complete(
+        &self,
+        shared: &Shared,
+        ctx: &ResolverContext<'_>,
+        ty: &Type,
+        value: &Json,
+        transaction_state: Option<&mut State>,
+    ) -> async_graphql::Result<Option<FieldValue<'static>>> {
+        let catalog = shared.schema.rest_catalog();
+        let state = ctx.data::<RestRequest>()?;
+        let session = session(shared, ctx)?;
         let mut slot;
         let connection = if let Some(transaction_state) = transaction_state {
             transaction_state.transaction.as_deref_mut()
@@ -834,7 +924,7 @@ impl RestRuntime {
         } else {
             None
         };
-        let relations = relation::collect(shared, ctx, ty, value, session, connection).await;
+        let relations = relation::collect(shared, ctx, ty, value, session, connection).await?;
         Ok(self.output(shared, ctx, state, ty, value, Arc::new(relations)))
     }
 

@@ -817,6 +817,39 @@ distinct non-null keys at a time. A key with an incompatible value returns
 `validation-failed`. PostgreSQL `uuid` keys use GraphQL `String` and `numeric` keys
 use GraphQL `Int` or `Float`, according to the SDL.
 
+A `@table` type can use `@rest` to fetch a field using its parent row.
+
+```graphql
+type Customer @table(name: "customer") {
+  id: Int!
+  creditScore: CreditScore
+    @rest(source: "scoring", path: "/scores/{{id}}", roles: ["user"])
+  batchedCreditScore: CreditScore
+    @rest(source: "scoring", path: "/scores", query: {id: "{{id}}"},
+          batch: {query: "id", key: "id", max_size: 50}, roles: ["user"])
+}
+
+type CreditScore {
+  id: ID!
+  score: Int!
+}
+```
+
+Use the GraphQL names of the table's scalar columns in parent markers. The role
+must be able to select those columns. Rusuna projects the columns internally when
+the client selects the field, then sends one GET per distinct tuple of column
+values. This also works inside mutation `returning`. A subscription selecting a
+table-to-REST field fails at startup.
+
+With `batch`, place the single parent column marker in the query parameter named
+by `batch.query`. Each request takes up to `max_size` parent rows from the SQL
+result and repeats that parameter (`?id=1&id=2`). The response, after applying
+`result`, must be an array of objects. Each object's `batch.key` value matches the
+parent column value. Response order is arbitrary. A missing key returns null
+with `not_found: null` and a response error otherwise. Null parent values are omitted
+from the query parameters and resolve to null. The source's concurrency limit
+applies to individual requests and batches.
+
 `admin` can see every REST field. Other roles see fields that list their role and the
 reachable types. `schema expand-sdl` preserves REST directives and `query compile-sql`
 returns `Error::RestField` for REST roots. Upstream errors use `rest-source-error` with

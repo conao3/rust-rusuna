@@ -139,7 +139,7 @@ fn the_loader_rejects_invalid_rest_definitions() {
         r#"type Query { info(n: Int = "two"): String @rest(source: "api", path: "/a") }"#,
         r#"type Query { info: Row @rest(source: "api", path: "/a") } type Row @table(name: "rows") { id: Int }"#,
         r#"type Query { rows(id: Int): [Row!]! @list } type Row @table(name: "rows") { id: Int }"#,
-        r#"type Query { rows: [Row!]! @list } type Row @table(name: "rows") { id: Int, ext: String @rest(source: "api", path: "/a") }"#,
+        r#"type Query { rows: [Row!]! @list } type Row @table(name: "rows") { id: Int, ext: String @rest(source: "api", path: "/a/{{ext}}") }"#,
         r#"type Query { info: Info @rest(source: "api", path: "/a") } type Info @permission(role: "user", where: {}, columns: ["id"]) { id: Int }"#,
         r#"type Query { info: Info @rest(source: "api", path: "/a") } type Info { ids: [Int], next: String @rest(source: "api", path: "/a/{{ids}}") }"#,
         r#"type Query { info: String @rest(source: "api", path: "/a") } type Orphan { id: Int }"#,

@@ -523,7 +523,11 @@ template rendering, HTTP execution, and response validation. For a REST-to-table
 relationship, the core resolves the client selection and applies table permissions
 before Rust appends the declared join-key equality predicates to the root scan.
 The core then emits SQL for that scan. The HTTP integration tests cover the added
-conjunction, statement batching, and mapping results back to REST rows.
+conjunction, statement batching, and mapping results back to REST rows. For a
+table-to-REST field, Rust projects the required columns using the same mechanism
+as hand-written fields. The core checks those projections against column
+permissions. Rust groups HTTP calls and maps the results back to parent rows
+after SQL execution.
 
 `Scan` contains the resolved permission expression syntactically; the proof does not
 interpret PostgreSQL or show that a permission expresses its author's intended policy.

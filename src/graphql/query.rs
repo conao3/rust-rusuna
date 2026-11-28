@@ -347,6 +347,12 @@ impl Context<'_> {
             .iter()
             .find(|s| s.node.name.node == name)
             .ok_or_else(|| error(field.pos, format!("unknown field {parent}.{name}")))?;
+        if rest::has_rest(&spec.node) {
+            return Err(error(
+                field.pos,
+                format!("REST field {parent}.{name} requires the async-graphql runtime"),
+            ));
+        }
         let mutation = self
             .schema
             .mutation_roots

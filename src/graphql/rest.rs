@@ -36,6 +36,15 @@ pub struct RestField {
     pub result: Vec<String>,
     pub not_found_null: bool,
     pub roles: BTreeSet<String>,
+    pub table_columns: Option<Vec<String>>,
+    pub batch: Option<RestBatch>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestBatch {
+    pub query: String,
+    pub key: String,
+    pub max_size: usize,
 }
 
 impl RestField {
@@ -212,6 +221,7 @@ fn definition(
     field: &FieldDefinition,
     names: &BTreeSet<&str>,
     mutation: bool,
+    table: bool,
 ) -> Result<RestField, Error> {
     let invalid = |message| error(d.name.pos, message);
     let method = match d.get_argument("method").map(|value| &value.node) {
@@ -264,16 +274,72 @@ fn definition(
             _ => return Err(invalid("@rest query must be an object")),
         },
     };
+    let mut columns = BTreeSet::new();
     for template in path
         .iter()
         .chain(query.iter().map(|(_, template)| template))
     {
-        for part in &template.0 {
-            if let TemplatePart::Field(name) = part {
-                check_template_field(name, names, d.name.pos)?;
-            }
+        for name in template_fields(template) {
+            check_template_field(name, names, d.name.pos)?;
+            columns.insert(name.to_owned());
         }
     }
+    if table && let Some(column) = columns.iter().find(|name| name.len() > 54) {
+        return Err(error(
+            d.name.pos,
+            format!("the required column name {column} is longer than 54 bytes"),
+        ));
+    }
+    let batch = if let Some(value) = d.get_argument("batch") {
+        let ConstValue::Object(batch) = &value.node else {
+            return Err(invalid("@rest batch must be an object"));
+        };
+        if !table || columns.len() != 1 {
+            return Err(invalid(
+                "@rest batch requires a table field with one parent column",
+            ));
+        }
+        let name = |key: &str| match batch.get(key) {
+            Some(ConstValue::String(name)) if !name.is_empty() => Ok(name.clone()),
+            _ => Err(error(
+                d.name.pos,
+                format!("@rest batch requires a nonempty string {key}"),
+            )),
+        };
+        let parameter = name("query")?;
+        let key = name("key")?;
+        let max_size = match batch.get("max_size") {
+            Some(ConstValue::Number(size)) => {
+                size.as_u64().and_then(|size| usize::try_from(size).ok())
+            }
+            _ => None,
+        }
+        .filter(|&size| size > 0)
+        .ok_or_else(|| invalid("@rest batch max_size must be a positive integer"))?;
+        if batch.len() != 3 {
+            return Err(invalid("unknown @rest batch argument"));
+        }
+        if path
+            .iter()
+            .any(|template| template_fields(template).next().is_some())
+            || query
+                .iter()
+                .filter(|(_, template)| template_fields(template).next().is_some())
+                .map(|(name, _)| name.as_str())
+                .ne([parameter.as_str()])
+        {
+            return Err(invalid(
+                "@rest batch requires one parent marker in its query parameter",
+            ));
+        }
+        Some(RestBatch {
+            query: parameter,
+            key,
+            max_size,
+        })
+    } else {
+        None
+    };
     let result = match d.get_argument("result").map(|value| &value.node) {
         None => Vec::new(),
         Some(ConstValue::List(values)) => values
@@ -293,11 +359,20 @@ fn definition(
         query,
         result,
         not_found_null,
+        table_columns: table.then(|| columns.into_iter().collect()),
+        batch,
         roles: if d.get_argument("roles").is_some() {
             strings(d, "roles")?.into_iter().collect()
         } else {
             BTreeSet::new()
         },
+    })
+}
+
+fn template_fields(template: &Template) -> impl Iterator<Item = &str> {
+    template.0.iter().filter_map(|part| match part {
+        TemplatePart::Field(name) => Some(name.as_str()),
+        _ => None,
     })
 }
 
@@ -328,9 +403,21 @@ pub(super) fn load(
             }
         }
     }
+    let tables: BTreeSet<_> = rows
+        .iter()
+        .filter(|&name| {
+            objects[name]
+                .node
+                .directives
+                .iter()
+                .any(|d| d.node.name.node == "table")
+        })
+        .map(String::as_str)
+        .collect();
     let mut pending: Vec<_> = fields(&objects[query].node)
         .iter()
         .chain(mutation.into_iter().flat_map(|ty| fields(&ty.node)))
+        .chain(tables.iter().flat_map(|&name| fields(&objects[name].node)))
         .filter(|f| has_rest(&f.node))
         .map(|f| named(&f.node.ty.node))
         .collect();
@@ -356,12 +443,14 @@ pub(super) fn load(
     for owner in std::iter::once(query)
         .chain(mutation.map(|_| "Mutation"))
         .chain(objects_reached.iter().copied())
+        .chain(tables.iter().copied())
     {
         let mutation = owner == "Mutation";
         let root = owner == query || mutation;
         let t = &objects[owner];
         let fields = fields(&t.node);
-        if !root {
+        let table = tables.contains(owner);
+        if !root && !table {
             directives(&t.node.directives, &[])?;
             if fields.is_empty() {
                 return Err(error(t.pos, "object types require fields"));
@@ -375,12 +464,15 @@ pub(super) fn load(
                 !f.node
                     .directives
                     .iter()
-                    .any(|d| matches!(d.node.name.node.as_str(), "rest" | "relation"))
+                    .any(|d| matches!(d.node.name.node.as_str(), "rest" | "relation" | "aggregate"))
                     && matches!(&f.node.ty.node.base, BaseType::Named(name) if scalar_output(name))
             })
             .map(|f| f.node.name.node.as_str())
             .collect();
-        for f in fields.iter().filter(|f| !root || has_rest(&f.node)) {
+        for f in fields
+            .iter()
+            .filter(|f| (!root && !table) || has_rest(&f.node))
+        {
             let name = f.node.name.node.as_str();
             if name.starts_with("__") || !seen.insert(name) {
                 return Err(error(f.pos, "reserved or repeated field"));
@@ -388,7 +480,7 @@ pub(super) fn load(
             let target = named(&f.node.ty.node);
             let d = directives(
                 &f.node.directives,
-                if root {
+                if root || table {
                     &["rest"]
                 } else {
                     &["rest", "column", "relation"]
@@ -445,6 +537,7 @@ pub(super) fn load(
                     &f.node,
                     if root { &args } else { &parent_names },
                     mutation,
+                    table,
                 )?;
                 catalog.fields.insert((owner.into(), name.into()), spec);
             } else {
@@ -470,7 +563,7 @@ pub(super) fn load(
                 );
             }
         }
-        if !root {
+        if !root && !table {
             catalog.objects.insert(owner.into(), keys);
         }
     }
@@ -522,6 +615,17 @@ pub(super) fn uses_date_time(
                 .get("Mutation")
                 .into_iter()
                 .flat_map(|ty| fields(&ty.node)),
+        )
+        .chain(
+            catalog
+                .fields
+                .iter()
+                .filter(|(_, field)| field.table_columns.is_some())
+                .flat_map(|((owner, name), _)| {
+                    fields(&objects[owner].node)
+                        .iter()
+                        .filter(move |field| field.node.name.node == name.as_str())
+                }),
         )
         .filter(|field| has_rest(&field.node))
         .any(output)

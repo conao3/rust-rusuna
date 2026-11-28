@@ -634,6 +634,7 @@ async fn request(
         definitions: Vec::new(),
         variables: serde_json::Map::new(),
         omit_null: true,
+        has_table_rest: false,
     };
     document.field(parent, &field, child, Some(target))?;
     let definitions = if document.definitions.is_empty() {
