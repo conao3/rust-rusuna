@@ -1,7 +1,7 @@
 # rusuna development
 
 Rust edition 2024, leanfran, flake-parts and treefmt-nix. Lean and Lake are fixed to
-4.35.0, leanfran to the revision in `flake.nix` and the crates `=0.6.0`. Keep code,
+4.35.0, leanfran to the revision in `flake.nix` and the crates `=0.14.0`. Keep code,
 tests, commit messages and documentation in English. Write code without comments,
 trailing spaces or alignment padding.
 

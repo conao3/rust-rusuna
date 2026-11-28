@@ -1665,7 +1665,7 @@ they are published in the order `rusuna`, `rusuna-http-client`, `rusuna-sqlx`,
 `rusuna-events`, `rusuna-async-graphql`, `rusuna-axum`. The `rusuna` package contains `src/` and `.leanfran/cache/`, the Rust
 leanfran generated from the `lean!` block. Its build script copies the cached module and
 needs neither Lean nor Lake, so a crate that depends on the published `rusuna`
-([leanfran](https://crates.io/crates/leanfran) and `leanfran-build` 0.6.0 come from
+([leanfran](https://crates.io/crates/leanfran) and `leanfran-build` 0.14.0 come from
 crates.io) builds with cargo and a C toolchain only. `lean/` isn't packaged; the cache
 key depends on the block and on the crate name, so a changed block needs a regenerated
 cache before packaging, which `make check` enforces.
