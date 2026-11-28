@@ -827,8 +827,8 @@ point order, numbers as `f64`, and RFC 3339 `DateTime` values as instants.
 
 On a REST response type, `@permission` grants access to the declared role and
 exposes only its listed columns. The role's filter runs before the client's
-`where`, and the permission limit caps the result after client pagination.
-Aggregates summarize the resulting page. Permissions also apply when an
+`where`. After client pagination, the permission limit caps lists and aggregate
+`nodes`. Aggregate values use every row in the client page. Permissions apply when an
 `@rest` field returns the type without `filter: true`. A single object that
 fails the role filter resolves to null. REST permission filters accept typed
 session values with case-insensitive `X-Hasura-*` names. In the example, the

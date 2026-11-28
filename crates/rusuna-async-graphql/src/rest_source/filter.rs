@@ -11,7 +11,7 @@ pub(super) struct Plan<'a> {
     order: Vec<(&'a RestColumn, Direction)>,
     offset: usize,
     limit: usize,
-    permission_limit: usize,
+    pub(super) permission_limit: usize,
 }
 
 impl<'a> Plan<'a> {
@@ -121,7 +121,11 @@ impl<'a> Plan<'a> {
                 Json::Array(
                     rows.into_iter()
                         .skip(self.offset)
-                        .take(self.limit.min(self.permission_limit))
+                        .take(if self.field.aggregate {
+                            self.limit
+                        } else {
+                            self.limit.min(self.permission_limit)
+                        })
                         .collect(),
                 )
             }
@@ -429,6 +433,11 @@ impl Pattern {
     }
 }
 
+pub(super) struct AggregateRows {
+    pub(super) value: Json,
+    pub(super) permission_limit: usize,
+}
+
 pub(super) fn aggregate_field(
     shared: &Arc<Shared>,
     owner: &str,
@@ -461,13 +470,21 @@ pub(super) fn aggregate_field(
         let target = target.clone();
         let ty = ty.clone();
         FieldFuture::new(async move {
-            let rows = ctx.parent_value.try_downcast_ref::<Arc<Json>>()?;
+            let rows = ctx.parent_value.try_downcast_ref::<Arc<AggregateRows>>()?;
+            let values = rows.value.as_array().unwrap();
             match (operation, name.as_str()) {
                 ("", "nodes") if matches!(ty.base, BaseType::List(_)) => {
-                    shared.rest.complete(&shared, &ctx, &ty, rows, None).await
+                    let limited;
+                    let value = if values.len() > rows.permission_limit {
+                        limited = Json::Array(values[..rows.permission_limit].to_vec());
+                        &limited
+                    } else {
+                        &rows.value
+                    };
+                    shared.rest.complete(&shared, &ctx, &ty, value, None).await
                 }
                 ("", "count") => {
-                    let count = i32::try_from(rows.as_array().unwrap().len())
+                    let count = i32::try_from(values.len())
                         .map_err(|_| invalid("REST aggregate count exceeds Int"))?;
                     Ok(Some(FieldValue::value(count)))
                 }
@@ -475,7 +492,7 @@ pub(super) fn aggregate_field(
                 (operation, _) => {
                     let catalog = shared.schema.rest_catalog();
                     let column = &catalog.objects[&target][&name];
-                    metric(&shared.rest, rows.as_array().unwrap(), column, operation)
+                    metric(&shared.rest, values, column, operation)
                         .map(|value| value.map(FieldValue::value))
                 }
             }

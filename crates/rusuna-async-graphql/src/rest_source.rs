@@ -943,7 +943,12 @@ impl RestRuntime {
             return Ok(None);
         }
         if plan.field.aggregate {
-            return Ok(Some(FieldValue::owned_any(Arc::new(value))));
+            return Ok(Some(FieldValue::owned_any(Arc::new(
+                filter::AggregateRows {
+                    value,
+                    permission_limit: plan.permission_limit,
+                },
+            ))));
         }
         self.complete(shared, ctx, ty, &value, transaction_state)
             .await

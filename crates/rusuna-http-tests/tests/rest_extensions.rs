@@ -17,7 +17,7 @@ const SDL: &str = r#"
     scalar DateTime
     enum State { Zulu Alpha }
     type Query {
-      restRows: [RestRow!]! @rest(source: "api", path: "/rows", filter: true, roles: ["user"])
+      restRows: [RestRow!]! @rest(source: "api", path: "/rows", filter: true, roles: ["user", "limited"])
       tableRows: [TableRow!]! @list
       tableRows_aggregate: TableRow_aggregate! @aggregate(target: "TableRow")
       parent: Parent! @rest(source: "api", path: "/parent", roles: ["user"])
@@ -35,7 +35,8 @@ const SDL: &str = r#"
     }
     type TableRow
       @table(name: "rest_extension_rows", read_only: true)
-      @permission(role: "user", columns: ["id"], where: {}) {
+      @permission(role: "user", columns: ["id"], where: {})
+      @permission(role: "limited", columns: ["id", "label", "score"], where: {owner: {_eq: "$owner"}}, allow_aggregations: true, limit: 2) {
       id: Int!
       owner: Int!
       label: String
@@ -44,7 +45,8 @@ const SDL: &str = r#"
       rest: RestRow! @rest(source: "api", path: "/row/{{id}}", roles: ["user"])
     }
     type RestRow
-      @permission(role: "user", filter: {owner: {_eq: "X-Hasura-User-Id"}}, columns: ["id", "label", "score", "detail", "state", "moment", "relation"], limit: 2) {
+      @permission(role: "user", filter: {owner: {_eq: "X-Hasura-User-Id"}}, columns: ["id", "label", "score", "detail", "state", "moment", "relation"], limit: 2)
+      @permission(role: "limited", filter: {owner: {_eq: "$owner"}}, columns: ["id", "label", "score"], limit: 2) {
       id: Int!
       owner: Int! @column(name: "owner_id")
       label: String
@@ -207,6 +209,7 @@ async fn rest_filter_order_pagination_and_aggregates_match_postgres() {
         .execute(&pool).await.unwrap();
     let source = source().await;
     let user = schema(source.clone(), "user", Some(pool.clone()));
+    let limited = schema(source.clone(), "limited", Some(pool.clone()));
     let schema = schema(source, "admin", Some(pool));
     for (arguments, fields) in [
         (
@@ -262,6 +265,33 @@ async fn rest_filter_order_pagination_and_aggregates_match_postgres() {
         }
         assert_eq!(aggregate, data["tableRows_aggregate"], "{query}");
     }
+    let limited_session = Session::from_json("limited", &json!({"owner": 7})).unwrap();
+    let selection =
+        "{ aggregate { count sum { score } avg { score } min { id } max { id } } nodes { id } }";
+    for (arguments, count, ids) in [
+        ("(order_by: {id: asc})", 5, json!([{"id": 1}, {"id": 2}])),
+        (
+            "(where: {id: {_gte: 2}}, order_by: {id: desc}, offset: 1, limit: 3)",
+            3,
+            json!([{"id": 4}, {"id": 3}]),
+        ),
+        ("(order_by: {id: asc}, limit: 1)", 1, json!([{"id": 1}])),
+        ("(order_by: {id: asc}, limit: 0)", 0, json!([])),
+    ] {
+        let query = format!(
+            "{{ restRows_aggregate{arguments} {selection} tableRows_aggregate{arguments} {selection} }}"
+        );
+        let response = execute(&limited, &limited_session, &query, json!({})).await;
+        assert!(response.get("errors").is_none(), "{query}: {response}");
+        let data = &response["data"];
+        assert_eq!(
+            data["restRows_aggregate"], data["tableRows_aggregate"],
+            "{query}"
+        );
+        assert_eq!(data["restRows_aggregate"]["aggregate"]["count"], count);
+        assert_eq!(data["restRows_aggregate"]["nodes"], ids);
+    }
+
     let session = Session::from_json("user", &json!({"X-Hasura-User-Id": 7})).unwrap();
     let response = execute(
         &user,
@@ -307,7 +337,7 @@ async fn rest_permissions_filter_every_call_and_hide_columns() {
         response,
         json!({"data": {
             "filtered": [{"id": 3}, {"id": 4}],
-            "restRows_aggregate": {"aggregate": {"count": 2, "min": {"id": 1}}, "nodes": [{"id": 1}, {"id": 2}]},
+            "restRows_aggregate": {"aggregate": {"count": 4, "min": {"id": 1}}, "nodes": [{"id": 1}, {"id": 2}]},
             "parent": {"rows": [{"id": 3}, {"id": 4}]},
             "plain": [{"id": 3}, {"id": 1}],
             "blocked": null,
@@ -395,7 +425,7 @@ async fn rest_mutation_filters_the_result_after_sending_declared_arguments() {
         json!({"data": {
             "update": [{"id": 2}],
             "update_aggregate": {
-                "aggregate": {"count": 2},
+                "aggregate": {"count": 4},
                 "nodes": [{"id": 4}, {"id": 3}]
             }
         }})
