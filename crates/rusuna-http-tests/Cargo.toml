@@ -17,5 +17,5 @@ rusuna-axum = { workspace = true }
 rusuna-sqlx = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "time"] }
+tokio = { workspace = true, features = ["io-util", "test-util", "time"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }

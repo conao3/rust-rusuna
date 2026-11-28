@@ -382,11 +382,15 @@ async fn a_hundred_subscriptions_are_updated_by_one_statement() {
     assert_eq!(snapshot(&pool, &subscriptions).await, stopped);
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn groups_follow_statements_roles_and_the_batch_size() {
     let pool = database_with_statistics("http_subscription_groups").await;
     let schema = rusuna::Schema::from_sdl(&fixture("permissions.graphql")).unwrap();
-    let subscriptions = Subscriptions::new(pool.clone(), options());
+    let options = options();
+    let subscriptions = Subscriptions::new(pool.clone(), options);
+    let (resume, paused) = std::sync::mpsc::channel();
+    let clock = tokio::task::spawn_blocking(move || paused.recv_timeout(WAIT));
+    tokio::time::pause();
     let compile = |query: &str, role: &str, user: i64| {
         let mut session = rusuna::Session::new(role);
         if role == "user" {
@@ -422,10 +426,21 @@ async fn groups_follow_statements_roles_and_the_batch_size() {
         };
         assert_eq!(ids, expected);
     }
-    until(&subscriptions, |stats| stats.groups == 1).await;
-    let (before, (multiplexed_before, _)) = snapshot(&pool, &subscriptions).await;
-    until(&subscriptions, |stats| stats.polls >= before.polls + 2).await;
-    let (after, (multiplexed_after, _)) = snapshot(&pool, &subscriptions).await;
+    let before = subscriptions.stats();
+    assert_eq!(before.groups, 1);
+    let (multiplexed_before, _) = statement_calls(&pool).await;
+    for poll in 1..=2 {
+        tokio::time::advance(options.interval + Duration::from_millis(1)).await;
+        while subscriptions.stats().polls < before.polls + poll {
+            assert!(!clock.is_finished(), "the subscription poll did not finish");
+            tokio::task::yield_now().await;
+        }
+    }
+    let after = subscriptions.stats();
+    let (multiplexed_after, _) = statement_calls(&pool).await;
+    tokio::time::resume();
+    resume.send(()).unwrap();
+    clock.await.unwrap().unwrap();
     assert_eq!(
         after.statements - before.statements,
         2 * (after.polls - before.polls)
