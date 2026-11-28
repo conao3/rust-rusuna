@@ -27,6 +27,7 @@ mod mutation;
 mod statement;
 pub use mutation::*;
 
+pub use graphql::rest::{RestCatalog, RestColumn, RestField, Template, TemplatePart};
 pub use graphql::{CompiledField, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_DEPTH};
 
 use compiler::model;
@@ -507,6 +508,7 @@ pub struct Compiled {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     Document {
         message: String,
@@ -516,6 +518,9 @@ pub enum Error {
     /// No table has this name.
     UnknownType {
         name: String,
+    },
+    RestField {
+        field: String,
     },
     UnknownRoot {
         name: String,
@@ -594,6 +599,9 @@ impl fmt::Display for Error {
                     f,
                     "the statement or function of `{table}` is invalid: {message}"
                 )
+            }
+            Self::RestField { field } => {
+                write!(f, "the REST root field `{field}` has no SQL statement")
             }
             Self::UnknownRoot { name } => write!(f, "no root field is named `{name}`"),
             Self::UnknownType { name } => write!(f, "no table is named `{name}`"),
@@ -682,6 +690,7 @@ pub struct Schema {
     writes: model::WriteCatalog,
     read_only: std::collections::BTreeSet<String>,
     document: Option<graphql::DocumentSchema>,
+    rest: RestCatalog,
 }
 
 impl Schema {
@@ -725,6 +734,7 @@ impl Schema {
                 .map(|t| t.name.clone())
                 .collect(),
             document: None,
+            rest: RestCatalog::default(),
             model: model::Schema {
                 permissions,
                 tables: tables.into_iter().map(table_model).collect(),
@@ -744,10 +754,20 @@ impl Schema {
         })
     }
 
+    pub fn rest_catalog(&self) -> &RestCatalog {
+        &self.rest
+    }
+
     pub fn roles(&self) -> Vec<String> {
         let mut roles: Vec<String> = std::iter::once("admin".to_string())
             .chain(self.model.permissions.iter().map(|p| p.role.clone()))
             .chain(self.writes.permissions.iter().map(|p| p.role.clone()))
+            .chain(
+                self.rest
+                    .fields
+                    .values()
+                    .flat_map(|f| f.roles.iter().cloned()),
+            )
             .collect();
         roles.sort();
         roles.dedup();
@@ -765,6 +785,17 @@ impl Schema {
         }
         if let Some((target, values)) = &root.primary_key {
             return mutation::compile_primary(self, target, values, &root.fields, session);
+        }
+        if !self.rest.fields.is_empty()
+            && self.document.as_ref().is_some_and(|document| {
+                self.rest
+                    .fields
+                    .contains_key(&(document.query.clone(), root.name.clone()))
+            })
+        {
+            return Err(Error::RestField {
+                field: root.name.clone(),
+            });
         }
         let root = selection_model(root, 0)?;
         match model::run(self.model.clone(), session_model(session), root) {

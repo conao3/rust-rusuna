@@ -10,6 +10,43 @@ fn run(args: &[&str]) -> Output {
 }
 
 #[test]
+fn rest_roots_expand_and_report_that_they_have_no_sql_statement() {
+    let schema =
+        r#"type Query { time: Int @rest(source: "clock", path: "/time", roles: ["reader"]) }"#;
+    let output = run(&[
+        "schema",
+        "expand-sdl",
+        "--role",
+        "reader",
+        "--schema",
+        schema,
+    ]);
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["Sdl"]
+            .as_str()
+            .unwrap()
+            .contains(r#"time: Int @rest(source: "clock""#)
+    );
+    let output = run(&[
+        "query",
+        "compile-sql",
+        "--role",
+        "reader",
+        "--schema",
+        schema,
+        "--query",
+        "{ time }",
+    ]);
+    assert_eq!(output.status.code(), Some(254));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("the REST root field `time` has no SQL statement")
+    );
+}
+
+#[test]
 fn syntax_and_target_errors_have_distinct_exit_codes() {
     for args in [
         vec![],

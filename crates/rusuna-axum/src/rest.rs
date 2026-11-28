@@ -411,7 +411,7 @@ fn status(error: &ServerError) -> StatusCode {
     match code {
         Some("access-denied") => StatusCode::FORBIDDEN,
         Some("unexpected") => StatusCode::INTERNAL_SERVER_ERROR,
-        Some("remote-schema-error") => StatusCode::BAD_GATEWAY,
+        Some("remote-schema-error" | "rest-source-error") => StatusCode::BAD_GATEWAY,
         _ => StatusCode::BAD_REQUEST,
     }
 }

@@ -518,6 +518,9 @@ theorem resolveSelection_ok_iff (schema : Schema) (root : Selection) :
 
 ## Boundary
 
+REST data sources are outside the Lean proofs. Rust handles their role visibility,
+template rendering, HTTP execution, and response validation.
+
 `Scan` contains the resolved permission expression syntactically; the proof does not
 interpret PostgreSQL or show that a permission expresses its author's intended policy.
 `queryReads` covers user selection, filtering, ordering and aggregate columns; join

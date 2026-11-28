@@ -1,0 +1,72 @@
+type Query {
+  pokemons(limit: Int = 20, offset: Int = 0): [PokemonReference!]!
+    @rest(source: "pokeapi", path: "/pokemon/", query: {limit: "{{limit}}", offset: "{{offset}}"}, result: ["results"], roles: ["anonymous"])
+  pokemon(name: String!): Pokemon
+    @rest(source: "pokeapi", path: "/pokemon/{{name}}/", not_found: null, roles: ["anonymous"])
+}
+
+type PokemonReference {
+  name: String!
+  details: Pokemon
+    @rest(source: "pokeapi", path: "/pokemon/{{name}}/", not_found: null, roles: ["anonymous"])
+}
+
+type Pokemon {
+  id: Int!
+  name: String!
+  height: Int!
+  weight: Int!
+  baseExperience: Int @column(name: "base_experience")
+  species: PokemonSpeciesReference!
+  types: [PokemonType!]!
+  abilities: [PokemonAbility!]!
+  stats: [PokemonStat!]!
+  sprites: PokemonSprites!
+}
+
+type PokemonSpeciesReference {
+  name: String!
+  details: PokemonSpecies
+    @rest(source: "pokeapi", path: "/pokemon-species/{{name}}/", not_found: null, roles: ["anonymous"])
+}
+
+type PokemonSpecies {
+  id: Int!
+  name: String!
+  captureRate: Int! @column(name: "capture_rate")
+  isLegendary: Boolean! @column(name: "is_legendary")
+}
+
+type PokemonType {
+  slot: Int!
+  type: TypeReference!
+}
+
+type TypeReference {
+  name: String!
+  details: PokemonTypeDetails
+    @rest(source: "pokeapi", path: "/type/{{name}}/", not_found: null, roles: ["anonymous"])
+}
+
+type PokemonTypeDetails {
+  id: Int!
+  name: String!
+}
+
+type PokemonAbility {
+  ability: NamedResource!
+  isHidden: Boolean! @column(name: "is_hidden")
+}
+
+type PokemonStat {
+  stat: NamedResource!
+  baseStat: Int! @column(name: "base_stat")
+}
+
+type NamedResource {
+  name: String!
+}
+
+type PokemonSprites {
+  frontDefault: String @column(name: "front_default")
+}

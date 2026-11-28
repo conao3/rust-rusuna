@@ -742,6 +742,55 @@ remote fields or arguments per role beyond the role list; there are no relations
 (Hasura's remote relationships); remote root fields aren't batched into one request per
 server; and remote subscriptions aren't forwarded.
 
+## REST data sources
+
+`@rest` maps a GraphQL query field to a GET request. The SDL declares the arguments,
+response types, and roles. Rust configures the `RestSource` base URL and headers.
+REST-only schemas run without a PostgreSQL connection.
+
+Run the [PokéAPI example](crates/rusuna-axum/examples/pokeapi.graphql).
+
+```sh
+cargo run -p rusuna-axum --example pokeapi
+```
+
+Send this query to `http://127.0.0.1:3000/graphql`.
+
+```graphql
+{
+  pokemons(limit: 1) {
+    name
+    details {
+      id
+      baseExperience
+      species { details { captureRate } }
+      types { type { details { name } } }
+    }
+  }
+}
+```
+
+`result: ["data", "items"]` selects keys in the JSON response. `@column(name: "json_key")`
+renames a key, and `scalar JSON` passes arbitrary JSON through. SDL defaults apply to
+field arguments and input objects. Templates use `{{name}}` for a root argument or a
+nested field's parent scalar and `{{$name}}` for a session variable. Path values are
+encoded as single segments. In query templates, null omits a parameter, a list repeats
+its key, and an input object is sent as compact JSON.
+
+Add the configured source with `Builder::rest`. `header` sets a fixed header,
+`session_header` renders a session template, and `forward_header` allow-lists a client
+header, in descending precedence. Calls share a connection pool. Identical calls with the same transport limits and retry settings are deduplicated per
+GraphQL request. Each source allows eight concurrent calls
+by default. The timeout is 60 seconds and the response limit is 16 MiB. Configure retries
+with `retry(times, delay)` for connection failures and HTTP 429, 502, 503, and 504.
+
+`admin` can see every REST field. Other roles see fields that list their role and the
+reachable types. `schema expand-sdl` preserves REST directives and `query compile-sql`
+returns `Error::RestField` for REST roots. Upstream errors use `rest-source-error` with
+an HTTP status or a reason. `not_found: null` maps HTTP 404 to null on nullable fields.
+A saved GraphQL operation served by `rusuna_axum::rest` returns HTTP 502 for a
+`rest-source-error`.
+
 ## REST endpoints
 
 `rusuna_axum::rest` serves named GraphQL documents as REST routes, like Hasura's RESTified
@@ -1366,6 +1415,8 @@ The Lean definitions and theorems are in `src/compiler.rs`. Each theorem is univ
 quantified over its Lean inputs.
 [PROOFS.md](PROOFS.md) lists the exact statements and their classification.
 The permission statements concern successful resolution with a schema and session.
+REST data sources, including role visibility, template rendering, and upstream
+execution, are outside the Lean proofs.
 
 Properties:
 

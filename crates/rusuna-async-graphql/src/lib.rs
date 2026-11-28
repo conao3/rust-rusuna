@@ -15,7 +15,8 @@ use async_graphql::extensions::{
     Extension, ExtensionContext, ExtensionFactory, NextExecute, NextPrepareRequest,
 };
 use async_graphql::parser::types::{
-    BaseType, DocumentOperations, FieldDefinition, Type, TypeKind, TypeSystemDefinition,
+    BaseType, DocumentOperations, FieldDefinition, InputValueDefinition, Type, TypeKind,
+    TypeSystemDefinition,
 };
 use async_graphql::{
     Data, ErrorExtensions, Name, Request, Response, SelectionField, ServerError, ServerResult,
@@ -30,8 +31,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 mod remote;
+mod rest_source;
 
 pub use remote::{ClientHeaders, REMOTE_TIMEOUT, RemoteSchema};
+pub use rest_source::RestSource;
 
 pub const HIDDEN_PREFIX: &str = "__rusuna_";
 
@@ -52,6 +55,10 @@ pub enum Error {
         name: String,
         message: String,
     },
+    Rest {
+        name: String,
+        message: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -65,6 +72,7 @@ impl fmt::Display for Error {
                 message,
             } => write!(f, "{type_name}.{field}: {message}"),
             Self::Remote { name, message } => write!(f, "remote schema {name}: {message}"),
+            Self::Rest { name, message } => write!(f, "REST source {name}: {message}"),
         }
     }
 }
@@ -83,6 +91,7 @@ pub struct Builder {
     role: String,
     extras: Vec<Extra>,
     remotes: Vec<RemoteSchema>,
+    rest: Vec<RestSource>,
 }
 
 #[derive(Clone, Copy)]
@@ -105,6 +114,7 @@ struct Shared {
     mutation: String,
     subscription: String,
     catalog: Catalog,
+    rest: rest_source::RestRuntime,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -139,12 +149,18 @@ impl Builder {
             role: role.into(),
             extras: Vec::new(),
             remotes: Vec::new(),
+            rest: Vec::new(),
         }
     }
 
     /// Adds the query and mutation root fields of a remote schema, when it serves the role.
     pub fn remote(mut self, remote: RemoteSchema) -> Self {
         self.remotes.push(remote);
+        self
+    }
+
+    pub fn rest(mut self, source: RestSource) -> Self {
+        self.rest.push(source);
         self
     }
 
@@ -232,7 +248,13 @@ impl Builder {
                 }
             }
         }
-        let columns = row_columns(&self.schema)?;
+        let rest = rest_source::RestRuntime::new(&self.schema, self.rest, &definitions)?;
+        let columns = if self.extras.is_empty() {
+            BTreeMap::new()
+        } else {
+            row_columns(&self.schema)?
+        };
+
         let mut extras = BTreeMap::new();
         let mut extra_fields: BTreeMap<String, Vec<Field>> = BTreeMap::new();
         for extra in self.extras {
@@ -289,6 +311,7 @@ impl Builder {
         }
         let shared = Arc::new(Shared {
             schema: self.schema,
+            rest,
             role: self.role,
             query: query_name.clone(),
             mutation: mutation_name.clone(),
@@ -366,6 +389,11 @@ impl Builder {
                     let mut out = Object::new(&name);
                     for field in object.fields {
                         let field = field.node;
+                        if let Some(rest) = rest_source::RestRuntime::field(&shared, &name, &field)
+                        {
+                            out = out.field(rest);
+                            continue;
+                        }
                         let shape = if shared
                             .catalog
                             .children
@@ -396,10 +424,7 @@ impl Builder {
                 TypeKind::InputObject(input) => {
                     let mut out = InputObject::new(&name);
                     for field in input.fields {
-                        out = out.field(InputValue::new(
-                            field.node.name.node.to_string(),
-                            type_ref(&field.node.ty.node),
-                        ));
+                        out = out.field(input_value(&field.node, type_ref(&field.node.ty.node)));
                     }
                     types.push(out.into());
                 }
@@ -501,6 +526,9 @@ impl Parts {
         for ty in self.types {
             builder = builder.register(ty);
         }
+        if !self.shared.schema.rest_catalog().fields.is_empty() {
+            builder = builder.extension(rest_source::RestExecution);
+        }
         builder.extension(Transactions)
     }
 
@@ -573,6 +601,17 @@ fn type_ref(ty: &Type) -> TypeRef {
     } else {
         TypeRef::NonNull(Box::new(base))
     }
+}
+
+fn input_value(definition: &InputValueDefinition, ty: TypeRef) -> InputValue {
+    let mut value = InputValue::new(definition.name.node.to_string(), ty);
+    if let Some(default) = &definition.default_value {
+        value = value.default_value(default.node.clone());
+    }
+    if let Some(description) = &definition.description {
+        value = value.description(description.node.clone());
+    }
+    value
 }
 
 fn prune(definitions: &mut BTreeMap<String, TypeKind>) {
@@ -966,6 +1005,11 @@ async fn resolve_root(
 
 fn root_field(shared: &Arc<Shared>, root: &Root) -> Field {
     let definition = &root.definition;
+    if root.operation == Operation::Query
+        && let Some(rest) = rest_source::RestRuntime::field(shared, &shared.query, definition)
+    {
+        return rest;
+    }
     let mut field = Field::new(
         definition.name.node.to_string(),
         type_ref(&definition.ty.node),

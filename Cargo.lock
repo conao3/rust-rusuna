@@ -1830,8 +1830,10 @@ name = "rusuna-async-graphql"
 version = "0.2.1"
 dependencies = [
  "async-graphql",
+ "async-graphql-value",
  "async-trait",
  "futures-util",
+ "percent-encoding",
  "rusuna",
  "rusuna-http-client",
  "rusuna-sqlx",

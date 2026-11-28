@@ -30,6 +30,15 @@ pub(super) fn directives<'a>(
             "permission" => &["role", "where", "columns", "allow_aggregations", "limit"],
             "native_query" => &["sql", "arguments"],
             "function" => &["name", "schema", "arguments"],
+            "rest" => &[
+                "source",
+                "method",
+                "path",
+                "query",
+                "result",
+                "not_found",
+                "roles",
+            ],
             _ => unreachable!(),
         };
         let mut seen = BTreeSet::new();
@@ -141,6 +150,69 @@ fn native_arguments(
     }
 }
 
+fn render_input(field: &InputValueDefinition) -> String {
+    let mut rendered = format!("{}: {}", field.name.node, field.ty.node);
+    if let Some(value) = &field.default_value {
+        rendered.push_str(&format!(" = {}", value.node));
+    }
+    rendered
+}
+
+fn render_field(field: &FieldDefinition) -> String {
+    let args = if field.arguments.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "({})",
+            field
+                .arguments
+                .iter()
+                .map(|a| render_input(&a.node))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let mut rendered = format!("  {}{args}: {}", field.name.node, field.ty.node);
+    for directive in &field.directives {
+        let directive = &directive.node;
+        let args = directive
+            .arguments
+            .iter()
+            .map(|(name, value)| format!("{}: {}", name.node, value.node))
+            .collect::<Vec<_>>()
+            .join(", ");
+        rendered.push_str(&format!(" @{}({args})", directive.name.node));
+    }
+    rendered.push('\n');
+    rendered
+}
+
+fn render_input_fields(input: &InputObjectType) -> String {
+    input
+        .fields
+        .iter()
+        .map(|field| format!("  {}\n", render_input(&field.node)))
+        .collect()
+}
+
+fn render_enum(name: &str, enumeration: &EnumType) -> String {
+    let values = enumeration
+        .values
+        .iter()
+        .map(|v| v.node.value.node.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("enum {name} {{ {values} }}\n")
+}
+
+fn render_type(keyword: &str, name: &str, fields: String) -> String {
+    if fields.is_empty() {
+        format!("{keyword} {name}\n")
+    } else {
+        format!("{keyword} {name} {{\n{fields}}}\n")
+    }
+}
+
 pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     bounded(sdl)?;
     let document = parse_schema(sdl).map_err(syntax)?;
@@ -148,6 +220,8 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     let mut seen_schema = false;
     let mut objects = BTreeMap::new();
     let mut defs = BTreeMap::new();
+    let mut inputs = BTreeMap::new();
+    let mut json_scalar = false;
     let mut scalars: BTreeSet<String> = ["Int", "Float", "String", "Boolean", "ID"]
         .into_iter()
         .map(str::to_string)
@@ -191,6 +265,21 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                         scalars.insert(name.clone());
                         defs.insert(name.clone(), format!("scalar {name}\n"));
                     }
+                    TypeKind::Scalar if name == "JSON" && t.node.directives.is_empty() => {
+                        json_scalar = true;
+                        defs.insert(name, "scalar JSON\n".into());
+                    }
+                    TypeKind::Enum(enumeration) if t.node.directives.is_empty() => {
+                        defs.insert(name.clone(), render_enum(&name, enumeration));
+                        inputs.insert(name, t);
+                    }
+                    TypeKind::InputObject(input) if t.node.directives.is_empty() => {
+                        defs.insert(
+                            name.clone(),
+                            render_type("input", &name, render_input_fields(input)),
+                        );
+                        inputs.insert(name, t);
+                    }
                     TypeKind::Object(o) if o.implements.is_empty() => {
                         defs.insert(name.clone(), String::new());
                         objects.insert(name, t);
@@ -198,7 +287,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                     _ => {
                         return Err(error(
                             t.pos,
-                            "only table objects, the query root and scalar DateTime are supported",
+                            "expected an object, enum, input object, scalar DateTime or scalar JSON",
                         ));
                     }
                 }
@@ -214,7 +303,35 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     if !objects.contains_key(&query) {
         return Err(error(Pos::default(), "query root type is missing"));
     }
-    let table_names: BTreeSet<_> = objects.keys().filter(|n| **n != query).cloned().collect();
+    let mapped_types = objects
+        .iter()
+        .filter(|(name, ty)| {
+            *name != &query
+                && ty.node.directives.iter().any(|d| {
+                    matches!(
+                        d.node.name.node.as_str(),
+                        "table" | "native_query" | "function"
+                    )
+                })
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut rest_scalars = scalars.clone();
+    if !defs.contains_key("DateTime") {
+        rest_scalars.insert("DateTime".into());
+    }
+    if json_scalar {
+        rest_scalars.insert("JSON".into());
+    }
+    let rest = rest::load(&query, &objects, &mapped_types, &rest_scalars, &inputs)?;
+    if !defs.contains_key("DateTime") && rest::uses_date_time(&query, &objects, &inputs, &rest) {
+        defs.insert("DateTime".into(), "scalar DateTime\n".into());
+    }
+    let table_names: BTreeSet<_> = objects
+        .keys()
+        .filter(|n| **n != query && !rest.objects.contains_key(*n))
+        .cloned()
+        .collect();
     let mut natives: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (name, t) in &objects {
         if let Some(d) = t
@@ -234,6 +351,17 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
         let TypeKind::Object(o) = &t.node.kind else {
             unreachable!()
         };
+        if rest.objects.contains_key(name) {
+            defs.insert(
+                name.clone(),
+                render_type(
+                    "type",
+                    name,
+                    o.fields.iter().map(|f| render_field(&f.node)).collect(),
+                ),
+            );
+            continue;
+        }
         let root = name == &query;
         let mappings: Vec<_> = t
             .node
@@ -346,12 +474,16 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             if field.starts_with("__")
                 || (!root && ["_and", "_or", "_not"].contains(&field.as_str()))
                 || !fields.insert(field.clone())
-                || !f.node.arguments.is_empty()
+                || (!rest::has_rest(&f.node) && !f.node.arguments.is_empty())
             {
                 return Err(error(
                     f.pos,
                     "reserved or repeated field, or explicitly declared arguments",
                 ));
+            }
+            if root && rest::has_rest(&f.node) {
+                rendered.push_str(&render_field(&f.node));
+                continue;
             }
             let d = directives(
                 &f.node.directives,
@@ -581,7 +713,24 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     }
     let (mutation_roots, primary_roots) =
         writes::definitions(&tables, &scalar_fields, &mut defs, &query)?;
-    let subscription = defs[&query].replacen(&format!("type {query} "), "type Subscription ", 1);
+    let subscription = defs[&query]
+        .lines()
+        .filter(|line| {
+            let field = line
+                .trim_start()
+                .split(['(', ':'])
+                .next()
+                .unwrap_or_default();
+            rest.fields.is_empty() || !rest.fields.contains_key(&(query.clone(), field.into()))
+        })
+        .map(|line| format!("{line}\n"))
+        .collect::<String>()
+        .replacen(&format!("type {query} "), "type Subscription ", 1);
+    let subscription = if subscription == "type Subscription {\n}\n" {
+        "type Subscription\n".into()
+    } else {
+        subscription
+    };
     insert(
         &mut defs,
         "Subscription".into(),
@@ -615,6 +764,29 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
             .flat_map(|(t, fields)| fields.into_iter().map(move |(f, ty)| ((t.clone(), f), ty)))
             .collect(),
     };
+    for kind in document.types.values() {
+        let args: Vec<_> = match kind {
+            TypeKind::Object(object) => object
+                .fields
+                .iter()
+                .flat_map(|f| &f.node.arguments)
+                .collect(),
+            TypeKind::InputObject(input) => input.fields.iter().collect(),
+            _ => continue,
+        };
+        for arg in args {
+            if let Some(value) = &arg.node.default_value {
+                query::coerce(
+                    &document,
+                    value.node.clone(),
+                    &arg.node.ty.node,
+                    false,
+                    value.pos,
+                    0,
+                )?;
+            }
+        }
+    }
     for table in &mut tables {
         let mut roles = BTreeSet::new();
         for directive in &objects[&table.name].node.directives {
@@ -681,6 +853,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
     writes::permissions(&objects, &mut tables, &mut document)?;
     let mut schema = Schema::new(tables, roots)?;
     schema.document = Some(document);
+    schema.rest = rest;
     Ok(schema)
 }
 
@@ -688,6 +861,7 @@ pub(super) fn for_role(
     document: &DocumentSchema,
     schema: &crate::compiler::model::Schema,
     catalog: &crate::compiler::model::WriteCatalog,
+    rest: &crate::RestCatalog,
     role: &str,
 ) -> DocumentSchema {
     if role == "admin" {
@@ -761,19 +935,30 @@ pub(super) fn for_role(
         if let TypeKind::Object(object) = kind {
             if name == &document.query || name == "Subscription" {
                 object.fields.retain(|f| {
-                    visible
-                        .roots
-                        .iter()
-                        .any(|r| r.field == f.node.name.node.as_str())
+                    (!rest.fields.is_empty()
+                        && name == &document.query
+                        && rest
+                            .fields
+                            .get(&(name.clone(), f.node.name.node.to_string()))
+                            .is_some_and(|field| field.serves(role)))
+                        || visible
+                            .roots
+                            .iter()
+                            .any(|r| r.field == f.node.name.node.as_str())
                         || document
                             .primary_roots
                             .get(f.node.name.node.as_str())
                             .is_some_and(|t| visible.tables.iter().any(|v| &v.name == t))
                 });
             }
-            object
-                .fields
-                .retain(|f| names.contains(named(&f.node.ty.node)));
+            object.fields.retain(|f| {
+                names.contains(named(&f.node.ty.node))
+                    && (rest.fields.is_empty()
+                        || rest
+                            .fields
+                            .get(&(name.clone(), f.node.name.node.to_string()))
+                            .is_none_or(|field| field.serves(role)))
+            });
         }
     }
     document.targets.retain(|(parent, field), _| matches!(document.types.get(parent), Some(TypeKind::Object(o)) if o.fields.iter().any(|f| f.node.name.node == field.as_str())));
@@ -817,62 +1002,27 @@ pub(super) fn for_role(
     });
     let mut rendered = Vec::new();
     for (name, kind) in &document.types {
-        let fields = match kind {
+        match kind {
             TypeKind::Scalar => {
-                if name == "DateTime" {
+                if matches!(name.as_str(), "DateTime" | "JSON") {
                     rendered.push(format!("scalar {name}\n"));
                 }
-                continue;
             }
-            TypeKind::Enum(enumeration) => {
-                rendered.push(format!(
-                    "enum {name} {{ {} }}\n",
-                    enumeration
-                        .values
-                        .iter()
-                        .map(|v| v.node.value.node.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ));
-                continue;
+            TypeKind::Enum(enumeration) => rendered.push(render_enum(name, enumeration)),
+            TypeKind::Object(object) => rendered.push(render_type(
+                "type",
+                name,
+                object
+                    .fields
+                    .iter()
+                    .map(|f| render_field(&f.node))
+                    .collect(),
+            )),
+            TypeKind::InputObject(input) => {
+                rendered.push(render_type("input", name, render_input_fields(input)))
             }
-            TypeKind::Object(object) => object
-                .fields
-                .iter()
-                .map(|f| {
-                    let args = if f.node.arguments.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            "({})",
-                            f.node
-                                .arguments
-                                .iter()
-                                .map(|a| format!("{}: {}", a.node.name.node, a.node.ty.node))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    };
-                    format!("  {}{args}: {}\n", f.node.name.node, f.node.ty.node)
-                })
-                .collect::<String>(),
-            TypeKind::InputObject(input) => input
-                .fields
-                .iter()
-                .map(|f| format!("  {}: {}\n", f.node.name.node, f.node.ty.node))
-                .collect::<String>(),
             _ => unreachable!(),
-        };
-        let keyword = if matches!(kind, TypeKind::InputObject(_)) {
-            "input"
-        } else {
-            "type"
-        };
-        rendered.push(if fields.is_empty() {
-            format!("{keyword} {name}\n")
-        } else {
-            format!("{keyword} {name} {{\n{fields}}}\n")
-        });
+        }
     }
     document.sdl = format!(
         "schema {{ query: {} mutation: Mutation subscription: Subscription }}\n\n{}",

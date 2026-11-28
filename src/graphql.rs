@@ -1,4 +1,5 @@
 mod query;
+pub(crate) mod rest;
 mod schema;
 mod writes;
 
@@ -34,7 +35,14 @@ impl Schema {
     }
 
     pub fn expanded_sdl(&self, role: &str) -> Result<String, Error> {
-        Ok(schema::for_role(self.document()?, &self.model, &self.writes, role).sdl)
+        Ok(schema::for_role(
+            self.document()?,
+            &self.model,
+            &self.writes,
+            &self.rest,
+            role,
+        )
+        .sdl)
     }
 
     pub fn parse_query(
@@ -45,10 +53,23 @@ impl Schema {
         role: &str,
     ) -> Result<Vec<Selection>, Error> {
         if role == "admin" {
-            return query::parse(self.document()?, query, variables, operation_name);
+            return query::parse(
+                self.document()?,
+                &self.rest,
+                query,
+                variables,
+                operation_name,
+            );
         }
         query::parse(
-            &schema::for_role(self.document()?, &self.model, &self.writes, role),
+            &schema::for_role(
+                self.document()?,
+                &self.model,
+                &self.writes,
+                &self.rest,
+                role,
+            ),
+            &self.rest,
             query,
             variables,
             operation_name,
@@ -62,8 +83,14 @@ impl Schema {
         operation_name: Option<&str>,
         session: &Session,
     ) -> Result<Vec<CompiledField>, Error> {
-        query::check_session(self.document()?, session)?;
-        self.parse_query(query, variables, operation_name, &session.role)?
+        if self.rest.fields.is_empty() {
+            query::check_session(self.document()?, session)?;
+        }
+        let selections = self.parse_query(query, variables, operation_name, &session.role)?;
+        if !self.rest.fields.is_empty() {
+            query::check_session(self.document()?, session)?;
+        }
+        selections
             .into_iter()
             .map(|selection| {
                 Ok(CompiledField {

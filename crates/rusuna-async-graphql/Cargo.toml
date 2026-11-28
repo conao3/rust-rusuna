@@ -12,8 +12,10 @@ categories = ["database", "web-programming"]
 
 [dependencies]
 async-graphql = { workspace = true }
+async-graphql-value = "7.2.1"
 async-trait = "0.1"
 futures-util = { version = "0.3", default-features = false }
+percent-encoding = "2.3"
 rusuna = { workspace = true }
 rusuna-http-client = { workspace = true }
 rusuna-sqlx = { workspace = true }

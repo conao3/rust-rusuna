@@ -85,7 +85,10 @@ fn coerce_input(
                 );
             }
             for field in &object.fields {
-                if !field.node.ty.node.nullable && !out.contains_key(&field.node.name.node) {
+                if !field.node.ty.node.nullable
+                    && field.node.default_value.is_none()
+                    && !out.contains_key(&field.node.name.node)
+                {
                     return Err(error(
                         pos,
                         format!("required input field {} is missing", field.node.name.node),
@@ -113,7 +116,9 @@ fn coerce_input(
             let valid = match (name, &value) {
                 ("Int", C::Number(n)) => n.as_i64().is_some_and(|n| i32::try_from(n).is_ok()),
                 ("Float", C::Number(n)) => n.as_f64().is_some_and(f64::is_finite),
-                ("String" | "DateTime", C::String(_)) | ("Boolean", C::Boolean(_)) => true,
+                ("String" | "DateTime", C::String(_))
+                | ("Boolean", C::Boolean(_))
+                | ("JSON", _) => true,
                 ("ID", C::String(_)) => true,
                 ("ID", C::Number(n)) => n.as_i64().is_some(),
                 _ => false,
@@ -128,7 +133,7 @@ fn coerce_input(
     }
 }
 
-fn coerce(
+pub(super) fn coerce(
     schema: &DocumentSchema,
     value: C,
     ty: &Type,
@@ -775,6 +780,7 @@ fn order(value: &C, pos: Pos) -> Result<Vec<Order>, Error> {
 
 pub(super) fn parse(
     schema: &DocumentSchema,
+    rest: &crate::RestCatalog,
     query: &str,
     variables: &serde_json::Value,
     operation_name: Option<&str>,
@@ -832,6 +838,7 @@ pub(super) fn parse(
     if !operation.node.directives.is_empty() {
         return Err(error(operation.pos, "operation directives are unsupported"));
     }
+    rest::reject_operation(rest, &schema.query, &document, &operation.node)?;
     let values = variables
         .as_object()
         .ok_or_else(|| error(operation.pos, "variables must be a JSON object"))?;

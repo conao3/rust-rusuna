@@ -1,6 +1,6 @@
 use super::*;
 use async_graphql::dynamic::EnumItem;
-use async_graphql::parser::types::{InputValueDefinition, TypeDefinition};
+use async_graphql::parser::types::TypeDefinition;
 use rusuna_http_client::http::header::{HeaderMap, HeaderName, HeaderValue};
 use std::time::Duration;
 
@@ -326,20 +326,6 @@ fn local_ref(prefix: &str, ty: &Type) -> TypeRef {
     }
 }
 
-fn input_value(prefix: &str, definition: &InputValueDefinition) -> InputValue {
-    let mut value = InputValue::new(
-        definition.name.node.to_string(),
-        local_ref(prefix, &definition.ty.node),
-    );
-    if let Some(default) = &definition.default_value {
-        value = value.default_value(default.node.clone());
-    }
-    if let Some(description) = &definition.description {
-        value = value.description(description.node.clone());
-    }
-    value
-}
-
 pub(crate) fn attach(
     remotes: Vec<RemoteSchema>,
     shared: &Arc<Shared>,
@@ -528,7 +514,10 @@ pub(crate) fn attach(
                             }
                         });
                         for argument in &field.arguments {
-                            out = out.argument(input_value(prefix, &argument.node));
+                            out = out.argument(input_value(
+                                &argument.node,
+                                local_ref(prefix, &argument.node.ty.node),
+                            ));
                         }
                         if let Some(description) = &field.description {
                             out = out.description(description.node.clone());
@@ -558,7 +547,10 @@ pub(crate) fn attach(
                             move |ctx| FieldFuture::Value(child_value(&ctx, shape)),
                         );
                         for argument in &field.arguments {
-                            child = child.argument(input_value(prefix, &argument.node));
+                            child = child.argument(input_value(
+                                &argument.node,
+                                local_ref(prefix, &argument.node.ty.node),
+                            ));
                         }
                         if let Some(description) = &field.description {
                             child = child.description(description.node.clone());
@@ -573,7 +565,10 @@ pub(crate) fn attach(
                 TypeKind::InputObject(input) => {
                     let mut out = InputObject::new(&local);
                     for field in &input.fields {
-                        out = out.field(input_value(prefix, &field.node));
+                        out = out.field(input_value(
+                            &field.node,
+                            local_ref(prefix, &field.node.ty.node),
+                        ));
                     }
                     if let Some(description) = described {
                         out = out.description(description);
