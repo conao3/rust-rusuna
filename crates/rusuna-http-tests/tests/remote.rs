@@ -6,7 +6,7 @@ use async_graphql::dynamic::{
     Schema, TypeRef,
 };
 use axum::http::HeaderMap;
-use rusuna_async_graphql::RemoteSchema;
+use rusuna_async_graphql::{Builder, RemoteSchema, RestSource};
 use serde_json::{Value as Json, json};
 use sqlx::Row;
 use std::collections::{BTreeMap, HashMap};
@@ -222,28 +222,30 @@ async fn serve_weather() -> (SocketAddr, Weather, Schema) {
         .unwrap()
         .extend([("Tokyo".to_string(), 20), ("Oslo".to_string(), -5)]);
     let schema = weather_schema(&weather);
-    let app = axum::Router::new().route(
+    let address = listen(recorded_remote(schema.clone(), weather.documents.clone())).await;
+    (address, weather, schema)
+}
+
+fn recorded_remote(schema: Schema, documents: Arc<Mutex<Vec<String>>>) -> axum::Router {
+    axum::Router::new().route(
         "/graphql",
         axum::routing::post({
-            let schema = schema.clone();
-            let weather = weather.clone();
             move |headers: HeaderMap, request: async_graphql_axum::GraphQLRequest| async move {
                 let request = request.into_inner();
-                weather
-                    .documents
-                    .lock()
-                    .unwrap()
-                    .push(request.query.clone());
+                documents.lock().unwrap().push(request.query.clone());
                 async_graphql_axum::GraphQLResponse::from(
                     schema.execute(request.data(headers)).await,
                 )
             }
         }),
-    );
+    )
+}
+
+async fn listen(app: axum::Router) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (address, weather, schema)
+    address
 }
 
 fn role_schemas(
@@ -278,10 +280,7 @@ async fn serve_rusuna(schemas: HashMap<String, Schema>) -> SocketAddr {
             async move { Ok(session) }
         }),
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    address
+    listen(app).await
 }
 
 fn remote(address: SocketAddr, weather: &Schema) -> RemoteSchema {
@@ -646,5 +645,327 @@ async fn introspection_and_sdl_give_the_same_remote_schema() {
             expected,
             "{query}"
         );
+    }
+}
+
+const RELATION_SDL: &str = r#"
+    type Query {
+      invoices(count: Int!): [Invoice!]!
+        @rest(source: "api", path: "/invoices/{{count}}", roles: ["user", "limited", "reviewer"])
+    }
+
+    type Invoice
+      @permission(role: "user", columns: ["label", "customer", "customers"], filter: {})
+      @permission(role: "limited", columns: ["label"], filter: {})
+      @permission(role: "reviewer", columns: ["label", "customer", "customers"], filter: {}) {
+      id: Int! @column(name: "customer_id")
+      preferred: Boolean!
+      label: String!
+      customer: CrmCustomer
+        @remote_relation(schema: "crm", field: "customer", arguments: {id: "{{id}}", preferred: "{{preferred}}"})
+      customers: [CrmCustomer!]!
+        @remote_relation(schema: "crm", field: "customers", arguments: {label: "customer-{{id}}"})
+    }
+"#;
+
+fn customers() -> Schema {
+    let customer = Object::new("Customer")
+        .field(Field::new("id", TypeRef::named_nn(TypeRef::INT), |ctx| {
+            FieldFuture::Value(Some(FieldValue::value(
+                parent(&ctx)["id"].as_i64().unwrap(),
+            )))
+        }))
+        .field(Field::new(
+            "preferred",
+            TypeRef::named_nn(TypeRef::BOOLEAN),
+            |ctx| {
+                FieldFuture::Value(Some(FieldValue::value(
+                    parent(&ctx)["preferred"].as_bool().unwrap(),
+                )))
+            },
+        ))
+        .field(
+            Field::new("label", TypeRef::named_nn(TypeRef::STRING), |ctx| {
+                FieldFuture::new(async move {
+                    let prefix = ctx.args.try_get("prefix")?.string()?;
+                    let value = parent(&ctx);
+                    Ok(Some(GraphQLValue::from(format!(
+                        "{prefix}{}",
+                        value["label"].as_str().unwrap()
+                    ))))
+                })
+            })
+            .argument(InputValue::new(
+                "prefix",
+                TypeRef::named_nn(TypeRef::STRING),
+            )),
+        );
+    let query = Object::new("Query")
+        .field(
+            Field::new("customer", TypeRef::named("Customer"), |ctx| {
+                FieldFuture::new(async move {
+                    let id = ctx.args.try_get("id")?.i64()?;
+                    let preferred = ctx.args.try_get("preferred")?.boolean()?;
+                    if id < 0 {
+                        ctx.add_error(
+                            ctx.set_error_path(
+                                async_graphql::Error::new("customer is unavailable")
+                                    .into_server_error(ctx.item.pos),
+                            ),
+                        );
+                        return Ok(None);
+                    }
+                    Ok(Some(FieldValue::owned_any(
+                        json!({"id": id, "preferred": preferred, "label": "customer"}),
+                    )))
+                })
+            })
+            .argument(InputValue::new("id", TypeRef::named_nn(TypeRef::INT)))
+            .argument(InputValue::new(
+                "preferred",
+                TypeRef::named_nn(TypeRef::BOOLEAN),
+            )),
+        )
+        .field(
+            Field::new("customers", TypeRef::named_nn_list_nn("Customer"), |ctx| {
+                FieldFuture::new(async move {
+                    let label = ctx.args.try_get("label")?.string()?;
+                    Ok(Some(FieldValue::list([FieldValue::owned_any(
+                        json!({"label": label}),
+                    )])))
+                })
+            })
+            .argument(InputValue::new("label", TypeRef::named_nn(TypeRef::STRING))),
+        );
+    Schema::build("Query", None, None)
+        .register(customer)
+        .register(query)
+        .finish()
+        .unwrap()
+}
+
+async fn serve_relationships() -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let documents = Arc::new(Mutex::new(Vec::new()));
+    let remote = customers();
+    let upstream = listen(recorded_remote(remote.clone(), documents.clone()).route(
+        "/invoices/{count}",
+        axum::routing::get(|axum::extract::Path(count): axum::extract::Path<i32>| async move {
+            let row = |id, preferred| json!({"customer_id": id, "preferred": preferred, "label": "invoice"});
+            let rows: Vec<_> = if count < 0 {
+                vec![row(7, true), row(-1, false), row(-1, false)]
+            } else {
+                let distinct = (0..count).map(|i| row(i / 2, i % 2 == 0));
+                distinct.clone().chain(distinct.rev()).collect()
+            };
+            axum::Json(rows)
+        }),
+    )).await;
+    let source = RestSource::new("api", &format!("http://{upstream}")).unwrap();
+    let remote = RemoteSchema::new("crm", &format!("http://{upstream}/graphql"))
+        .unwrap()
+        .sdl(remote.sdl())
+        .roles(["admin", "user", "limited"])
+        .type_prefix("Crm")
+        .root_field_prefix("crm_");
+    let schema = Arc::new(rusuna::Schema::from_sdl(RELATION_SDL).unwrap());
+    let roles = schema
+        .roles()
+        .into_iter()
+        .map(|role| {
+            let built = Builder::new(schema.clone(), &role)
+                .rest(source.clone())
+                .remote(remote.clone())
+                .build()
+                .unwrap()
+                .schema()
+                .finish()
+                .unwrap();
+            (role, built)
+        })
+        .collect();
+    (serve_rusuna(roles).await, documents)
+}
+
+#[tokio::test]
+async fn rest_remote_relationships_batch_distinct_argument_tuples() {
+    let (address, documents) = serve_relationships().await;
+    for count in [0usize, 1, 100, 101, 205] {
+        let response = post(
+            address,
+            &[],
+            &json!({
+                "query": "query($count: Int!, $prefix: String!) { rows: invoices(count: $count) { buyer: customer { id } ...Buyer } } fragment Buyer on Invoice { buyer: customer { preferred name: label(prefix: $prefix) } }",
+                "variables": {"count": count, "prefix": "preferred "},
+            }),
+        )
+        .await;
+        let expected = (0..count).chain((0..count).rev()).map(|i| {
+            json!({"buyer": {"id": i / 2, "preferred": i % 2 == 0, "name": "preferred customer"}})
+        }).collect::<Vec<_>>();
+        assert_eq!(response, json!({"data": {"rows": expected}}));
+
+        let batches = std::mem::take(&mut *documents.lock().unwrap());
+        assert_eq!(batches.len(), count.div_ceil(100));
+        for (batch, start) in batches.iter().zip((0..count).step_by(100)) {
+            let document = async_graphql::parser::parse_query(batch).unwrap();
+            let operation = document.operations.iter().next().unwrap().1;
+            let fields = &operation.node.selection_set.node.items;
+            assert_eq!(fields.len(), (count - start).min(100), "{batch}");
+            for (index, field) in fields.iter().enumerate() {
+                let async_graphql::parser::types::Selection::Field(field) = &field.node else {
+                    panic!("expected a remote query field");
+                };
+                assert_eq!(field.node.response_key().node.as_str(), format!("r{index}"));
+                assert_eq!(field.node.name.node.as_str(), "customer");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn rest_remote_relationship_lists_respect_both_role_visibility_rules() {
+    let (address, documents) = serve_relationships().await;
+    let visible = post(
+        address,
+        &role_headers("user", &json!({})),
+        &json!({"query": "{ invoices(count: 1) { customers { display: label(prefix: \"\") __typename } } }"}),
+    )
+    .await;
+    let row = json!({"customers": [{"display": "customer-0", "__typename": "CrmCustomer"}]});
+    assert_eq!(visible, json!({"data": {"invoices": [row, row]}}));
+    assert_eq!(documents.lock().unwrap().len(), 1);
+
+    for (role, remote_root) in [("limited", true), ("reviewer", false)] {
+        let hidden = post(
+            address,
+            &role_headers(role, &json!({})),
+            &json!({"query": "{ invoice: __type(name: \"Invoice\") { fields { name } } __schema { queryType { fields { name } } } }"}),
+        )
+        .await;
+        assert_eq!(
+            hidden["data"]["invoice"]["fields"],
+            json!([{"name": "label"}]),
+            "{hidden}"
+        );
+        let roots = hidden["data"]["__schema"]["queryType"]["fields"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            roots.iter().any(|field| field["name"] == "crm_customer"),
+            remote_root
+        );
+    }
+    assert_eq!(documents.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn rest_remote_relationship_errors_use_each_parent_path() {
+    let (address, documents) = serve_relationships().await;
+    let response = post(
+        address,
+        &[],
+        &json!({"query": "{ rows: invoices(count: -1) { buyer: customer { id } } }"}),
+    )
+    .await;
+    assert_eq!(
+        response["data"],
+        json!({"rows": [{"buyer": {"id": 7}}, {"buyer": null}, {"buyer": null}]}),
+        "{response}"
+    );
+    let errors = response["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 2, "{response}");
+    for index in [1, 2] {
+        let path = json!(["rows", index, "buyer"]);
+        let error = errors.iter().find(|error| error["path"] == path).unwrap();
+        assert_eq!(error["message"], "customer is unavailable");
+        assert_eq!(error["extensions"]["code"], "remote-schema-error");
+        assert_eq!(
+            error["extensions"]["remote_errors"][0]["path"],
+            json!(["r1"])
+        );
+        assert_eq!(error["locations"], json!([{"line": 1, "column": 31}]));
+    }
+    assert_eq!(documents.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn rest_remote_relationship_declarations_require_scalar_parent_fields_and_query_targets() {
+    let declaration = |ty: &str, schema: &str, field: &str, args: &str| {
+        format!(
+            r#"type Query {{ invoices: [Invoice!]! @rest(source: "api", path: "/invoices", roles: ["user"]) }}
+               type Invoice {{
+                 id: Int
+                 list: [Int]
+                 object: Details
+                 customer: {ty} @remote_relation(schema: "{schema}", field: "{field}", arguments: {{{args}}})
+               }}
+               type Details {{ name: String }}"#
+        )
+    };
+    for parent in ["missing", "list", "object", "customer", "$X-Hasura-User-Id"] {
+        let args = format!(r#"id: "{{{{{parent}}}}}""#);
+        let sdl = declaration("Customer", "crm", "customer", &args);
+        assert!(rusuna::Schema::from_sdl(&sdl).is_err(), "{sdl}");
+    }
+
+    let remote = RemoteSchema::new("crm", "http://127.0.0.1:1/graphql")
+        .unwrap()
+        .sdl("type Query { customer(id: Int!): Customer } type Mutation { update: Customer } type Customer { id: Int }");
+    for (ty, name, field, args, message) in [
+        (
+            "Customer",
+            "missing",
+            "customer",
+            r#"id: "{{id}}""#,
+            "needs Builder::remote",
+        ),
+        (
+            "Customer",
+            "crm",
+            "unknown",
+            r#"id: "{{id}}""#,
+            "unknown query field",
+        ),
+        (
+            "Customer",
+            "crm",
+            "update",
+            r#"id: "{{id}}""#,
+            "unknown query field",
+        ),
+        (
+            "Other",
+            "crm",
+            "customer",
+            r#"id: "{{id}}""#,
+            "requires the imported type",
+        ),
+        (
+            "[Customer]",
+            "crm",
+            "customer",
+            r#"id: "{{id}}""#,
+            "requires the imported type",
+        ),
+        ("Customer", "crm", "customer", "", "required argument id"),
+        (
+            "Customer",
+            "crm",
+            "customer",
+            r#"id: "{{id}}", extra: "extra""#,
+            "unknown argument customer.extra",
+        ),
+    ] {
+        let sdl = declaration(ty, name, field, args);
+        let schema = Arc::new(rusuna::Schema::from_sdl(&sdl).unwrap());
+        let error = match Builder::new(schema, "user")
+            .rest(RestSource::new("api", "http://127.0.0.1:1").unwrap())
+            .remote(remote.clone())
+            .build()
+        {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("accepted {sdl}"),
+        };
+        assert!(error.contains(message), "{error}");
     }
 }

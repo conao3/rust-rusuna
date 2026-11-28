@@ -4,7 +4,7 @@ use rusuna_sqlx::{Multiplexed, SubscriptionOptions};
 use sqlx::PgConnection;
 
 type Prepared = HashMap<String, Arc<OnceCell<Multiplexed>>>;
-type Outcome = async_graphql::Result<Arc<Json>>;
+use remote::Outcome;
 pub(super) type Outcomes = HashMap<String, Outcome>;
 
 struct Row<'a> {
@@ -22,7 +22,9 @@ pub(super) async fn collect(
 ) -> async_graphql::Result<Outcomes> {
     let mut outcomes = Outcomes::new();
     let catalog = shared.schema.rest_catalog();
-    if catalog.relations.is_empty() || !catalog.objects.contains_key(named(ty)) {
+    if (catalog.relations.is_empty() && shared.rest.remote_relations.is_empty())
+        || !catalog.objects.contains_key(named(ty))
+    {
         return Ok(outcomes);
     }
     let mut rows = Vec::new();
@@ -42,7 +44,8 @@ pub(super) async fn collect(
         }
         for (alias, fields) in fields {
             let name = fields[0].name();
-            if let Some(relation) = catalog.relations.get(&(parent.into(), name.into())) {
+            let field_key = (parent.into(), name.into());
+            if let Some(relation) = catalog.relations.get(&field_key) {
                 let mut keys = HashMap::new();
                 let mut batch_keys = Vec::new();
                 let mut paths = Vec::new();
@@ -92,6 +95,31 @@ pub(super) async fn collect(
                         },
                     );
                 }
+            } else if let Some(relation) = shared.rest.remote_relations.get(&field_key) {
+                let spec = &catalog.remote_relations[&field_key];
+                let mut keys = HashMap::new();
+                let mut batch_keys = Vec::new();
+                let mut paths = Vec::new();
+                for row in &rows {
+                    let key: Vec<_> = spec
+                        .arguments
+                        .values()
+                        .map(|template| {
+                            remote_argument(template, |name| {
+                                row.value.get(&columns[name].key).unwrap_or(&Json::Null)
+                            })
+                        })
+                        .collect();
+                    let index = *keys.entry(key.clone()).or_insert_with(|| {
+                        batch_keys.push(key);
+                        batch_keys.len() - 1
+                    });
+                    paths.push((format!("{}.{alias}", row.path), index));
+                }
+                let results = relation.resolve(ctx, &fields, &batch_keys).await;
+                for (path, index) in paths {
+                    outcomes.insert(path, results[index].clone());
+                }
             } else if let Some(column) = columns.get(name) {
                 let child = named(&column.ty);
                 if catalog.objects.contains_key(child) {
@@ -112,6 +140,27 @@ pub(super) async fn collect(
         }
     }
     Ok(outcomes)
+}
+
+fn remote_argument<'a>(template: &Template, field: impl Fn(&str) -> &'a Json) -> Json {
+    if let [TemplatePart::Field(name)] = template.0.as_slice() {
+        return field(name).clone();
+    }
+    let mut text = String::new();
+    for part in &template.0 {
+        match part {
+            TemplatePart::Literal(literal) => text.push_str(literal),
+            TemplatePart::Field(name) => {
+                let value = field(name);
+                if value.is_null() {
+                    return Json::Null;
+                }
+                text.push_str(&as_text(value.clone()));
+            }
+            TemplatePart::Session(_) => unreachable!(),
+        }
+    }
+    Json::String(text)
 }
 
 fn collect_rows<'a>(ty: &Type, value: &'a Json, path: String, rows: &mut Vec<Row<'a>>) {

@@ -738,9 +738,9 @@ query { article(limit: 2) { id title } weather(city: "Oslo") { temperature stati
 
 Outside this feature: rusuna sends no session values to the remote server (forward
 client headers when it needs them); there are no remote schema permissions that restrict
-remote fields or arguments per role beyond the role list; there are no relationships between rusuna types and remote types
-(Hasura's remote relationships); remote root fields aren't batched into one request per
-server; and remote subscriptions aren't forwarded.
+remote fields or arguments per role beyond the role list; and remote subscriptions
+aren't forwarded. REST response objects can also select remote data through
+`@remote_relation`.
 
 ## REST data sources
 
@@ -905,6 +905,30 @@ response, rusuna sends one PostgreSQL statement per relationship alias for up to
 distinct non-null keys at a time. A key with an incompatible value returns
 `validation-failed`. PostgreSQL `uuid` keys use GraphQL `String` and `numeric` keys
 use GraphQL `Int` or `Float`, according to the SDL.
+
+A REST response object can use `@remote_relation` to call a remote GraphQL query field.
+
+```graphql
+type Invoice {
+  customerId: ID! @column(name: "customer_id")
+  customer: Customer
+    @remote_relation(schema: "crm", field: "customer", arguments: {id: "{{customerId}}"})
+}
+```
+
+Register the `RemoteSchema` named `crm` with `Builder::remote`. Use the original
+remote query field name in `field` and the imported return type in the relationship
+declaration, including any type prefix. The remote query can return a single value or a
+list. An argument template consisting of one marker passes the parent scalar field's
+JSON value as a variable of the remote argument's type. Templates with literal text
+produce strings. A missing or null parent value is passed as null.
+
+After reading and filtering the REST response, rusuna groups identical argument tuples
+for each selected relationship alias. It sends one HTTP request for every batch of up to
+100 distinct tuples, with one aliased remote root field per tuple. The relationship is
+visible when both the REST response field and the remote query field are visible to the
+role. Remote errors use `extensions.code` `remote-schema-error` at the relationship's
+response path.
 
 A `@table` type can use `@rest` to fetch a field using its parent row.
 

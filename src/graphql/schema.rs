@@ -26,6 +26,7 @@ pub(super) fn directives<'a>(
             "column" | "response_header" => &["name"],
             "body" => &[],
             "relation" => &["columns", "references"],
+            "remote_relation" => &["schema", "field", "arguments"],
             "aggregate" => &["target"],
             "list" => &[],
             "permission" => &[
@@ -1135,7 +1136,10 @@ pub(super) fn for_role(
                 });
             }
             object.fields.retain(|f| {
-                names.contains(named(&f.node.ty.node))
+                (names.contains(named(&f.node.ty.node))
+                    || rest
+                        .remote_relations
+                        .contains_key(&(name.clone(), f.node.name.node.to_string())))
                     && rest
                         .fields
                         .get(&(name.clone(), f.node.name.node.to_string()))

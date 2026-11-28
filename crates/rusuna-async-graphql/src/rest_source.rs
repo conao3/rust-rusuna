@@ -785,6 +785,7 @@ pub(super) struct RestRuntime {
     sources: BTreeMap<String, RestSource>,
     inputs: BTreeMap<String, InputObjectType>,
     enums: BTreeMap<String, BTreeSet<String>>,
+    remote_relations: BTreeMap<(String, String), remote::Relation>,
     multiplexed: relation::MultiplexedCache,
 }
 
@@ -799,8 +800,12 @@ impl RestRuntime {
         schema: &rusuna::Schema,
         sources: Vec<RestSource>,
         types: &BTreeMap<String, TypeKind>,
+        remote_relations: BTreeMap<(String, String), remote::Relation>,
     ) -> Result<Self, Error> {
-        let mut runtime = Self::default();
+        let mut runtime = Self {
+            remote_relations,
+            ..Self::default()
+        };
         for source in sources {
             let name = source.name.clone();
             if runtime.sources.insert(name.clone(), source).is_some() {
@@ -840,11 +845,17 @@ impl RestRuntime {
             .relations
             .get(&(owner.into(), name.clone()))
             .map(|relation| relation.list);
+        let remote_shape = shared
+            .rest
+            .remote_relations
+            .get(&(owner.into(), name.clone()))
+            .map(remote::Relation::shape);
+        let related_shape = relation.map(|_| Shape::Object).or(remote_shape);
         let response = catalog
             .response_fields
             .get(owner)
             .and_then(|fields| fields.get(&name));
-        if call.is_none() && key.is_none() && relation.is_none() && response.is_none() {
+        if call.is_none() && key.is_none() && related_shape.is_none() && response.is_none() {
             return filter::aggregate_field(shared, owner, definition);
         }
         let table = call.is_some_and(|call| call.table_columns.is_some());
@@ -862,16 +873,24 @@ impl RestRuntime {
             let owner = owner.clone();
             FieldFuture::new(async move {
                 let state = ctx.data::<RestRequest>()?;
-                if let Some(list) = relation {
+                if let Some(shape) = related_shape {
                     let row = ctx.parent_value.try_downcast_ref::<RestRow>()?;
-                    return match row.relations.get(&path_key(ctx.path_node.as_ref())) {
-                        Some(Ok(value)) => Ok(borrowed(value, Shape::Object)),
+                    let path = path_key(ctx.path_node.as_ref());
+                    return match row.relations.get(&path) {
+                        Some(Ok(value)) => {
+                            if remote_shape.is_some() {
+                                remote_nulls(&ctx, state, path, &spec.ty.node, value);
+                            }
+                            Ok(borrowed(value, shape))
+                        }
                         Some(Err(error)) => {
                             report(&ctx, error.clone(), &[]);
-                            state.null_at(path_key(ctx.path_node.as_ref()));
+                            state.null_at(path);
                             Ok(None)
                         }
-                        None if list => Ok(Some(FieldValue::list([] as [FieldValue<'_>; 0]))),
+                        None if relation == Some(true) => {
+                            Ok(Some(FieldValue::list([] as [FieldValue<'_>; 0])))
+                        }
                         None => Ok(None),
                     };
                 }
@@ -934,7 +953,7 @@ impl RestRuntime {
                                     &shared,
                                     &ctx,
                                     call,
-                                    session(&shared, &ctx)?,
+                                    session(&shared.role, &ctx)?,
                                 )?;
                                 shared
                                     .rest
@@ -992,7 +1011,7 @@ impl RestRuntime {
         let catalog = shared.schema.rest_catalog();
         let field = &catalog.fields[&(owner.into(), definition.name.node.to_string())];
         let source = &self.sources[&field.source];
-        let session = session(shared, ctx)?;
+        let session = session(&shared.role, ctx)?;
         let plan = filter::Plan::new(shared, ctx, field, session)?;
         let omitted = |syntax: Option<&InputSyntax>| {
             matches!(syntax, Some(InputSyntax::Variable(name)) if !state.provided_variables.contains(name)
@@ -1173,7 +1192,7 @@ impl RestRuntime {
     ) -> async_graphql::Result<Option<FieldValue<'static>>> {
         let catalog = shared.schema.rest_catalog();
         let state = ctx.data::<RestRequest>()?;
-        let session = session(shared, ctx)?;
+        let session = session(&shared.role, ctx)?;
         let mut slot;
         let connection = if let Some(transaction_state) = transaction_state {
             transaction_state.transaction.as_deref_mut()
@@ -1397,4 +1416,44 @@ fn report(ctx: &ResolverContext<'_>, error: async_graphql::Error, indices: &[usi
         .path
         .extend(indices.iter().copied().map(PathSegment::Index));
     ctx.add_error(error);
+}
+
+fn remote_nulls(
+    ctx: &ResolverContext<'_>,
+    state: &RestRequest,
+    path: String,
+    ty: &Type,
+    value: &Json,
+) {
+    if value.is_null() && !ty.nullable {
+        report(
+            ctx,
+            coded(
+                "the remote relationship returned null",
+                "remote-schema-error",
+            ),
+            &[],
+        );
+        state.null_at(path);
+    } else if let BaseType::List(inner) = &ty.base
+        && let Some(values) = value.as_array()
+    {
+        for (index, _) in values
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| value.is_null())
+        {
+            if !inner.nullable {
+                report(
+                    ctx,
+                    coded(
+                        "the remote relationship returned a null list item",
+                        "remote-schema-error",
+                    ),
+                    &[index],
+                );
+            }
+            state.null_at(format!("{path}.{index}"));
+        }
+    }
 }

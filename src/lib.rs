@@ -29,7 +29,8 @@ pub use mutation::*;
 
 pub use graphql::rest::{
     BodyTemplate, RestBatch, RestCatalog, RestColumn, RestField, RestMethod, RestPagination,
-    RestPaginationMode, RestPermission, RestRelation, RestResponseField, Template, TemplatePart,
+    RestPaginationMode, RestPermission, RestRelation, RestRemoteRelation, RestResponseField,
+    Template, TemplatePart,
 };
 pub use graphql::{CompiledField, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_DEPTH, RestRelationQuery};
 

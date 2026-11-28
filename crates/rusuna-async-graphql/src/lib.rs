@@ -223,6 +223,19 @@ impl Builder {
                 }
             }
         }
+        let remote_names: BTreeSet<_> = self
+            .remotes
+            .iter()
+            .filter(|remote| remote.serves(&self.role))
+            .map(RemoteSchema::name)
+            .collect();
+        for ((owner, field), relation) in &self.schema.rest_catalog().remote_relations {
+            if !remote_names.contains(relation.schema.as_str())
+                && let Some(TypeKind::Object(object)) = definitions.get_mut(owner)
+            {
+                object.fields.retain(|f| f.node.name.node != field.as_str());
+            }
+        }
         prune(&mut definitions);
         let mut children = BTreeMap::new();
         let mut arguments = BTreeMap::new();
@@ -253,7 +266,34 @@ impl Builder {
                 }
             }
         }
-        let rest = rest_source::RestRuntime::new(&self.schema, self.rest, &definitions)?;
+        let root_names = |root: &str| -> BTreeSet<String> {
+            match definitions.get(root) {
+                Some(TypeKind::Object(object)) => object
+                    .fields
+                    .iter()
+                    .map(|f| f.node.name.node.to_string())
+                    .collect(),
+                _ => BTreeSet::new(),
+            }
+        };
+        let mut taken = remote::Taken {
+            types: definitions.keys().cloned().collect(),
+            query: root_names(&query_name),
+            mutation: root_names(&mutation_name),
+        };
+        let attached = remote::attach(
+            self.remotes,
+            &self.schema.rest_catalog().remote_relations,
+            &self.role,
+            (&query_name, &mutation_name),
+            &mut taken,
+        )?;
+        let rest = rest_source::RestRuntime::new(
+            &self.schema,
+            self.rest,
+            &definitions,
+            attached.relations,
+        )?;
         let columns = if self.extras.is_empty() {
             BTreeMap::new()
         } else {
@@ -346,29 +386,6 @@ impl Builder {
                 extras,
             },
         });
-        let root_names = |root: &str| -> BTreeSet<String> {
-            match definitions.get(root) {
-                Some(TypeKind::Object(object)) => object
-                    .fields
-                    .iter()
-                    .map(|f| f.node.name.node.to_string())
-                    .collect(),
-                _ => BTreeSet::new(),
-            }
-        };
-        let mut taken = remote::Taken {
-            types: definitions.keys().cloned().collect(),
-            query: root_names(&query_name),
-            mutation: root_names(&mutation_name),
-        };
-        let attached = remote::attach(
-            self.remotes
-                .into_iter()
-                .filter(|remote| remote.serves(&shared.role))
-                .collect(),
-            &shared,
-            &mut taken,
-        )?;
         let mut query = Object::new(&query_name);
         let mut mutation = Object::new(&mutation_name);
         let mut has_mutation = false;
@@ -810,25 +827,41 @@ impl Document<'_> {
                     .ok_or_else(|| {
                         async_graphql::Error::new(format!("unknown argument {parent}.{name}.{key}"))
                     })?;
-                let variable = format!("v{}", self.definitions.len());
                 if i > 0 {
                     self.text.push(' ');
                 }
-                write!(self.text, "{key}: ${variable}")?;
-                self.definitions.push(format!("${variable}: {ty}"));
-                self.variables.insert(variable, value.into_json()?);
+                self.argument(key.as_str(), ty, value.into_json()?)?;
             }
             self.text.push(')');
         }
         if let Some(child) = child {
-            self.text.push_str(" {");
-            let start = self.text.len();
-            self.selection(child, field)?;
-            if self.text.len() == start {
-                self.text.push_str(" __typename");
-            }
-            self.text.push_str(" }");
+            self.selection_body(child, std::slice::from_ref(field))?;
         }
+        Ok(())
+    }
+
+    fn argument(&mut self, name: &str, ty: &str, value: Json) -> async_graphql::Result<()> {
+        let variable = format!("v{}", self.definitions.len());
+        write!(self.text, "{name}: ${variable}")?;
+        self.definitions.push(format!("${variable}: {ty}"));
+        self.variables.insert(variable, value);
+        Ok(())
+    }
+
+    fn selection_body(
+        &mut self,
+        parent: &str,
+        fields: &[SelectionField<'_>],
+    ) -> async_graphql::Result<()> {
+        self.text.push_str(" {");
+        let start = self.text.len();
+        for field in fields {
+            self.selection(parent, field)?;
+        }
+        if self.text.len() == start {
+            self.text.push_str(" __typename");
+        }
+        self.text.push_str(" }");
         Ok(())
     }
 
@@ -940,17 +973,17 @@ impl Slot {
 }
 
 fn session<'a>(
-    shared: &Shared,
+    role: &str,
     ctx: &ResolverContext<'a>,
 ) -> async_graphql::Result<&'a rusuna::Session> {
     let session = ctx
         .data::<rusuna::Session>()
         .map_err(|_| coded("the request carries no rusuna::Session", "access-denied"))?;
-    if session.role != shared.role {
+    if session.role != role {
         return Err(coded(
             format!(
-                "the session role {} does not match the schema role {}",
-                session.role, shared.role
+                "the session role {} does not match the schema role {role}",
+                session.role
             ),
             "access-denied",
         ));
@@ -963,7 +996,7 @@ async fn subscribe<'a>(
     root: &Root,
     ctx: &ResolverContext<'a>,
 ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<FieldValue<'a>>> + use<'a>> {
-    let session = session(shared, ctx)?;
+    let session = session(&shared.role, ctx)?;
     let (text, variables, has_table_rest) = render(shared, root, &ctx.ctx.field())?;
     if has_table_rest {
         return Err(coded(
@@ -1029,7 +1062,7 @@ async fn resolve_root(
     root: &Root,
     ctx: &ResolverContext<'_>,
 ) -> async_graphql::Result<Option<FieldValue<'static>>> {
-    let session = session(shared, ctx)?;
+    let session = session(&shared.role, ctx)?;
     let pool = ctx.data::<PgPool>()?;
     if root.operation == Operation::Query {
         let (text, variables, has_table_rest) = render(shared, root, &ctx.ctx.field())?;

@@ -11,6 +11,7 @@ pub struct RestCatalog {
     pub fields: BTreeMap<(String, String), RestField>,
     pub objects: BTreeMap<String, BTreeMap<String, RestColumn>>,
     pub relations: BTreeMap<(String, String), RestRelation>,
+    pub remote_relations: BTreeMap<(String, String), RestRemoteRelation>,
     pub response_fields: BTreeMap<String, BTreeMap<String, RestResponseField>>,
     pub permissions: BTreeMap<String, BTreeMap<String, RestPermission>>,
     pub aggregate_types: BTreeSet<String>,
@@ -43,6 +44,14 @@ pub struct RestRelation {
     pub columns: Vec<String>,
     pub references: Vec<String>,
     pub list: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestRemoteRelation {
+    pub schema: String,
+    pub field: String,
+    pub arguments: BTreeMap<String, Template>,
+    pub output: Type,
 }
 
 #[derive(Debug, Clone)]
@@ -544,6 +553,53 @@ fn template_fields(template: &Template) -> impl Iterator<Item = &str> {
     })
 }
 
+fn remote_relation(
+    directive: &ConstDirective,
+    output: &Type,
+    parents: &BTreeSet<&str>,
+) -> Result<RestRemoteRelation, Error> {
+    let invalid = |message| error(directive.name.pos, message);
+    let arguments = match directive.get_argument("arguments") {
+        None => BTreeMap::new(),
+        Some(value) => {
+            let ConstValue::Object(values) = &value.node else {
+                return Err(invalid("@remote_relation arguments must be an object"));
+            };
+            values
+                .iter()
+                .map(|(name, value)| {
+                    let ConstValue::String(text) = value else {
+                        return Err(invalid(
+                            "@remote_relation arguments must be template strings",
+                        ));
+                    };
+                    let template = Template::parse(text).map_err(invalid)?;
+                    for part in &template.0 {
+                        match part {
+                            TemplatePart::Field(name) => {
+                                check_template_field(name, parents, directive.name.pos)?;
+                            }
+                            TemplatePart::Session(_) => {
+                                return Err(invalid(
+                                    "@remote_relation templates use parent fields",
+                                ));
+                            }
+                            TemplatePart::Literal(_) => {}
+                        }
+                    }
+                    Ok((name.to_string(), template))
+                })
+                .collect::<Result<_, _>>()?
+        }
+    };
+    Ok(RestRemoteRelation {
+        schema: string(directive, "schema")?,
+        field: string(directive, "field")?,
+        arguments,
+        output: output.clone(),
+    })
+}
+
 fn fields(ty: &TypeDefinition) -> &[Positioned<FieldDefinition>] {
     match &ty.kind {
         TypeKind::Object(object) => &object.fields,
@@ -597,7 +653,17 @@ pub(super) fn load(
             && let Some(object) = objects.get(name)
             && objects_reached.insert(name)
         {
-            pending.extend(fields(&object.node).iter().map(|f| named(&f.node.ty.node)));
+            pending.extend(
+                fields(&object.node)
+                    .iter()
+                    .filter(|f| {
+                        !f.node
+                            .directives
+                            .iter()
+                            .any(|d| d.node.name.node == "remote_relation")
+                    })
+                    .map(|f| named(&f.node.ty.node)),
+            );
         }
     }
     let scalar_output = |name: &str| {
@@ -637,7 +703,12 @@ pub(super) fn load(
                 !f.node.directives.iter().any(|d| {
                     matches!(
                         d.node.name.node.as_str(),
-                        "rest" | "relation" | "aggregate" | "body" | "response_header"
+                        "rest"
+                            | "relation"
+                            | "remote_relation"
+                            | "aggregate"
+                            | "body"
+                            | "response_header"
                     )
                 }) && matches!(&f.node.ty.node.base, BaseType::Named(name) if scalar_output(name))
             })
@@ -657,9 +728,32 @@ pub(super) fn load(
                 if root || table {
                     &["rest"]
                 } else {
-                    &["rest", "column", "relation", "body", "response_header"]
+                    &[
+                        "rest",
+                        "column",
+                        "relation",
+                        "remote_relation",
+                        "body",
+                        "response_header",
+                    ]
                 },
             )?;
+            if let Some(directive) = d.get("remote_relation") {
+                if d.len() != 1
+                    || !f.node.arguments.is_empty()
+                    || matches!(&f.node.ty.node.base, BaseType::List(inner) if matches!(inner.base, BaseType::List(_)))
+                {
+                    return Err(error(
+                        f.pos,
+                        "@remote_relation requires a remote type or a list of that type and no field arguments",
+                    ));
+                }
+                catalog.remote_relations.insert(
+                    (owner.into(), name.into()),
+                    remote_relation(directive, &f.node.ty.node, &parent_names)?,
+                );
+                continue;
+            }
             if let Some(directive) = d.get("relation") {
                 let list = matches!(f.node.ty.node.base, BaseType::List(_));
                 if d.len() != 1
@@ -1051,10 +1145,14 @@ pub(super) fn uses_date_time(
         )
         .filter(|field| has_rest(&field.node))
         .any(output)
-        || catalog
-            .objects
-            .keys()
-            .any(|name| fields(&objects[name].node).iter().any(output))
+        || catalog.objects.keys().any(|name| {
+            fields(&objects[name].node).iter().any(|field| {
+                !catalog
+                    .remote_relations
+                    .contains_key(&(name.clone(), field.node.name.node.to_string()))
+                    && output(field)
+            })
+        })
         || inputs.values().any(|ty| match &ty.node.kind {
             TypeKind::InputObject(input) => input.fields.iter().any(date_time_arg),
             _ => false,
