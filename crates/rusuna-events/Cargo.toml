@@ -12,7 +12,7 @@ categories = ["database", "web-programming"]
 
 [dependencies]
 chrono = { workspace = true, features = ["clock"] }
-croner = { version = "5.0.0", default-features = false, features = ["chrono"] }
+croner = { version = "5.0.1", default-features = false, features = ["chrono"] }
 rusuna-http-client = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
