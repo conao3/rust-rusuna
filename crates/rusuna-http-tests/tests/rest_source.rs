@@ -41,7 +41,7 @@ const API: &str = r#"
       nonJson: String @rest(source: "api", path: "/non-json")
       badJson: String @rest(source: "api", path: "/bad-json")
       timeout: String @rest(source: "bounded", path: "/slow")
-      tooLarge: String @rest(source: "bounded", path: "/big")
+      tooLarge: String @rest(source: "small", path: "/big")
       disconnected: String @rest(source: "down", path: "/down")
       retried: Int @rest(source: "retry", path: "/retry")
       noRetry: Int @rest(source: "api", path: "/no-retry")
@@ -373,9 +373,8 @@ async fn api_sources(base: &str) -> Vec<RestSource> {
     vec![
         config("api", base),
         config("expose", base).expose_error_body(true),
-        config("bounded", base)
-            .timeout(Duration::from_millis(100))
-            .max_body_bytes(32),
+        config("bounded", base).timeout(Duration::from_millis(100)),
+        config("small", base).max_body_bytes(32),
         config("down", &down),
         config("retry", base).retry(2, Duration::from_millis(1)),
     ]
