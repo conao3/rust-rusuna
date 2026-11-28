@@ -20,6 +20,7 @@ use serde_json::{Map, Value as Json};
 use sqlx::encode::IsNull;
 use sqlx::error::BoxDynError;
 use sqlx::postgres::{PgArgumentBuffer, PgArguments, PgConnection, PgPool, PgTypeInfo, Postgres};
+use sqlx::types::{BigDecimal, Uuid};
 use sqlx::{Arguments, AssertSqlSafe, Either, Encode, Executor, Row, SqlSafeStr, Statement, Type};
 use std::fmt;
 
@@ -87,6 +88,8 @@ const VARCHAR: u32 = 1043;
 const DATE: u32 = 1082;
 const TIMESTAMP: u32 = 1114;
 const TIMESTAMPTZ: u32 = 1184;
+const NUMERIC: u32 = 1700;
+const UUID: u32 = 2950;
 
 struct Bound<'a> {
     value: &'a Value,
@@ -147,6 +150,9 @@ impl Encode<'_, Postgres> for Bound<'_> {
                 <f32 as Encode<Postgres>>::encode_by_ref(&(*v as f32), buf)
             }
             (Value::Float(v), FLOAT8) => <f64 as Encode<Postgres>>::encode_by_ref(v, buf),
+            (Value::Int(v), NUMERIC) => BigDecimal::from(*v).encode_by_ref(buf),
+            (Value::Float(v), NUMERIC) => v.to_string().parse::<BigDecimal>()?.encode_by_ref(buf),
+            (Value::Text(v), UUID) => Uuid::parse_str(v)?.encode_by_ref(buf),
             (Value::Text(v), TEXT | VARCHAR | BPCHAR | NAME) => {
                 <&str as Encode<Postgres>>::encode_by_ref(&v.as_str(), buf)
             }

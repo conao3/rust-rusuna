@@ -9,12 +9,21 @@ use std::collections::BTreeSet;
 pub struct RestCatalog {
     pub fields: BTreeMap<(String, String), RestField>,
     pub objects: BTreeMap<String, BTreeMap<String, RestColumn>>,
+    pub relations: BTreeMap<(String, String), RestRelation>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RestColumn {
     pub key: String,
     pub ty: Type,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestRelation {
+    pub target: String,
+    pub columns: Vec<String>,
+    pub references: Vec<String>,
+    pub list: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -360,10 +369,13 @@ pub(super) fn load(
         }
         let mut keys = BTreeMap::new();
         let mut seen = BTreeSet::new();
-        let parent_names = fields
+        let parent_names: BTreeSet<_> = fields
             .iter()
             .filter(|f| {
-                !has_rest(&f.node)
+                !f.node
+                    .directives
+                    .iter()
+                    .any(|d| matches!(d.node.name.node.as_str(), "rest" | "relation"))
                     && matches!(&f.node.ty.node.base, BaseType::Named(name) if scalar_output(name))
             })
             .map(|f| f.node.name.node.as_str())
@@ -374,13 +386,55 @@ pub(super) fn load(
                 return Err(error(f.pos, "reserved or repeated field"));
             }
             let target = named(&f.node.ty.node);
+            let d = directives(
+                &f.node.directives,
+                if root {
+                    &["rest"]
+                } else {
+                    &["rest", "column", "relation"]
+                },
+            )?;
+            if let Some(directive) = d.get("relation") {
+                let list = matches!(f.node.ty.node.base, BaseType::List(_));
+                if d.len() != 1
+                    || !f.node.arguments.is_empty()
+                    || !rows.contains(target)
+                    || !objects[target]
+                        .node
+                        .directives
+                        .iter()
+                        .any(|d| d.node.name.node == "table")
+                    || matches!(&f.node.ty.node.base, BaseType::List(inner) if matches!(inner.base, BaseType::List(_)))
+                {
+                    return Err(error(
+                        f.pos,
+                        "@relation requires a @table type or a list of that type",
+                    ));
+                }
+                let (columns, references) = schema::relation_keys(directive)?;
+                if columns
+                    .iter()
+                    .any(|column| !parent_names.contains(column.as_str()))
+                {
+                    return Err(error(
+                        f.pos,
+                        "REST relationship columns must be scalar fields",
+                    ));
+                }
+                catalog.relations.insert(
+                    (owner.into(), name.into()),
+                    RestRelation {
+                        target: target.into(),
+                        columns,
+                        references,
+                        list,
+                    },
+                );
+                continue;
+            }
             if !scalar_output(target) && !objects_reached.contains(target) {
                 return Err(error(f.pos, format!("invalid REST output type {target}")));
             }
-            let d = directives(
-                &f.node.directives,
-                if root { &["rest"] } else { &["rest", "column"] },
-            )?;
             if let Some(directive) = d.get("rest") {
                 if d.contains_key("column") {
                     return Err(error(f.pos, "@rest and @column apply to different fields"));

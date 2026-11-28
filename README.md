@@ -794,6 +794,29 @@ request from its resolver, with retries disabled. A failing REST mutation rolls 
 PostgreSQL writes from the same operation. PostgreSQL commits after all resolvers finish.
 Successful REST calls take effect upstream and survive a later resolver or commit failure.
 
+A REST response object can use `@relation` to look up rows of a `@table` type.
+
+```graphql
+type Invoice {
+  customerId: Int @column(name: "customer_id")
+  customer: customer @relation(columns: ["customerId"], references: ["id"])
+  orders: [order!]! @relation(columns: ["customerId"], references: ["customerId"])
+}
+```
+
+Put the parent scalar fields in `columns` and the matching table fields in `references`.
+Both object and list relationships accept `where`, `order_by`, `limit`, and `offset`.
+An object returns the first matching row or null. A null key returns null for an object
+or an empty list for a list relationship. The table's read permission controls the
+relationship's visibility, projected columns, rows, and per-parent row limit. A join key
+can refer to a table column the role cannot select.
+
+Provide a `PgPool` in schema data to resolve these relationships. After reading the HTTP
+response, rusuna sends one PostgreSQL statement per relationship alias for up to 100
+distinct non-null keys at a time. A key with an incompatible value returns
+`validation-failed`. PostgreSQL `uuid` keys use GraphQL `String` and `numeric` keys
+use GraphQL `Int` or `Float`, according to the SDL.
+
 `admin` can see every REST field. Other roles see fields that list their role and the
 reachable types. `schema expand-sdl` preserves REST directives and `query compile-sql`
 returns `Error::RestField` for REST roots. Upstream errors use `rest-source-error` with

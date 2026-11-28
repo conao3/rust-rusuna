@@ -546,7 +546,7 @@ fn unsigned(value: &C, pos: Pos) -> Result<u64, Error> {
     Err(error(pos, "pagination requires a nonnegative integer"))
 }
 
-fn scalar(value: &C, ty: &str, pos: Pos) -> Result<Value, Error> {
+pub(super) fn scalar(value: &C, ty: &str, pos: Pos) -> Result<Value, Error> {
     Ok(match value {
         C::Number(v) if ty == "Float" => {
             Value::Float(v.as_f64().ok_or_else(|| error(pos, "invalid float"))?)
@@ -784,6 +784,7 @@ pub(super) fn parse(
     query: &str,
     variables: &serde_json::Value,
     operation_name: Option<&str>,
+    parent: Option<&str>,
 ) -> Result<Vec<Selection>, Error> {
     bounded(query)?;
     let mut pending = vec![(variables, 0usize)];
@@ -838,7 +839,9 @@ pub(super) fn parse(
     if !operation.node.directives.is_empty() {
         return Err(error(operation.pos, "operation directives are unsupported"));
     }
-    rest::reject_operation(rest, &schema.query, &document, &operation.node)?;
+    if parent.is_none() {
+        rest::reject_operation(rest, &schema.query, &document, &operation.node)?;
+    }
     let values = variables
         .as_object()
         .ok_or_else(|| error(operation.pos, "variables must be a JSON object"))?;
@@ -900,11 +903,11 @@ pub(super) fn parse(
     }
     let fields = context.fields(
         &operation.node.selection_set,
-        if operation.node.ty == OperationType::Mutation {
+        parent.unwrap_or(if operation.node.ty == OperationType::Mutation {
             "Mutation"
         } else {
             &schema.query
-        },
+        }),
         0,
     )?;
     if operation.node.ty == OperationType::Subscription && fields.len() != 1 {

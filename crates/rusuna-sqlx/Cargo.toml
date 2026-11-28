@@ -14,5 +14,5 @@ categories = ["database", "web-programming"]
 chrono = { workspace = true }
 rusuna = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { workspace = true }
+sqlx = { workspace = true, features = ["uuid", "bigdecimal"] }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }

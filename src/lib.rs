@@ -28,9 +28,10 @@ mod statement;
 pub use mutation::*;
 
 pub use graphql::rest::{
-    BodyTemplate, RestCatalog, RestColumn, RestField, RestMethod, Template, TemplatePart,
+    BodyTemplate, RestCatalog, RestColumn, RestField, RestMethod, RestRelation, Template,
+    TemplatePart,
 };
-pub use graphql::{CompiledField, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_DEPTH};
+pub use graphql::{CompiledField, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_DEPTH, RestRelationQuery};
 
 use compiler::model;
 use std::collections::BTreeMap;

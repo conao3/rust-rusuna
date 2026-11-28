@@ -1,6 +1,6 @@
 use super::*;
 use async_graphql::extensions::{NextResolve, ResolveInfo};
-use async_graphql::parser::types::InputObjectType;
+use async_graphql::parser::types::{InputObjectType, OperationType};
 use async_graphql::{PathSegment, QueryPathNode};
 use async_graphql_value::Value as InputSyntax;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::sync::Mutex as SyncMutex;
 use std::time::Duration;
 use tokio::sync::{OnceCell, Semaphore};
+
+mod relation;
 
 const ENCODE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -567,6 +569,12 @@ pub(super) struct RestRuntime {
     sources: BTreeMap<String, RestSource>,
     inputs: BTreeMap<String, InputObjectType>,
     enums: BTreeMap<String, BTreeSet<String>>,
+    multiplexed: relation::MultiplexedCache,
+}
+
+struct RestRow {
+    value: Json,
+    relations: Arc<relation::Outcomes>,
 }
 
 impl RestRuntime {
@@ -623,7 +631,11 @@ impl RestRuntime {
         let name = definition.name.node.to_string();
         let call = catalog.fields.get(&(owner.into(), name.clone()));
         let key = catalog.objects.get(owner).and_then(|keys| keys.get(&name));
-        if call.is_none() && key.is_none() {
+        let relation = catalog
+            .relations
+            .get(&(owner.into(), name.clone()))
+            .map(|relation| relation.list);
+        if call.is_none() && key.is_none() && relation.is_none() {
             return None;
         }
         let mutation = call.is_some_and(|call| call.method != RestMethod::Get);
@@ -638,23 +650,44 @@ impl RestRuntime {
             let owner = owner.clone();
             FieldFuture::new(async move {
                 let state = ctx.data::<RestRequest>()?;
-                if let Some(key) = key {
-                    let value = ctx
-                        .parent_value
-                        .downcast_ref::<Json>()
-                        .and_then(|row| row.get(&key.key))
-                        .unwrap_or(&Json::Null);
-                    return Ok(shared
-                        .rest
-                        .output(&shared, &ctx, state, &spec.ty.node, value));
+                if let Some(list) = relation {
+                    let row = ctx.parent_value.try_downcast_ref::<RestRow>()?;
+                    return match row.relations.get(&path_key(ctx.path_node.as_ref())) {
+                        Some(Ok(value)) => Ok(borrowed(value, Shape::Object)),
+                        Some(Err(error)) => {
+                            report(&ctx, error.clone(), &[]);
+                            state.null_at(path_key(ctx.path_node.as_ref()));
+                            Ok(None)
+                        }
+                        None if list => Ok(Some(FieldValue::list([] as [FieldValue<'_>; 0]))),
+                        None => Ok(None),
+                    };
                 }
-                let call = async || shared.rest.call(&shared, &owner, &spec, &ctx, state).await;
+                if let Some(key) = key {
+                    let row = ctx.parent_value.try_downcast_ref::<RestRow>()?;
+                    return Ok(shared.rest.output(
+                        &shared,
+                        &ctx,
+                        state,
+                        &spec.ty.node,
+                        row.value.get(&key.key).unwrap_or(&Json::Null),
+                        row.relations.clone(),
+                    ));
+                }
                 let result = if mutation {
                     ctx.data::<Arc<Slot>>()?
-                        .resolve(&ctx, async |_| call().await)
+                        .resolve(&ctx, async |slot| {
+                            shared
+                                .rest
+                                .call(&shared, &owner, &spec, &ctx, state, Some(slot))
+                                .await
+                        })
                         .await
                 } else {
-                    call().await
+                    shared
+                        .rest
+                        .call(&shared, &owner, &spec, &ctx, state, None)
+                        .await
                 };
                 match result {
                     Ok(value) => Ok(value),
@@ -682,6 +715,7 @@ impl RestRuntime {
         definition: &FieldDefinition,
         ctx: &ResolverContext<'_>,
         state: &RestRequest,
+        transaction_state: Option<&mut State>,
     ) -> async_graphql::Result<Option<FieldValue<'static>>> {
         let catalog = shared.schema.rest_catalog();
         let field = &catalog.fields[&(owner.into(), definition.name.node.to_string())];
@@ -709,8 +743,8 @@ impl RestRuntime {
                 let column = &keys[name];
                 let value = ctx
                     .parent_value
-                    .downcast_ref::<Json>()
-                    .and_then(|parent| parent.get(&column.key))
+                    .downcast_ref::<RestRow>()
+                    .and_then(|parent| parent.value.get(&column.key))
                     .unwrap_or(&Json::Null);
                 if value.is_null() {
                     return Ok(Json::Null);
@@ -789,7 +823,19 @@ impl RestRuntime {
                 .iter()
                 .try_fold(json, |value, key| value.get(key).ok_or_else(unexpected))?,
         };
-        Ok(self.output(shared, ctx, state, ty, value))
+        let mut slot;
+        let connection = if let Some(transaction_state) = transaction_state {
+            transaction_state.transaction.as_deref_mut()
+        } else if ctx.query_env.operation.node.ty == OperationType::Mutation
+            && !catalog.relations.is_empty()
+        {
+            slot = ctx.data::<Arc<Slot>>()?.state.lock().await;
+            slot.transaction.as_deref_mut()
+        } else {
+            None
+        };
+        let relations = relation::collect(shared, ctx, ty, value, session, connection).await;
+        Ok(self.output(shared, ctx, state, ty, value, Arc::new(relations)))
     }
 
     fn argument(
@@ -893,6 +939,7 @@ impl RestRuntime {
         state: &RestRequest,
         ty: &Type,
         value: &Json,
+        relations: Arc<relation::Outcomes>,
     ) -> Option<FieldValue<'static>> {
         let mut output = Output {
             rest: self,
@@ -900,6 +947,7 @@ impl RestRuntime {
             ctx,
             state,
             indices: Vec::new(),
+            relations,
         };
         match output.convert(ty, value) {
             Ok(value) => value,
@@ -917,6 +965,7 @@ struct Output<'a, 'ctx> {
     ctx: &'a ResolverContext<'ctx>,
     state: &'a RestRequest,
     indices: Vec<usize>,
+    relations: Arc<relation::Outcomes>,
 }
 
 impl Output<'_, '_> {
@@ -972,7 +1021,12 @@ impl Output<'_, '_> {
         if self.catalog.objects.contains_key(name) {
             return value
                 .is_object()
-                .then(|| FieldValue::owned_any(value.clone()))
+                .then(|| {
+                    FieldValue::owned_any(RestRow {
+                        value: value.clone(),
+                        relations: self.relations.clone(),
+                    })
+                })
                 .ok_or_else(unexpected);
         }
         self.rest

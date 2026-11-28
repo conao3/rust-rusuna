@@ -1,6 +1,6 @@
 use crate::{
-    BOOL, BPCHAR, Bound, DATE, Error, FLOAT4, FLOAT8, INT2, INT4, INT8, NAME, TEXT, TIMESTAMP,
-    TIMESTAMPTZ, VARCHAR, timestamp, timestamptz,
+    BOOL, BPCHAR, Bound, DATE, Error, FLOAT4, FLOAT8, INT2, INT4, INT8, NAME, NUMERIC, TEXT,
+    TIMESTAMP, TIMESTAMPTZ, UUID, VARCHAR, timestamp, timestamptz,
 };
 use chrono::{Datelike, NaiveDate, NaiveDateTime, TimeDelta};
 use rusuna::{Compiled, Value};
@@ -152,6 +152,8 @@ fn cast(ty: &PgTypeInfo) -> Option<&'static str> {
         DATE => "date",
         TIMESTAMP => "timestamp",
         TIMESTAMPTZ => "timestamptz",
+        NUMERIC => "numeric",
+        UUID => "uuid",
         _ => return None,
     })
 }
@@ -160,12 +162,13 @@ fn text(value: &Value, ty: &PgTypeInfo) -> Option<Json> {
     let text = match (value, ty.oid()?.0) {
         (Value::Null, _) => return Some(Json::Null),
         (Value::Bool(v), BOOL) => v.to_string(),
-        (Value::Int(v), INT2 | INT4 | INT8) => v.to_string(),
+        (Value::Int(v), INT2 | INT4 | INT8 | NUMERIC) => v.to_string(),
         (Value::Int(v), FLOAT4) => (*v as f32).to_string(),
         (Value::Int(v), FLOAT8) => (*v as f64).to_string(),
         (Value::Float(v), FLOAT4) => (*v as f32).to_string(),
-        (Value::Float(v), FLOAT8) => v.to_string(),
+        (Value::Float(v), FLOAT8 | NUMERIC) => v.to_string(),
         (Value::Text(v), TEXT | VARCHAR | BPCHAR | NAME) => v.clone(),
+        (Value::Text(v), UUID) => sqlx::types::Uuid::parse_str(v).ok()?.to_string(),
         (Value::Text(v), TIMESTAMPTZ) => datetime_text(timestamptz(v)?.naive_utc(), "+00")?,
         (Value::Text(v), TIMESTAMP) => datetime_text(timestamp(v)?, "")?,
         (Value::Text(v), DATE) => {

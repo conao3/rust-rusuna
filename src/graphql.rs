@@ -5,6 +5,7 @@ mod writes;
 
 use crate::{Compiled, Error, Schema, Selection, Session};
 use async_graphql_parser::{Pos, types::*};
+use serde_json::Value as Json;
 use std::collections::BTreeMap;
 
 pub const MAX_DOCUMENT_BYTES: usize = 1_048_576;
@@ -59,6 +60,7 @@ impl Schema {
                 query,
                 variables,
                 operation_name,
+                None,
             );
         }
         query::parse(
@@ -73,6 +75,7 @@ impl Schema {
             query,
             variables,
             operation_name,
+            None,
         )
     }
 
@@ -102,10 +105,117 @@ impl Schema {
             .collect()
     }
 
+    pub fn rest_relation_query(
+        &self,
+        parent: &str,
+        query: &str,
+        variables: &Json,
+        session: &Session,
+    ) -> Result<RestRelationQuery<'_>, Error> {
+        use crate::compiler::model;
+
+        let document = self.document()?;
+        let role = schema::for_role(
+            document,
+            &self.model,
+            &self.writes,
+            &self.rest,
+            &session.role,
+        );
+        let mut selections = query::parse(&role, &self.rest, query, variables, None, Some(parent))?;
+        let [selection] = selections.as_mut_slice() else {
+            return Err(error(Pos::default(), "expected one REST relationship"));
+        };
+        let relation = self
+            .rest
+            .relations
+            .get(&(parent.into(), selection.name.clone()))
+            .ok_or_else(|| error(Pos::default(), "expected a REST relationship"))?;
+        query::check_session(document, session)?;
+        let mut schema = self.model.clone();
+        schema.roots = vec![model::RootField {
+            field: selection.name.clone(),
+            target: relation.target.clone(),
+            kind: model::RootKind::List,
+            body: None,
+        }];
+        if !relation.list {
+            selection.limit = Some(selection.limit.unwrap_or(1).min(1));
+        }
+        let plan = model::resolve(
+            schema,
+            crate::session_model(session),
+            crate::selection_model(selection, 0)?,
+        )
+        .map_err(crate::error_from_model)?;
+        Ok(RestRelationQuery {
+            schema: self,
+            relation,
+            plan,
+        })
+    }
+
     fn document(&self) -> Result<&DocumentSchema, Error> {
         self.document
             .as_ref()
             .ok_or_else(|| error(Pos::default(), "text compilation requires Schema::from_sdl"))
+    }
+}
+
+pub struct RestRelationQuery<'a> {
+    schema: &'a Schema,
+    relation: &'a crate::RestRelation,
+    plan: crate::compiler::model::Query,
+}
+
+impl RestRelationQuery<'_> {
+    pub fn compile(&self, key: &[&Json]) -> Result<Compiled, Error> {
+        use crate::compiler::model;
+
+        let pos = Pos::default();
+        let document = self.schema.document()?;
+        let relation = self.relation;
+        if key.len() != relation.references.len() {
+            return Err(error(pos, "wrong number of REST relationship keys"));
+        }
+        let filters = relation
+            .references
+            .iter()
+            .zip(key)
+            .map(|(reference, value)| {
+                let ty = &document.row_types[&(relation.target.clone(), reference.clone())];
+                let value = async_graphql_value::ConstValue::from_json((*value).clone())
+                    .map_err(|e| error(pos, e.to_string()))?;
+                let value = query::coerce(
+                    document,
+                    value,
+                    &Type::new(&format!("{ty}!")).unwrap(),
+                    true,
+                    pos,
+                    0,
+                )?;
+                Ok(crate::Filter::Compare {
+                    field: reference.clone(),
+                    op: crate::Comparison::Eq,
+                    value: query::scalar(&value, ty, pos)?,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let schema = self.schema.model.clone();
+        let table = model::find_table(schema.clone(), &relation.target).unwrap();
+        let join = model::resolve_filter(
+            schema,
+            table,
+            Some(crate::filter_model(&crate::Filter::And(filters), 0)?),
+        )
+        .map_err(crate::error_from_model)?;
+        let mut plan = self.plan.clone();
+        plan.scan = model::append_condition(plan.scan, join);
+        let compiled = model::compile(plan);
+        Ok(Compiled {
+            sql: compiled.sql,
+            params: compiled.params.into_iter().map(crate::value).collect(),
+        })
     }
 }
 

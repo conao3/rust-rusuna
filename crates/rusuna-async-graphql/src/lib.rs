@@ -804,6 +804,17 @@ impl Document<'_> {
         }
         Ok(())
     }
+    fn finish(self, operation: &str) -> (String, Json) {
+        let definitions = if self.definitions.is_empty() {
+            String::new()
+        } else {
+            format!("({})", self.definitions.join(", "))
+        };
+        (
+            format!("{operation}{definitions} {{ {} }}", self.text),
+            Json::Object(self.variables),
+        )
+    }
 }
 
 fn render(
@@ -829,15 +840,7 @@ fn render(
         omit_null: false,
     };
     document.field(parent, field, child, None)?;
-    let definitions = if document.definitions.is_empty() {
-        String::new()
-    } else {
-        format!("({})", document.definitions.join(", "))
-    };
-    Ok((
-        format!("{operation}{definitions} {{ {} }}", document.text),
-        Json::Object(document.variables),
-    ))
+    Ok(document.finish(operation))
 }
 
 #[derive(Default)]

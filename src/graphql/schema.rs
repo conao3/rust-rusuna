@@ -88,6 +88,22 @@ pub(super) fn strings(d: &ConstDirective, key: &str) -> Result<Vec<String>, Erro
         .collect()
 }
 
+pub(super) fn relation_keys(d: &ConstDirective) -> Result<(Vec<String>, Vec<String>), Error> {
+    let columns = strings(d, "columns")?;
+    let references = strings(d, "references")?;
+    if columns.is_empty()
+        || columns.len() != references.len()
+        || columns.iter().collect::<BTreeSet<_>>().len() != columns.len()
+        || references.iter().collect::<BTreeSet<_>>().len() != references.len()
+    {
+        return Err(error(
+            d.name.pos,
+            "relationship columns and references must be nonempty, distinct and equally long",
+        ));
+    }
+    Ok((columns, references))
+}
+
 pub(super) fn insert(
     defs: &mut BTreeMap<String, String>,
     name: String,
@@ -376,7 +392,22 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                 render_type(
                     "type",
                     name,
-                    o.fields.iter().map(|f| render_field(&f.node)).collect(),
+                    o.fields
+                        .iter()
+                        .map(|f| {
+                            let field = f.node.name.node.to_string();
+                            let Some(relation) = rest.relations.get(&(name.clone(), field.clone()))
+                            else {
+                                return render_field(&f.node);
+                            };
+                            targets.insert((name.clone(), field.clone()), relation.target.clone());
+                            let mut ty = f.node.ty.node.clone();
+                            if !relation.list {
+                                ty.nullable = true;
+                            }
+                            format!("  {field}{}: {ty}\n", args(&relation.target, &[]))
+                        })
+                        .collect(),
                 ),
             );
             continue;
@@ -585,19 +616,7 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
                     }
                     roots.push(root_field);
                 } else {
-                    let relation = relation.unwrap();
-                    let columns = strings(relation, "columns")?;
-                    let references = strings(relation, "references")?;
-                    if columns.is_empty()
-                        || columns.len() != references.len()
-                        || columns.iter().collect::<BTreeSet<_>>().len() != columns.len()
-                        || references.iter().collect::<BTreeSet<_>>().len() != references.len()
-                    {
-                        return Err(error(
-                            f.pos,
-                            "relationship columns and references must be nonempty, distinct and equally long",
-                        ));
-                    }
+                    let (columns, references) = relation_keys(relation.unwrap())?;
                     table.relations.push(Relation::new(
                         &field,
                         if aggregate.is_some() {
@@ -645,6 +664,25 @@ pub(super) fn load(sdl: &str) -> Result<Schema, Error> {
         defs.insert(name.clone(), rendered);
         if !root {
             tables.push(table);
+        }
+    }
+    for ((owner, field), relation) in &rest.relations {
+        let declared = scalar_fields.get(&relation.target);
+        if relation.references.iter().any(|reference| {
+            !declared.is_some_and(|columns| columns.iter().any(|(name, _)| name == reference))
+        }) {
+            let TypeKind::Object(object) = &objects[owner].node.kind else {
+                unreachable!()
+            };
+            let field = object
+                .fields
+                .iter()
+                .find(|f| f.node.name.node == field.as_str())
+                .unwrap();
+            return Err(error(
+                field.pos,
+                "REST relationship references must be scalar columns of the target",
+            ));
         }
     }
     let pos = objects[&query].pos;
@@ -1002,11 +1040,20 @@ pub(super) fn for_role(
             }
             object.fields.retain(|f| {
                 names.contains(named(&f.node.ty.node))
-                    && (rest.fields.is_empty()
-                        || rest
-                            .fields
-                            .get(&(name.clone(), f.node.name.node.to_string()))
-                            .is_none_or(|field| field.serves(role)))
+                    && rest
+                        .fields
+                        .get(&(name.clone(), f.node.name.node.to_string()))
+                        .is_none_or(|field| field.serves(role))
+                    && rest
+                        .relations
+                        .get(&(name.clone(), f.node.name.node.to_string()))
+                        .is_none_or(|relation| {
+                            crate::compiler::model::table_visible(
+                                schema.clone(),
+                                role,
+                                &relation.target,
+                            )
+                        })
             });
         }
     }
